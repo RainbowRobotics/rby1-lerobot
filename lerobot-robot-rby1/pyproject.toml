@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_robot_rby1"
+version = "0.1.0"
+description = "LeRobot RB-Y1 robot integration"
+readme = "README.md"
+authors = [
+  { name = "Jinseok Kim", email = "jinseok.kim@rainbow-robotics.com" },
+]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "numpy",
+  "scipy",
+  "lerobot>=0.4",
+  "rby1-sdk",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lerobot_robot_rby1*"]
+exclude = ["*.egg-info"]

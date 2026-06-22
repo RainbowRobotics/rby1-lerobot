@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_teleoperator_rby1"
+version = "0.1.0"
+description = "LeRobot teleoperator integrations for the Rainbow Robotics RB-Y1 (Meta Quest VR + master arm)"
+readme = "README.md"
+authors = [
+  { name = "Jinseok Kim", email = "jinseok.kim@rainbow-robotics.com" },
+]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+keywords = ["lerobot", "teleoperation", "rby1", "rainbow-robotics", "vr", "meta-quest", "robotics"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "numpy",
+  "scipy",
+  "lerobot>=0.4",
+  "lerobot_robot_rby1",
+]
+
+[project.urls]
+Homepage = "https://github.com/RainbowRobotics/lerobot-teleoperator-rby1"
+Repository = "https://github.com/RainbowRobotics/lerobot-teleoperator-rby1"
+Issues = "https://github.com/RainbowRobotics/lerobot-teleoperator-rby1/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lerobot_teleoperator_rby1*"]
+exclude = ["*.egg-info"]
