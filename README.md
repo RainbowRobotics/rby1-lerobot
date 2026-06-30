@@ -6,7 +6,6 @@
 ## Platform Requirements
 - **RB-Y1**: Currently, **only robots version 1.2 or lower are supported.** Support for version 1.3 is coming soon.
 - **Linux**: Tested on Ubuntu 22.04 (x86-64 and ARM64).
-- **Python 3.10 or later**.
 - **Ethernet connection to RPC**: Ethernet connection to the RPC at `192.168.30.1` (or desired IP).
 - **Teleoperation device**: Leader arm connection via 4-Pin MOCO cable to the RB-Y1 UPC(VR-based teleoperation is not currently supported; this feature is coming soon).
 
@@ -45,11 +44,46 @@ by Rainbow Robotics. Key points:
    # This command verifies that the RS485 communication module is connected, but it does not confirm that the actual reader arm is connected.
    ```
 
-### Cameras (Optional)
+## Install LeRobot 🤗
+
+Follow the [LeRobot Installation Guide](https://huggingface.co/docs/lerobot/installation),
+then install the RB-Y1 SDK and plugins.
+
+After completing the LeRobot installation, activate the `lerobot` conda environment:
+```bash
+conda activate lerobot
+```
+
+```bash
+# 1. Create a working directory and move into it
+#    (to avoid accidentally cloning inside the LeRobot package folder)
+mkdir -p ~/rby1-lerobot && cd ~/rby1-lerobot
+
+# 2. Install the RB-Y1 SDK
+pip install rby1-sdk
+
+# 3. Clone this repository
+git clone https://github.com/rainbowrobotics/rby1-lerobot.git
+cd rby1-lerobot
+
+# 4. Install the RB-Y1 robot, teleoperator plugins and dependencies
+pip install -e lerobot-robot-rby1
+pip install -e lerobot-teleoperator-rby1
+pip install pynput lerobot[dataset]
+
+# 5. (for RB-Y1's UPC only) Install pyrealsense2
+#    The official pyrealsense2 package on PyPI does not support ARM64.
+#    A pre-built wheel for the UPC (ARM64, Python 3.12) is included in this repository.
+pip install pyrealsense2-2.56.5-cp312-cp312-linux_aarch64.whl
+```
+
+## Cameras (Optional)
 
 Mount the Intel RealSense cameras and record their serial numbers for the configuration step below.
 
-You can verify the serial numbers using the following command (available after installing LeRobot in the step below):
+> **Note**: Camera bracket accessories are available for purchase. Example photos of camera mounting configurations will be added soon.
+
+You can verify the serial numbers using the following command:
 ```bash
 lerobot-find-cameras realsense # or opencv
 ```
@@ -57,28 +91,6 @@ Alternatively, you can mount and use any camera of your choice. Please refer to 
 
 [LeRobot Camera Guide](https://huggingface.co/docs/lerobot/cameras)
 
-
-## Install LeRobot 🤗
-
-Follow the [LeRobot Installation Guide](https://huggingface.co/docs/lerobot/installation),
-then install the RB-Y1 SDK and plugins:
-
-```bash
-# 1. Install the RB-Y1 SDK
-pip install rby1-sdk
-
-# 2. Clone this repository
-git clone https://github.com/rainbowrobotics/rby1-lerobot.git
-cd rby1-lerobot
-
-# 3. Install the RB-Y1 robot, teleoperator plugins and dependencies
-pip install -e lerobot-robot-rby1
-pip install -e lerobot-teleoperator-rby1
-pip install pynput lerobot[dataset]
-
-# 4. (for RB-Y1's UPC only) Install pyrealsense2 — requires Python 3.12 (the UPC default)
-pip install pyrealsense2-2.56.5-cp312-cp312-linux_aarch64.whl
-```
 
 ## Teleoperate
 
