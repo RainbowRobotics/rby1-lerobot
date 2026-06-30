@@ -48,10 +48,12 @@ _ARM_TARGET_GAINS_PC   = (3.0, _PI * 2.0, 150.0, _PI * 80.0)
 
 
 def _default_cameras() -> dict[str, CameraConfig]:
-    """Default RealSense camera layout (front / right / left).
+    """Default camera layout: no cameras.
 
-    The serial numbers are specific to one robot; override
-    ``Rby1Config.cameras`` for a different camera setup.
+    All entries below are commented out, so this returns an empty dict by
+    default. The front / right / left RealSense block is kept as a template —
+    uncomment it (with the correct serial numbers) or override
+    ``Rby1Config.cameras`` to add cameras.
     """
     return {
         # Example RealSense D435 config for one robot. Override with actual serial numbers and desired settings.
@@ -97,8 +99,9 @@ class Rby1Config(RobotConfig):
     # Enable physical Dynamixel gripper (set False for simulation / gripper-less setups)
     use_gripper: bool = True
 
-    # Map of camera name -> CameraConfig. Defaults to the RealSense layout
-    # defined in _default_cameras(); pass {} to disable cameras.
+    # Map of camera name -> CameraConfig. Defaults to no cameras (the
+    # RealSense layout in _default_cameras() is a commented-out template);
+    # pass an explicit dict to enable cameras.
     cameras: dict[str, CameraConfig] = field(default_factory=_default_cameras)
 
     # ── Joint group selection ──────────────────────────────────────────
@@ -180,8 +183,8 @@ class Rby1Config(RobotConfig):
     # catch up gradually rather than snapping to the first target.
     #
     # startup_ramp_duration : seconds over which minimum_time is linearly
-    #   interpolated from startup_min_time → normal value (0.25 s for
-    #   impedance, 0.1 s for position).  Set to 0.0 to disable the ramp.
+    #   interpolated from startup_min_time → normal_min_time.  Set to 0.0 to
+    #   disable the ramp.
     # startup_min_time      : minimum_time (seconds) used at t=0.
     # (Joint mode only; EE commands use ee_dt * min_time_factor_* instead.)
     startup_ramp_duration: float = 5.0

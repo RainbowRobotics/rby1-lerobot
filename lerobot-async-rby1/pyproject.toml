@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_async_inference"
+version = "0.1.0"
+description = "LeRobot async inference (gRPC / GR00T-ZMQ / Pi0.5-ZMQ) for RB-Y1"
+readme = "README.md"
+authors = [
+  { name = "Rainbow Robotics" },
+]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "lerobot>=0.5.2",
+  "grpcio>=1.71.0",
+  "protobuf>=5.29.5",
+  "pyzmq>=26.2.1",
+  "msgpack>=1.0.7,<2.0.0",
+  "matplotlib>=3.10.0",
+  "numpy",
+  "torch",
+]
+
+[project.scripts]
+lerobot-policy-server = "lerobot_async_inference.policy_server:serve"
+lerobot-robot-client = "lerobot_async_inference.robot_client:async_client"
+lerobot-robot-replay = "lerobot_async_inference.robot_replay:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lerobot_async_inference*"]
+exclude = ["*.egg-info"]
