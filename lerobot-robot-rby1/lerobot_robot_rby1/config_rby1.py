@@ -94,6 +94,11 @@ class Rby1Config(RobotConfig):
     # Include joint torques in observation_features
     use_torque: bool = False
 
+    # Include the mobile-base pose in observation_features. The (3, 3) SE(2)
+    # odometry matrix from rby1-sdk is flattened to (base_x.pos, base_y.pos,
+    # base_theta.pos). Requires a model with a base ("a" or "m").
+    use_base_pose: bool = False
+
     # Enable physical Dynamixel gripper (set False for simulation / gripper-less setups)
     use_gripper: bool = True
 

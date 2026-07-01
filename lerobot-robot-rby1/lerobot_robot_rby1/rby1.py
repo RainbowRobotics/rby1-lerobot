@@ -47,6 +47,7 @@ from . import model_probe
 from .config_rby1 import Rby1Config
 from .constants import (
     ARM_DOF,
+    BASE_POSE_NAMES,
     BASE_VEL_NAMES,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
@@ -210,6 +211,15 @@ class Rby1(Robot):
         return {name: float for name in BASE_VEL_NAMES}
 
     @property
+    def _base_pose_ft(self) -> dict[str, type]:
+        # Observation-only: the mobile-base pose (x, y, theta) derived from
+        # the SE(2) odometry matrix. Unlike _base_ft (velocity action keys),
+        # this feeds observation_features.
+        if not self._config.use_base_pose:
+            return {}
+        return {name: float for name in BASE_POSE_NAMES}
+
+    @property
     def _ee_obs_ft(self) -> dict[str, type]:
         # In EE mode the observation additionally exposes the end-effector
         # pose of each enabled group (computed via forward kinematics).
@@ -244,6 +254,7 @@ class Rby1(Robot):
         if self._config.use_torque:
             for name in self._obs_ft:
                 features[f"{name}.torque"] = float
+        features.update(self._base_pose_ft)
         features.update(self._ee_obs_ft)
         features.update(self._cameras_ft)
         return features
@@ -544,6 +555,13 @@ class Rby1(Robot):
         if self._config.use_torque:
             self._read_group(obs, state.torque, model, ".torque")
 
+        # Mobile-base pose: flatten the (3, 3) SE(2) odometry matrix to (x, y, theta).
+        if self._config.use_base_pose:
+            x, y, theta = self._se2_from_odometry(state.odometry)
+            obs[BASE_POSE_NAMES[0]] = x
+            obs[BASE_POSE_NAMES[1]] = y
+            obs[BASE_POSE_NAMES[2]] = theta
+
         # End-effector poses (EE mode): forward kinematics of the enabled groups.
         self._read_ee_observation(obs, state)
 
@@ -582,6 +600,26 @@ class Rby1(Robot):
             left = values[model.left_arm_idx]
             for i, name in enumerate(LEFT_ARM_NAMES):
                 obs[f"{name}{suffix}"] = float(left[i])
+
+    @staticmethod
+    def _se2_from_odometry(odom: np.ndarray) -> tuple[float, float, float]:
+        """Flatten a (3, 3) SE(2) homogeneous transform to (x, y, theta).
+
+        ``odom`` is the wheel-odometry pose reported by rby1-sdk
+        (``RobotState.odometry``): the planar translation sits in the
+        top-right column and a 2D rotation in the top-left block::
+
+            [ cos(t)  -sin(t)   x ]
+            [ sin(t)   cos(t)   y ]
+            [   0        0      1 ]
+
+        ``theta`` is recovered with atan2, so it is wrapped to (-pi, pi].
+        """
+        odom = np.asarray(odom, dtype=np.float64)
+        x = float(odom[0, 2])
+        y = float(odom[1, 2])
+        theta = float(np.arctan2(odom[1, 0], odom[0, 0]))
+        return x, y, theta
 
     def _read_ee_observation(self, obs: dict[str, Any], state: Any) -> None:
         """Add the end-effector pose of each enabled group to ``obs``.

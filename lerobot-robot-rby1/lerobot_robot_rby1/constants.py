@@ -35,6 +35,11 @@ GRIPPER_NAMES: list[str] = ["right_gripper_0", "left_gripper_0"]
 # convention used by LeKiwi: linear x / y (m/s) and yaw rate (rad/s).
 BASE_VEL_NAMES: list[str] = ["x.vel", "y.vel", "theta.vel"]
 
+# Mobile-base pose observation keys, flattened from the (3, 3) SE(2)
+# homogeneous odometry matrix reported by rby1-sdk (RobotState.odometry):
+# planar position x / y (m) and heading theta (rad) in the odometry frame.
+BASE_POSE_NAMES: list[str] = ["base_x.pos", "base_y.pos", "base_theta.pos"]
+
 # End-effector action keys (``action_mode="ee"``): pose of each enabled
 # component in the robot base frame, following the LeRobot EE convention —
 # position in metres plus a rotation vector in radians.
