@@ -31,9 +31,9 @@ Action keys
 
 Key mapping (body frame)
 ------------------------
-    w / s   linear x  + / -   (forward / backward)
-    a / d   linear y  - / +   (left / right)
-    q / e   yaw rate  + / -   (turn left / right)
+    8 / 2   linear x  + / -   (forward / backward)
+    4 / 6   linear y  + / -   (strafe left / right)
+    s / f   yaw rate  + / -   (turn left / right)
 """
 
 from __future__ import annotations
@@ -104,9 +104,9 @@ class Rby1Keyboard(Teleoperator):
         self._is_connected = True
         logger.info(
             "%s connected. Keyboard mobile-base control:\n"
-            "  w/s: linear x +/-\n"
-            "  a/d: linear y -/+\n"
-            "  q/e: yaw rate +/-\n"
+            "  8/2: linear x +/- (forward/backward)\n"
+            "  4/6: linear y +/- (strafe left/right)\n"
+            "  s/f: yaw rate +/- (turn left/right)\n"
             "Release keys to coast to a stop.",
             self,
         )
@@ -168,18 +168,21 @@ class Rby1Keyboard(Teleoperator):
         cfg = self._config
         target = np.zeros(3)
 
-        if "w" in keys:
-            target[0] += cfg.max_linear_speed
+        # Linear velocity — numpad-style direction keys (8/2/4/6).
+        if "8" in keys:
+            target[0] += cfg.max_linear_speed  # forward (+x)
+        if "2" in keys:
+            target[0] -= cfg.max_linear_speed  # backward (-x)
+        if "4" in keys:
+            target[1] += cfg.max_linear_speed  # strafe left (+y)
+        if "6" in keys:
+            target[1] -= cfg.max_linear_speed  # strafe right (-y)
+
+        # Yaw rate — s / f.
         if "s" in keys:
-            target[0] -= cfg.max_linear_speed
-        if "d" in keys:
-            target[1] += cfg.max_linear_speed
-        if "a" in keys:
-            target[1] -= cfg.max_linear_speed
-        if "q" in keys:
-            target[2] += cfg.max_angular_speed
-        if "e" in keys:
-            target[2] -= cfg.max_angular_speed
+            target[2] += cfg.max_angular_speed  # turn left (CCW)
+        if "f" in keys:
+            target[2] -= cfg.max_angular_speed  # turn right (CW)
 
         return target
 
