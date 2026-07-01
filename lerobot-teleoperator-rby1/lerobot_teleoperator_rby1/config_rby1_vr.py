@@ -16,7 +16,6 @@ class Rby1VRConfig(TeleoperatorConfig):
     base); command execution and all Cartesian-impedance tuning live in the
     follower robot's ``Rby1Config`` (``action_mode="ee"``).
     """
-
     # ── Robot connection (read-only: state + FK for latching) ────────
     robot_address: str = "192.168.30.1:50051"
     robot_model: str = "m"  # "a" | "m" | "ub"
