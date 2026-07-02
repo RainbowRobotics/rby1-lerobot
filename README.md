@@ -2,6 +2,9 @@
 
 [Rainbow Robotics RB-Y1](https://www.rainbow-robotics.com/rby1) is a bimanual robot designed for physical AI research. This repository provides a LeRobot plugin for controlling RB-Y1 with a leader arm teleoperation setup, enabling intuitive data collection and experimentation.
 
+## Overview
+<img width="4830" height="1590" alt="Image" src="https://github.com/user-attachments/assets/3eccee9a-d2f0-408e-84a9-a5db1213771f" />
+
 
 ## Platform Requirements
 - **RB-Y1**: Currently, **only robots version 1.2 or lower are supported.** Support for version 1.3 is coming soon.
@@ -79,10 +82,12 @@ pip install pyrealsense2-2.56.5-cp312-cp312-linux_aarch64.whl
 
 ## Cameras (Optional)
 
-Mount the Intel RealSense cameras and record their serial numbers for the configuration step below.
 
-> **Note**: Camera bracket accessories are available for purchase. Example photos of camera mounting configurations will be added soon.
+> **Note**: Camera bracket accessories are available for purchase. Example photos of camera mounting configurations are below.
+<img width="360" height="480" alt="Image" src="https://github.com/user-attachments/assets/e5fb529b-80c6-45f6-b950-dca57087bf3c" />
+<img width="360" height="480" alt="Image" src="https://github.com/user-attachments/assets/b92c4f1f-e2ee-4ce9-b9b6-e77e49c88a99" />
 
+Mount the Intel RealSense cameras and record their serial numbers for the configuration step.
 You can verify the serial numbers using the following command:
 ```bash
 lerobot-find-cameras realsense # or opencv
