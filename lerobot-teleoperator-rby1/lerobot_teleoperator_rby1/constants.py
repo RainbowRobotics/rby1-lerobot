@@ -30,6 +30,12 @@ GRIPPER_NAMES: list[str] = ["right_gripper_0", "left_gripper_0"]
 # and the LeRobot LeKiwi convention: linear x / y (m/s) and yaw rate (rad/s).
 BASE_VEL_NAMES: list[str] = ["x.vel", "y.vel", "theta.vel"]
 
+# Head-pitch action key. The RB-Y1 head has two joints (head_0 = pan/yaw,
+# head_1 = pitch); this names the pitch joint following the follower robot's
+# joint-name convention (a bare joint position, radians), so a later robot-side
+# consumer can read it directly as ``action["head_1"]``.
+HEAD_PITCH_NAME: str = "head_1"
+
 # End-effector action keys emitted by the VR teleoperator (and consumed by
 # the follower robot in action_mode="ee"): pose of each component in the
 # robot base frame, following the LeRobot EE convention — position in metres

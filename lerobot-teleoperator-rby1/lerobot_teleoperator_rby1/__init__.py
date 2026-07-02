@@ -7,9 +7,12 @@ This package provides three teleoperators registered with LeRobot:
                                 end-effector pose actions (executed by the
                                 follower robot in ``action_mode="ee"``),
                                 with optional mobile-base control.
-    * :class:`Rby1Keyboard`  — a keyboard teleoperator that emits mobile-base
-                                velocity actions (executed by the follower
-                                robot's ``send_action``).
+    * :class:`Rby1Keyboard`  — a UDP joystick teleoperator (receives Legion Go
+                                ``joystick_sender.py`` packets over WiFi) that
+                                emits mobile-base velocity actions (executed by
+                                the follower robot's ``send_action``).
+                                Registered as ``rby1_keyboard`` for backward
+                                compatibility.
 
 Use them via the standard LeRobot config registration, e.g. ``--teleop.type
 rby1_vr``, ``--teleop.type rby1_leader_arm`` or ``--teleop.type rby1_keyboard``.

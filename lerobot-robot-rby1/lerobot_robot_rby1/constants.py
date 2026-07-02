@@ -35,10 +35,32 @@ GRIPPER_NAMES: list[str] = ["right_gripper_0", "left_gripper_0"]
 # convention used by LeKiwi: linear x / y (m/s) and yaw rate (rad/s).
 BASE_VEL_NAMES: list[str] = ["x.vel", "y.vel", "theta.vel"]
 
+# Head action key. The head has two joints (head_0 = pan/yaw, head_1 = pitch);
+# only the pitch is exposed as an action (matching the rby1_keyboard teleop),
+# with pan held at its ready value. HEAD_PITCH_INDEX is the pitch's position
+# within the 2-DOF head vector ([head_0, head_1]).
+HEAD_DOF = 2
+HEAD_PITCH_NAME: str = "head_1"
+HEAD_PITCH_INDEX = 1
+
+# Head-pitch position limits (radians). No head bounds are published in the
+# URDF limit tables above, so these are conservative software limits applied to
+# incoming head_1 action values; keep them in sync with the rby1_keyboard
+# teleoperator's head_pitch_min / head_pitch_max defaults.
+HEAD_PITCH_MIN = -0.5
+HEAD_PITCH_MAX = 1.3
+
 # Mobile-base pose observation keys, flattened from the (3, 3) SE(2)
 # homogeneous odometry matrix reported by rby1-sdk (RobotState.odometry):
 # planar position x / y (m) and heading theta (rad) in the odometry frame.
 BASE_POSE_NAMES: list[str] = ["base_x.pos", "base_y.pos", "base_theta.pos"]
+
+# Endpoint-state observation key: a 0/1 latch the operator sets with a joystick
+# trigger button during teleoperation (starts at 0, latches to 1 on the first
+# press, resets to 0 per episode). The rby1_keyboard teleop maintains it in
+# lerobot_robot_rby1.endpoint_state and the robot reads it here when
+# use_endpoint_state is enabled.
+ENDPOINT_STATE_NAME: str = "endpoint_state"
 
 # End-effector action keys (``action_mode="ee"``): pose of each enabled
 # component in the robot base frame, following the LeRobot EE convention —
@@ -88,11 +110,11 @@ LEFT_ARM_Q_MAX = np.array(
 # ---------------------------------------------------------------------------
 
 READY_TORSO = np.deg2rad([0.0, 0.0, 0.0, 20.0, 0.0, 0.0])
-READY_HEAD = np.deg2rad([0.0, 49.0])  # head_0, head_1
+READY_HEAD = np.deg2rad([0.0, 25.0])  # head_0, head_1
 
 # v1.2 (and earlier) arm ready pose.
-READY_RIGHT = np.deg2rad([15.0, -65.0, -15.0, -115.0, 75.0, -65.0, -5.0])
-READY_LEFT = np.deg2rad([15.0, 65.0, 15.0, -115.0, -75.0, -65.0, -5.0])
+READY_RIGHT = np.deg2rad([-10.0, -75.0, -15.0, -90.0, -150.0, -0.0, -10.0])
+READY_LEFT = np.deg2rad([-10.0, 75.0, 15.0, -90.0, 150.0, -0.0, 10.0])
 READY_POSE = np.concatenate([READY_TORSO, READY_RIGHT, READY_LEFT])  # (20,)
 
 # v1.3 arm ready pose: wrist joints (arm_4, arm_5, arm_6) are zeroed.

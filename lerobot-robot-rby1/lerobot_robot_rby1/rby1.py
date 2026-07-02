@@ -10,7 +10,8 @@ Joint layout (Model M, 26-DOF)::
     torso_0 .. torso_5  torso, 6 DOF        (observation only by default)
     right_arm_0 .. _6   right arm, 7 DOF    (obs + action)
     left_arm_0 .. _6    left arm, 7 DOF     (obs + action)
-    head_0, head_1      head                (excluded from obs/action)
+    head_0, head_1      head                (head_1 pitch = optional action
+                                             when use_head; else excluded)
     + two Dynamixel gripper motors (right=0, left=1) on /dev/rby1_gripper
 
 The two arm grippers are exposed as normalised scalars; see
@@ -43,12 +44,18 @@ from lerobot.robots.robot import Robot
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 from . import command_builders as cb
+from . import endpoint_state
 from . import model_probe
 from .config_rby1 import Rby1Config
 from .constants import (
     ARM_DOF,
     BASE_POSE_NAMES,
     BASE_VEL_NAMES,
+    HEAD_PITCH_INDEX,
+    HEAD_PITCH_MAX,
+    HEAD_PITCH_MIN,
+    HEAD_PITCH_NAME,
+    ENDPOINT_STATE_NAME,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
     READY_HEAD,
@@ -96,6 +103,8 @@ class Rby1(Robot):
     In EE mode (``action_mode="ee"``), end-effector poses
     (``<group>_ee.x/y/z/wx/wy/wz``) for each enabled group — including the
     torso when ``use_torso`` is set — plus the enabled grippers.
+    In both modes, the head-pitch target (``head_1``, radians) is an action
+    when ``use_head`` is set.
 
     Example
     -------
@@ -115,6 +124,9 @@ class Rby1(Robot):
         self._config = config
         self._robot = None
         self._model = None
+        # ["<wheel>.vel", ...] observation keys, cached from the model at connect
+        # when use_wheel_velocity is set (empty otherwise / for base-less models).
+        self._wheel_vel_names: list[str] = []
         self._stream = None
         self._gripper: Rby1Gripper | None = None
         self._max_qdot: np.ndarray | None = None
@@ -211,6 +223,14 @@ class Rby1(Robot):
         return {name: float for name in BASE_VEL_NAMES}
 
     @property
+    def _head_ft(self) -> dict[str, type]:
+        # Action-only: the head-pitch target (head_1, radians). Applies to both
+        # joint and EE action modes.
+        if not self._config.use_head:
+            return {}
+        return {HEAD_PITCH_NAME: float}
+
+    @property
     def _base_pose_ft(self) -> dict[str, type]:
         # Observation-only: the mobile-base pose (x, y, theta) derived from
         # the SE(2) odometry matrix. Unlike _base_ft (velocity action keys),
@@ -218,6 +238,23 @@ class Rby1(Robot):
         if not self._config.use_base_pose:
             return {}
         return {name: float for name in BASE_POSE_NAMES}
+
+    @property
+    def _wheel_vel_ft(self) -> dict[str, type]:
+        # Observation-only: the wheel joints' current angular velocity
+        # (state.velocity[model.mobility_idx]). Names are resolved from the model
+        # at connect (empty before connect / for base-less models).
+        if not self._config.use_wheel_velocity:
+            return {}
+        return {name: float for name in self._wheel_vel_names}
+
+    @property
+    def _endpoint_state_ft(self) -> dict[str, type]:
+        # Observation-only: the 0/1 endpoint-state latch published by the
+        # rby1_keyboard teleop (see lerobot_robot_rby1.endpoint_state).
+        if not self._config.use_endpoint_state:
+            return {}
+        return {ENDPOINT_STATE_NAME: float}
 
     @property
     def _ee_obs_ft(self) -> dict[str, type]:
@@ -255,13 +292,15 @@ class Rby1(Robot):
             for name in self._obs_ft:
                 features[f"{name}.torque"] = float
         features.update(self._base_pose_ft)
+        features.update(self._wheel_vel_ft)
+        features.update(self._endpoint_state_ft)
         features.update(self._ee_obs_ft)
         features.update(self._cameras_ft)
         return features
 
     @property
     def action_features(self) -> dict[str, Any]:
-        return {**self._motors_ft, **self._gripper_ft, **self._base_ft}
+        return {**self._motors_ft, **self._gripper_ft, **self._base_ft, **self._head_ft}
 
     # ------------------------------------------------------------------ #
     #  Connection                                                          #
@@ -329,6 +368,7 @@ class Rby1(Robot):
         # 4. Cache the model (joint index arrays) and URDF velocity / acceleration
         #    limits from the dynamics model.
         self._model = self._robot.model()
+        self._wheel_vel_names = self._resolve_wheel_vel_names()
         dyn_model = self._robot.get_dynamics()
         dyn_state = dyn_model.make_state([], self._model.robot_joint_names)
         self._max_qdot = dyn_model.get_limit_qdot_upper(dyn_state)
@@ -403,6 +443,7 @@ class Rby1(Robot):
             self._robot = None
 
         self._model = None
+        self._wheel_vel_names = []
         self._stream = None
         self._max_qdot = None
         self._max_qddot = None
@@ -562,6 +603,17 @@ class Rby1(Robot):
             obs[BASE_POSE_NAMES[1]] = y
             obs[BASE_POSE_NAMES[2]] = theta
 
+        # Wheel angular velocities: state.velocity at the model's mobility joints.
+        if self._config.use_wheel_velocity and self._wheel_vel_names:
+            velocity = np.asarray(state.velocity, dtype=np.float64)
+            wheel_vel = velocity[list(model.mobility_idx)]
+            for name, v in zip(self._wheel_vel_names, wheel_vel):
+                obs[name] = float(v)
+
+        # Endpoint-state latch (0/1) published by the rby1_keyboard teleop.
+        if self._config.use_endpoint_state:
+            obs[ENDPOINT_STATE_NAME] = endpoint_state.get()
+
         # End-effector poses (EE mode): forward kinematics of the enabled groups.
         self._read_ee_observation(obs, state)
 
@@ -600,6 +652,26 @@ class Rby1(Robot):
             left = values[model.left_arm_idx]
             for i, name in enumerate(LEFT_ARM_NAMES):
                 obs[f"{name}{suffix}"] = float(left[i])
+
+    def _resolve_wheel_vel_names(self) -> list[str]:
+        """Return the ``"<wheel>.vel"`` observation keys for the current model.
+
+        The wheel joint names come from the SDK model's ``robot_joint_names`` at
+        the ``mobility_idx`` positions (model "a": right_wheel/left_wheel; model
+        "m": wheel_fr/fl/rr/rl). Returns ``[]`` when wheel velocity is disabled
+        or the model has no base (e.g. "ub"), with a warning in the latter case.
+        """
+        if not self._config.use_wheel_velocity:
+            return []
+        joint_names = list(self._model.robot_joint_names)
+        mobility_idx = list(self._model.mobility_idx)
+        if not mobility_idx:
+            logger.warning(
+                "use_wheel_velocity is set but the model has no mobility joints; "
+                "no wheel-velocity observation will be produced."
+            )
+            return []
+        return [f"{joint_names[i]}.vel" for i in mobility_idx]
 
     @staticmethod
     def _se2_from_odometry(odom: np.ndarray) -> tuple[float, float, float]:
@@ -710,6 +782,7 @@ class Rby1(Robot):
             cbc.set_mobility_command(
                 cb.build_mobility_command(rby, linear, angular, minimum_time)
             )
+        self._maybe_set_head_command(rby, cbc, action, minimum_time)
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
         )
@@ -753,6 +826,9 @@ class Rby1(Robot):
                     rby, linear, angular, cfg.ee_dt * cfg.min_time_factor_wb
                 )
             )
+        self._maybe_set_head_command(
+            rby, cbc, action, cfg.ee_dt * cfg.min_time_factor_wb
+        )
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
         )
@@ -808,6 +884,25 @@ class Rby1(Robot):
             ]
         )
         self._gripper.set_positions(gripper_target)
+
+    def _maybe_set_head_command(
+        self, rby: Any, cbc: Any, action: dict[str, Any], minimum_time: float
+    ) -> None:
+        """Add a head-pitch command to ``cbc`` when head control is enabled.
+
+        Reads the ``head_1`` action value (radians), clips it to the software
+        limits, and commands the head with pan held at its ready value. No-op
+        when ``use_head`` is False or the key is absent (so the head simply
+        holds its current position).
+        """
+        if not self._config.use_head or HEAD_PITCH_NAME not in action:
+            return
+        pitch = float(np.clip(action[HEAD_PITCH_NAME], HEAD_PITCH_MIN, HEAD_PITCH_MAX))
+        head_position = self._ready_head.copy()
+        head_position[HEAD_PITCH_INDEX] = pitch
+        cbc.set_head_command(
+            cb.build_head_command(rby, head_position, minimum_time)
+        )
 
     @staticmethod
     def _base_velocity_from_action(action: dict[str, Any]) -> tuple[np.ndarray, float]:

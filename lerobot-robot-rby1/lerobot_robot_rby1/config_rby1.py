@@ -56,15 +56,16 @@ def _default_cameras() -> dict[str, CameraConfig]:
     return {
         # Example RealSense D435 config for one robot. Override with actual serial numbers and desired settings.
 
-        # "front": RealSenseCameraConfig(
-        #     serial_number_or_name="427622271135", fps=30, width=640, height=480
-        # ),
+        "front": RealSenseCameraConfig(
+            serial_number_or_name="352122274473", fps=30, width=480, height=848, 
+            rotation=Cv2Rotation.ROTATE_90,
+        ),
         # "right": RealSenseCameraConfig(
-        #     serial_number_or_name="230422270977", fps=30, width=480, height=640,
+        #     serial_number_or_name="409122274689", fps=30, width=480, height=640,
         #     rotation=Cv2Rotation.ROTATE_90,
         # ),
         # "left": RealSenseCameraConfig(
-        #     serial_number_or_name="335122272086", fps=30, width=480, height=640,
+        #     serial_number_or_name="409122272738", fps=30, width=480, height=640,
         #     rotation=Cv2Rotation.ROTATE_90,
         # ),
     }
@@ -99,6 +100,19 @@ class Rby1Config(RobotConfig):
     # base_theta.pos). Requires a model with a base ("a" or "m").
     use_base_pose: bool = False
 
+    # Include the wheel joints' current angular velocity in observation_features.
+    # One "<wheel>.vel" key per mobility joint reported by rby1-sdk
+    # (RobotState.velocity[model.mobility_idx]): model "a" has 2 wheels
+    # (right_wheel, left_wheel), model "m" has 4 (wheel_fr/fl/rr/rl). Requires a
+    # model with a base ("a" or "m").
+    use_wheel_velocity: bool = False
+
+    # Include the endpoint-state latch (0/1) in observation_features. Starts at 0
+    # and latches to 1 the moment the operator presses the joystick trigger
+    # button (resets to 0 per episode). The rby1_keyboard teleop publishes it via
+    # lerobot_robot_rby1.endpoint_state and it is read here as "endpoint_state".
+    use_endpoint_state: bool = False
+
     # Enable physical Dynamixel gripper (set False for simulation / gripper-less setups)
     use_gripper: bool = True
 
@@ -112,6 +126,13 @@ class Rby1Config(RobotConfig):
     use_torso: bool = False
     use_right_arm: bool = True
     use_left_arm: bool = True
+
+    # Enable head control. When True, send_action consumes the head-pitch action
+    # key (head_1, radians — produced by the rby1_keyboard teleop) and commands
+    # the head, holding pan (head_0) at its ready value. Incoming pitch is
+    # clipped to [HEAD_PITCH_MIN, HEAD_PITCH_MAX]. Leave False to keep the head
+    # observation/action-free (its historical behaviour).
+    use_head: bool = False
 
     # ── Action mode ────────────────────────────────────────────────────
     # "joint": actions are joint positions (radians) for the enabled arms,
@@ -141,7 +162,7 @@ class Rby1Config(RobotConfig):
     # When True, send_action uses JointImpedanceControlCommandBuilder
     # instead of JointPositionCommandBuilder, yielding compliant behaviour
     # similar to the teleoperation stream.
-    use_impedance: bool = False
+    use_impedance: bool = True
 
     # Joint stiffness (Nm/rad) for the 20 body joints in order:
     #   torso_0…5 (6), right_arm_0…6 (7), left_arm_0…6 (7)

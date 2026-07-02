@@ -329,6 +329,27 @@ def build_body_command(
     return body, has_command
 
 
+def build_head_command(
+    rby: Any,
+    head_position: np.ndarray,
+    minimum_time: float,
+    hold_time: float = _CONTROL_HOLD_TIME,
+) -> Any:
+    """Build a joint-position command for the 2-DOF head ([head_0, head_1]).
+
+    The head is always position-controlled (no impedance mode); ``head_position``
+    is the target ``[pan, pitch]`` in radians.
+    """
+    return (
+        rby.JointPositionCommandBuilder()
+        .set_command_header(
+            rby.CommandHeaderBuilder().set_control_hold_time(hold_time)
+        )
+        .set_position(head_position)
+        .set_minimum_time(minimum_time)
+    )
+
+
 def build_mobility_command(
     rby: Any,
     linear: np.ndarray,
