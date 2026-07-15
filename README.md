@@ -195,8 +195,35 @@ lerobot-record \
 |------|-------------|
 | [`lerobot-robot-rby1/`](lerobot-robot-rby1) | RB-Y1 follower robot plugin (`--robot.type=rby1`) |
 | [`lerobot-teleoperator-rby1/`](lerobot-teleoperator-rby1) | RB-Y1 teleoperator plugins (`--teleop.type=rby1_leader_arm`, `--teleop.type=rby1_vr`) |
+| [`lerobot-robot-rb/`](lerobot-robot-rb) | RB-Series cobot follower robot plugin via `rbpodo` (`--robot.type=rb10`; RB3/RB5 extendable) |
 
 The LeRobot framework is installed as a Python package dependency (`pip install lerobot[dataset]`).
+
+## RB-Series Cobots (RB10)
+
+The [`lerobot-robot-rb`](lerobot-robot-rb) package adds the Rainbow Robotics
+RB-Series collaborative arms as LeRobot robots, starting with the RB10:
+
+```bash
+pip install -e lerobot-robot-rb
+# With the RB-Y1 Dynamixel gripper driver:
+pip install -e "lerobot-robot-rb[gripper-rby1]"
+```
+
+Bring-up is simulation-first (the control-box simulator, no motion):
+
+```bash
+lerobot-record \
+  --robot.type=rb10 \
+  --robot.ip=10.0.2.7 \
+  --robot.operation_mode=simulation \
+  ...
+```
+
+See [`lerobot-robot-rb/README.md`](lerobot-robot-rb/README.md) for the
+configuration reference, the on-hardware safety checklist (required before
+`--robot.operation_mode=real`), and how to extend the package to other
+RB-Series models (RB3/RB5) or grippers.
 
 ## Resources
 

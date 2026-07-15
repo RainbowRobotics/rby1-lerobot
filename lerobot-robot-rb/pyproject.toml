@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_robot_rb"
+version = "0.1.0"
+description = "LeRobot RB-Series cobot (RB3/RB5/RB10) integration via rbpodo"
+readme = "README.md"
+authors = [
+  { name = "Jinseok Kim", email = "jinseok.kim@rainbow-robotics.com" },
+]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "numpy",
+  "lerobot>=0.4",
+  "rbpodo>=0.16.12,<0.17",
+]
+
+[project.optional-dependencies]
+# Required only for gripper_type="rby1_dynamixel" (the RB-Y1 Dynamixel gripper).
+gripper-rby1 = ["rby1-sdk"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lerobot_robot_rb*"]
+exclude = ["*.egg-info"]
