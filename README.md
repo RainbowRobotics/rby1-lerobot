@@ -3,8 +3,7 @@
 [Rainbow Robotics RB-Y1](https://www.rainbow-robotics.com/rby1) is a bimanual robot designed for physical AI research. This repository provides a LeRobot plugin for controlling RB-Y1 with a leader arm teleoperation setup, enabling intuitive data collection and experimentation.
 
 ## Overview
-<img width="4830" height="1590" alt="Image" src="https://github.com/user-attachments/assets/3eccee9a-d2f0-408e-84a9-a5db1213771f" />
-
+<img width="1599" height="905" alt="Image" src="https://github.com/user-attachments/assets/bbea002e-b8b5-4a8b-8aae-a5fb38f830f0" />
 
 ## Platform Requirements
 - **RB-Y1**: Currently, **only robots version 1.2 or lower are supported.** Support for version 1.3 is coming soon.
