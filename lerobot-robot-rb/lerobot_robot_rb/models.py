@@ -19,6 +19,11 @@ DOF = 6
 JOINT_NAMES = [f"joint_{i}" for i in range(DOF)]
 GRIPPER_NAME = "gripper_0"
 
+# End-effector (TCP) pose keys for action_space="ee". Position in metres,
+# orientation as the control box's rx/ry/rz Euler angles in radians at the
+# dataset boundary (rbpodo talks mm / degrees internally).
+EE_NAMES = ["ee_x", "ee_y", "ee_z", "ee_rx", "ee_ry", "ee_rz"]
+
 
 @dataclass(frozen=True)
 class RbModelSpec:
@@ -33,12 +38,19 @@ class RbModelSpec:
 
 
 MODEL_SPECS: dict[str, RbModelSpec] = {
-    # WARNING: the joint limits below are placeholders. Replace them with the
-    # datasheet values of your RB10 variant (e.g. RB10-1300E) before running
-    # in operation_mode="real"; the ready pose must also be validated for
-    # your cell (move_to_ready_on_connect ships disabled for this reason).
+    # RB10-1300 joint ranges from Rainbow Robotics' RB-Series catalogue.
+    # Verify the physical arm's nameplate before real mode and override
+    # joint_limits_deg if it is a different RB10 variant. The ready pose
+    # remains cell-specific and must be validated before use.
     "rb10": RbModelSpec(
-        joint_limits_deg=((-360.0, 360.0),) * DOF,
+        joint_limits_deg=(
+            (-360.0, 360.0),
+            (-360.0, 360.0),
+            (-165.0, 165.0),
+            (-360.0, 360.0),
+            (-360.0, 360.0),
+            (-360.0, 360.0),
+        ),
         default_ready_pose_deg=(0.0, -20.0, 110.0, 0.0, 90.0, 0.0),
         max_joint_speed_deg_s=60.0,
     ),

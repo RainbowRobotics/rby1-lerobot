@@ -1,0 +1,79 @@
+--- index.html
++++ index.html
+@@ -374,6 +374,7 @@
+                                         scale: teleopFrontEnd.getScale(),
+                                         reservedButtonA: teleopFrontEnd.isReservedButtonAActive(),
+                                         reservedButtonB: teleopFrontEnd.isReservedButtonBActive(),
++                                        jog: teleopFrontEnd.getJog ? teleopFrontEnd.getJog() : {},
+                                         device: isVRDevice ? 'VR' : 'Phone',
+                                         message: message
+                                     }
+--- assets/teleop-ui.js
++++ assets/teleop-ui.js
+@@ -9,6 +9,8 @@
+         this.motionEnabled = false;
+         this.reservedButtonAActive = false;
+         this.reservedButtonBActive = false;
++        // Base-frame jog buttons (held = continuous jog on that axis).
++        this.jog = { xPlus: false, xMinus: false, yPlus: false, yMinus: false, zPlus: false, zMinus: false };
+         this.localStats = { position: { x: 0, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 0 }, fps: 0 };
+         this.serverDiagnostics = {};
+ 
+@@ -233,6 +235,15 @@
+                     <div class="reserved-button" id="reservedButtonA">A</div>
+                     <div class="reserved-button" id="reservedButtonB">B</div>
+                 </div>
++
++                <div class="reserved-section" id="jogSection">
++                    <div class="reserved-button" id="jogXMinus">X-</div>
++                    <div class="reserved-button" id="jogXPlus">X+</div>
++                    <div class="reserved-button" id="jogYMinus">Y-</div>
++                    <div class="reserved-button" id="jogYPlus">Y+</div>
++                    <div class="reserved-button" id="jogZMinus">Z-</div>
++                    <div class="reserved-button" id="jogZPlus">Z+</div>
++                </div>
+                 </div>
+ 
+                 <div class="controls">
+@@ -360,6 +371,30 @@
+         reservedButtonB.addEventListener('touchstart', e => handleReservedButtonStart(e, 'B'));
+         document.addEventListener('mouseup', () => handleReservedButtonEnd('B'));
+         document.addEventListener('touchend', () => handleReservedButtonEnd('B'));
++
++        // Base-frame jog buttons: held = true on that key, release = false.
++        const jogButtons = {
++            jogXMinus: 'xMinus', jogXPlus: 'xPlus',
++            jogYMinus: 'yMinus', jogYPlus: 'yPlus',
++            jogZMinus: 'zMinus', jogZPlus: 'zPlus',
++        };
++        Object.entries(jogButtons).forEach(([id, key]) => {
++            const el = this.shadowRoot.getElementById(id);
++            const start = (event) => {
++                event.preventDefault();
++                this.jog[key] = true;
++                el.classList.add('active');
++            };
++            const end = () => {
++                if (!this.jog[key]) return;
++                this.jog[key] = false;
++                el.classList.remove('active');
++            };
++            el.addEventListener('mousedown', start);
++            el.addEventListener('touchstart', start);
++            document.addEventListener('mouseup', end);
++            document.addEventListener('touchend', end);
++        });
+     }
+ 
+     // Public methods to update displays
+@@ -418,6 +453,10 @@
+     isReservedButtonBActive() {
+         return this.reservedButtonBActive;
+     }
++
++    getJog() {
++        return this.jog;
++    }
+ }
+ 
+ // Register the custom element
