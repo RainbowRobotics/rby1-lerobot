@@ -452,7 +452,7 @@ class RbCobot(Robot):
             self._assert_real_state(data.sdata)
 
         # 4. Gripper (config-selected; None when gripper_type="none").
-        self._gripper = make_gripper(cfg)
+        self._gripper = make_gripper(cfg, rb.Cobot(cfg.ip, cfg.command_port))
         if self._gripper is not None:
             self._gripper.connect()
 

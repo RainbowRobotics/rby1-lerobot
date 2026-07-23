@@ -137,6 +137,7 @@ def main() -> None:
 
             try:
                 obs = robot.get_observation()
+                ##### work here #####
                 cur_ee = np.array([obs[k] for k in EE_NAMES], dtype=np.float64)
                 if cmd_pos is None:
                     cmd_pos = cur_ee[:3].copy()

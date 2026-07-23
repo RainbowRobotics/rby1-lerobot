@@ -401,7 +401,9 @@ def controller_pose_to_rb10e_target(
     *,
     user_scale: float,
     position_scale: float = 1.0,
-    z_offset_mm: float = 300.0,
+    x_offset_mm: float = 300.0,
+    y_offset_mm: float = 200.0,
+    z_offset_mm: float = 600.0,
 ) -> FloatArray:
     """Convert an RB-frame controller pose into an RB10E IK target.
 
@@ -453,7 +455,9 @@ def quest_sample_to_rb10e_target(
     controller_quaternion_xyzw: Iterable[float],
     user_scale: float,
     position_scale: float = 1.0,
-    z_offset_mm: float = 300.0,
+    x_offset_mm: float = 300.0,
+    y_offset_mm: float = 200.0,
+    z_offset_mm: float = 600.0,
 ) -> FloatArray:
     """Convert one Quest head/controller sample directly to an RB10E target."""
 
@@ -472,5 +476,7 @@ def quest_sample_to_rb10e_target(
         torso_pose_rb,
         user_scale=user_scale,
         position_scale=position_scale,
+        x_offset_mm=x_offset_mm,
+        y_offset_mm=y_offset_mm,
         z_offset_mm=z_offset_mm,
     )

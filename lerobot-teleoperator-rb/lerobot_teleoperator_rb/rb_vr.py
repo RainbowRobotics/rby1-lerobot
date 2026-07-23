@@ -66,6 +66,7 @@ class RbVr(Teleoperator):
         self._kinematics = RB10EKinematics(
             initial_q_rad=DEFAULT_READY_POSE_RAD,
             iterations=config.ik_iterations,
+            base_damping=2.0,
         )
 
         self._robot_synced = False
@@ -330,6 +331,8 @@ class RbVr(Teleoperator):
                 torso_pose,
                 user_scale=self._user_scale,
                 position_scale=self._config.position_scale,
+                x_offset_mm=self._config.target_x_offset_mm,
+                y_offset_mm=self._config.target_y_offset_mm,
                 z_offset_mm=self._config.target_z_offset_mm,
             )
 
