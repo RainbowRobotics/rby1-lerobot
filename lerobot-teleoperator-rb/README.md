@@ -30,7 +30,7 @@ lerobot-teleoperate \
   --teleop.local_ip=192.168.0.245 \
   --teleop.meta_quest_ip=192.168.0.206 \
   --teleop.send_handshake=true \
-  --fps=35
+  --dataset.fps=35
 ```
 
 팔과 + 그리퍼 사용:
@@ -45,7 +45,7 @@ lerobot-teleoperate \
   --teleop.meta_quest_ip=192.168.0.206 \
   --teleop.send_handshake=true \
   --teleop.use_gripper=true \
-  --fps=35
+  --dataset.fps=35
 ```
 
 
@@ -66,7 +66,7 @@ lerobot-record \
   --dataset.num_episodes=20 \
   --dataset.single_task="Control the RB10 arm and gripper using Meta Quest VR." \
   --dataset.push_to_hub=false \
-  --fps=35
+  --dataset.fps=35
 ```
 
 
