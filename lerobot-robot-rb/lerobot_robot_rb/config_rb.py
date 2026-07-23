@@ -28,10 +28,27 @@ import ipaddress
 import math
 from dataclasses import dataclass, field
 
-from lerobot.cameras import CameraConfig
 from lerobot.robots.config import RobotConfig
 
+from lerobot.cameras import CameraConfig, Cv2Rotation
+from lerobot.cameras.realsense.configuration_realsense import (
+    RealSenseCameraConfig,
+)
+
 from .models import MODEL_SPECS
+
+
+
+def _default_cameras() -> dict[str, CameraConfig]:
+    return {
+        "front": RealSenseCameraConfig(
+            serial_number_or_name="409122274689",
+            fps=30,
+            width=640,
+            height=480,
+            rotation=Cv2Rotation.ROTATE_90,
+        ),
+    }
 
 
 @dataclass
@@ -113,7 +130,7 @@ class RbCobotConfig(RobotConfig):
     gripper_invert: bool = False
 
     # Optional LeRobot cameras. Empty by default.
-    cameras: dict[str, CameraConfig] = field(default_factory=dict)
+    cameras: dict[str, CameraConfig] = field(default_factory=_default_cameras)
 
     @property
     def servo_t1(self) -> float:
