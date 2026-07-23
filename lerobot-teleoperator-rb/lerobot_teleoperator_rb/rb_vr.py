@@ -1,25 +1,38 @@
-"""Meta Quest VR teleoperator for Rainbow Robotics RB10E.
+"""Meta Quest VR teleoperator for Rainbow Robotics RB-Series arms.
 
-Control flow
-------------
-1. VRReceiver retains the latest Meta Quest head/controller state.
-2. Right-A initializes control and optionally calibrates the user workspace scale.
-3. Grip activates arm following.
-4. The controller pose is transformed into an RB10E Cartesian target.
-5. RB10EKinematics converts the Cartesian target into six joint angles.
-6. get_action() returns joint_0 ... joint_5 in radians.
-7. The paired RbCobot follower sends the action to the real robot.
+This module adapts the original hardware-tested RB10E VR control flow to
+the LeRobot Teleoperator interface.
 
-This class never opens a command connection and never sends ServoJ directly.
+Original control behaviour preserved
+------------------------------------
+1. Meta Quest controller/head poses arrive over UDP.
+2. The selected controller is converted into an RB10E Cartesian target.
+3. Pressing the primary button (Right-A by default):
+   - computes the user's reach scale,
+   - arms VR control.
+4. Holding Grip:
+   - first interpolates from the measured robot joints to the current IK
+     solution for five seconds,
+   - then continuously follows the VR target using the original IKLM solver.
+5. Releasing Grip stops ServoJ transmission.
+6. Pressing the secondary button (Right-B by default) disarms control and
+   requires the primary button to be pressed again.
+
+The Teleoperator never opens a second robot connection and never sends
+ServoJ directly. It returns joint actions in radians. The paired RbCobot
+Robot adapter converts radians to degrees and sends one ServoJ command per
+LeRobot control tick.
 """
 
 from __future__ import annotations
 
 import logging
+import math
+import time
+from enum import Enum
 from typing import Any
 
 import numpy as np
-from numpy.typing import NDArray
 
 from lerobot.teleoperators.teleoperator import Teleoperator
 from lerobot.utils.errors import (
@@ -27,212 +40,270 @@ from lerobot.utils.errors import (
     DeviceNotConnectedError,
 )
 
-from lerobot_robot_rb.rb_cobot import get_active_rb_cobot
+from lerobot_robot_rb.models import GRIPPER_NAME, JOINT_NAMES
+from lerobot_robot_rb.rb_cobot import (
+    RbCobot,
+    get_active_rb_cobot,
+)
 
 from .config_rb_vr import RbVrConfig
-from .constants import (
-    DEFAULT_READY_POSE_RAD,
-    GRIPPER_NAME,
-    JOINT_ACTION_NAMES,
-    make_joint_action_features,
-)
 from .frame_transforms import (
     compute_user_scale,
     controller_pose_to_rb10e_target,
-    head_pose_to_torso_pose,
+    head_pose_to_torso,
 )
-from .rb10e_kinematics import RB10EKinematics
-from .vr_receiver import ControllerSnapshot, VRReceiver, VRSnapshot
+from .rb10e_kinematics import RB10E
+from .vr_receiver import (
+    VRButtonEvents,
+    VRControllerState,
+    VRReceiver,
+    VRState,
+)
 
 
 logger = logging.getLogger(__name__)
 
-FloatArray = NDArray[np.float64]
+
+class _ControlState(Enum):
+    """Internal VR arm state machine."""
+
+    IDLE = "idle"
+    STARTUP = "startup"
+    FOLLOWING = "following"
 
 
 class RbVr(Teleoperator):
-    """Meta Quest VR teleoperator emitting RB10E joint targets."""
+    """Meta Quest teleoperator producing RB joint targets in radians."""
 
     config_class = RbVrConfig
     name = "rb_vr"
+
+    # Original RB10E startup transition duration.
+    STARTUP_DURATION_S = 5.0
 
     def __init__(self, config: RbVrConfig) -> None:
         super().__init__(config)
 
         self._config = config
         self._is_connected = False
-        self._receiver: VRReceiver | None = None
 
-        self._kinematics = RB10EKinematics(
-            initial_q_rad=DEFAULT_READY_POSE_RAD,
-            iterations=config.ik_iterations,
-            base_damping=2.0,
+        self._robot: RbCobot | None = None
+        self._receiver: VRReceiver | None = None
+        self._kinematics: RB10E | None = None
+
+        self._initialized = (
+            not config.require_initialization_button
+        )
+        self._control_state = _ControlState.IDLE
+
+        self._user_scale = float(
+            config.default_user_scale
         )
 
-        self._robot_synced = False
-        self._connected_robot: Any = None
-
-        self._last_joint_target = np.asarray(
-            DEFAULT_READY_POSE_RAD,
+        # Last action returned to LeRobot, radians.
+        self._last_action_rad = np.zeros(
+            len(JOINT_NAMES),
             dtype=np.float64,
         )
-        self._last_gripper_target = 1.0
 
-        self._user_scale = float(config.default_user_scale)
+        # Startup interpolation:
+        # measured robot q -> current IK q.
+        self._startup_q_start = np.zeros(
+            len(JOINT_NAMES),
+            dtype=np.float64,
+        )
+        self._startup_q_end = np.zeros(
+            len(JOINT_NAMES),
+            dtype=np.float64,
+        )
+        self._startup_time = 0.0
 
-        self._is_initialized = not config.require_initialization_button
-        self._is_stopped = False
-        self._following = False
+        self._last_waiting_log_time = 0.0
+        self._last_tracking_warning_time = 0.0
 
     # ------------------------------------------------------------------
     # LeRobot properties
     # ------------------------------------------------------------------
 
     @property
+    def is_connected(self) -> bool:
+        return self._is_connected
+
+    @property
+    def is_calibrated(self) -> bool:
+        return True
+
+    @property
     def action_features(self) -> dict[str, type]:
-        return make_joint_action_features(
-            use_gripper=self._config.use_gripper,
-        )
+        features = {
+            name: float
+            for name in JOINT_NAMES
+        }
+
+        if self._config.use_gripper:
+            features[GRIPPER_NAME] = float
+
+        return features
 
     @property
     def feedback_features(self) -> dict[str, type]:
         return {}
 
-    @property
-    def is_connected(self) -> bool:
-        return (
-            self._is_connected
-            and self._receiver is not None
-            and self._receiver.is_running
-        )
-
-    @property
-    def is_calibrated(self) -> bool:
-        # User scale calibration is performed interactively with Right-A.
-        # No persistent motor calibration is required by the VR device.
-        return True
-
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------
 
-    def connect(self, calibrate: bool = True) -> None:  # noqa: ARG002
-        if self._is_connected:
+    def connect(
+        self,
+        calibrate: bool = True,  # noqa: ARG002
+    ) -> None:
+        """Start the Quest receiver.
+
+        LeRobot connects the Teleoperator before the Robot:
+
+            teleop.connect()
+            robot.connect()
+
+        Therefore, the RB robot is resolved lazily during the first
+        get_action() call, after robot.connect() has completed.
+        """
+
+        if self.is_connected:
             raise DeviceAlreadyConnectedError(
                 f"{self} is already connected."
             )
 
-        cfg = self._config
-
         receiver = VRReceiver(
-            local_ip=cfg.local_ip,
-            local_port=cfg.local_port,
-            meta_quest_ip=cfg.meta_quest_ip,
-            meta_quest_port=cfg.meta_quest_port,
-            send_handshake=cfg.send_handshake,
+            local_ip=self._config.local_ip,
+            local_port=self._config.local_port,
+            meta_quest_ip=self._config.meta_quest_ip,
+            meta_quest_port=self._config.meta_quest_port,
+            send_handshake=self._config.send_handshake,
+            tracking_timeout_s=(
+                self._config.tracking_timeout_s
+            ),
         )
 
         try:
             receiver.start()
+
+            # Robot is connected after Teleoperator.connect() by the
+            # standard LeRobot teleoperation script.
+            self._robot = None
+            self._receiver = receiver
+
+            # Pure kinematics object; opens no robot connection.
+            self._kinematics = RB10E()
+
+            self._last_action_rad = np.zeros(
+                len(JOINT_NAMES),
+                dtype=np.float64,
+            )
+
+            self._startup_q_start = np.zeros(
+                len(JOINT_NAMES),
+                dtype=np.float64,
+            )
+            self._startup_q_end = np.zeros(
+                len(JOINT_NAMES),
+                dtype=np.float64,
+            )
+            self._startup_time = 0.0
+
+            self._initialized = (
+                not self._config.require_initialization_button
+            )
+            self._control_state = _ControlState.IDLE
+
+            self._user_scale = float(
+                self._config.default_user_scale
+            )
+
+            self._is_connected = True
+
         except Exception:
             receiver.stop()
-            raise
-
-        self._receiver = receiver
-        self._is_connected = True
-
-        try:
-            self.configure()
-        except Exception:
-            self.disconnect()
+            self._robot = None
+            self._receiver = None
+            self._kinematics = None
+            self._is_connected = False
             raise
 
         logger.info(
-            "%s connected. Waiting for Meta Quest packets on %s:%s.",
+            "%s connected. Waiting for Meta Quest packets on %s:%d.",
             self,
-            cfg.local_ip,
-            receiver.bound_port,
+            self._config.local_ip,
+            self._config.local_port,
         )
 
-        if cfg.require_initialization_button:
+        logger.info(
+            "RB robot will be synchronized after robot.connect() "
+            "during the first teleoperation tick."
+        )
+
+        if self._config.require_initialization_button:
             logger.info(
                 "Press the selected controller's primary button "
                 "to initialize VR control."
             )
+        else:
+            logger.warning(
+                "VR initialization-button requirement is disabled."
+            )
 
     def disconnect(self) -> None:
-        if not self._is_connected and self._receiver is None:
+        if (
+            not self.is_connected
+            and self._receiver is None
+        ):
             return
 
-        receiver = self._receiver
+        if self._robot is not None:
+            try:
+                self._robot.disable_servo_commands()
+            except DeviceNotConnectedError:
+                pass
+
+        if self._receiver is not None:
+            self._receiver.stop()
+
         self._receiver = None
+        self._robot = None
+        self._kinematics = None
 
-        if receiver is not None:
-            receiver.stop()
-
-        self._connected_robot = None
-        self._robot_synced = False
-        self._following = False
+        self._initialized = False
+        self._control_state = _ControlState.IDLE
         self._is_connected = False
 
-        logger.info("%s disconnected.", self)
+        logger.info(
+            "%s disconnected.",
+            self,
+        )
 
     # ------------------------------------------------------------------
     # Calibration / configuration
     # ------------------------------------------------------------------
 
     def calibrate(self) -> None:
-        # Runtime user-scale calibration is performed by Right-A.
-        pass
+        return
 
     def configure(self) -> None:
-        cfg = self._config
+        return
 
-        if cfg.grip_threshold < 0.0 or cfg.grip_threshold > 1.0:
-            raise ValueError("grip_threshold must be in [0, 1].")
+    def send_feedback(
+        self,
+        feedback: dict[str, Any],
+    ) -> None:
+        """Receive optional feedback from the robot.
 
-        if cfg.tracking_timeout_s <= 0.0:
-            raise ValueError("tracking_timeout_s must be positive.")
+        RB VR teleoperation does not currently use haptic or visual
+        feedback, so the feedback is intentionally ignored.
+        """
 
-        if cfg.default_user_scale <= 0.0:
-            raise ValueError("default_user_scale must be positive.")
-
-        if cfg.reference_reach_mm <= 0.0:
-            raise ValueError("reference_reach_mm must be positive.")
-
-        if cfg.position_scale <= 0.0:
-            raise ValueError("position_scale must be positive.")
-
-        if cfg.max_joint_delta_rad <= 0.0:
-            raise ValueError("max_joint_delta_rad must be positive.")
-
-        if cfg.max_ik_position_error_mm <= 0.0:
-            raise ValueError(
-                "max_ik_position_error_mm must be positive."
-            )
-
-        if cfg.max_ik_orientation_error <= 0.0:
-            raise ValueError(
-                "max_ik_orientation_error must be positive."
-            )
-
-        self._robot_synced = False
-        self._connected_robot = None
-
-        self._last_joint_target = np.asarray(
-            DEFAULT_READY_POSE_RAD,
-            dtype=np.float64,
-        )
-        self._last_gripper_target = 1.0
-        self._kinematics.reset(self._last_joint_target)
-
-        self._user_scale = float(cfg.default_user_scale)
-        self._is_initialized = not cfg.require_initialization_button
-        self._is_stopped = False
-        self._following = False
+        del feedback
 
     # ------------------------------------------------------------------
-    # Main LeRobot entry point
+    # Main LeRobot tick
     # ------------------------------------------------------------------
 
     def get_action(self) -> dict[str, Any]:
@@ -241,267 +312,242 @@ class RbVr(Teleoperator):
                 f"{self} is not connected."
             )
 
-        # lerobot-teleoperate connects teleop before robot, whereas
-        # lerobot-record connects robot before teleop. At the first control
-        # tick both are connected, so resolve the follower lazily here.
-        self._sync_from_robot()
+        robot = self._resolve_robot()
+        receiver = self._require_receiver()
+        kinematics = self._require_kinematics()
 
-        assert self._receiver is not None
+        events = receiver.consume_button_events()
+        vr_state = receiver.get_state()
 
-        events = self._receiver.consume_button_events()
-        snapshot = self._receiver.get_state()
-
-        primary_event, secondary_event = self._selected_button_events(
-            events
+        controller, primary_event, secondary_event = (
+            self._selected_controller_and_events(
+                vr_state,
+                events,
+            )
         )
 
-        # Secondary/B button always acts as an immediate software stop.
+        # B has priority over all other input.
         if secondary_event:
-            logger.info("VR secondary button pressed: following stopped.")
-            self._is_stopped = True
-            self._deactivate_following()
-            return self._build_action()
+            self._stop_and_disarm(
+                require_reinitialization=True,
+            )
 
-        if snapshot is None:
-            return self._build_action()
+            logger.info(
+                "VR secondary button pressed: "
+                "control stopped; press the primary button to restart."
+            )
 
-        if self._receiver.is_stale(
-            self._config.tracking_timeout_s
-        ):
-            if self._following:
-                logger.warning(
-                    "VR packets are stale (age=%.3fs); holding position.",
-                    self._receiver.age_s,
-                )
-            self._deactivate_following()
-            return self._build_action()
+            return self._build_action(
+                self._last_action_rad,
+                controller,
+            )
 
-        controller = self._selected_controller(snapshot)
-
-        if (
-            not snapshot.head_tracked
-            or snapshot.head_pose_rb is None
-            or not controller.tracked
-            or controller.pose_rb is None
-        ):
-            if self._following:
-                logger.warning(
-                    "Head or selected controller tracking was lost; "
-                    "holding position."
-                )
-            self._deactivate_following()
-            return self._build_action()
-
-        torso_pose = head_pose_to_torso_pose(
-            snapshot.head_pose_rb
-        )
-
+        # A calculates the scale and arms control.
         if primary_event:
-            self._initialize_control(
-                controller=controller,
-                torso_pose=torso_pose,
+            initialized = self._initialize_control(
+                vr_state,
+                controller,
             )
 
-            # Return the freshly synchronized robot pose for this frame.
-            # Actual VR following begins on the next frame.
-            return self._build_action()
+            if not initialized:
+                return self._build_action(
+                    self._last_action_rad,
+                    controller,
+                )
 
-        if not self._is_initialized or self._is_stopped:
-            return self._build_action()
+        if not self._initialized:
+            robot.disable_servo_commands()
+            self._control_state = _ControlState.IDLE
 
-        # Gripper trigger is independent from arm-following grip.
-        if self._config.use_gripper:
-            self._last_gripper_target = float(
-                np.clip(1.0 - controller.trigger, 0.0, 1.0)
+            now = time.monotonic()
+            if (
+                now - self._last_waiting_log_time
+                >= 2.0
+            ):
+                logger.info(
+                    "Waiting for the selected controller's "
+                    "primary button to initialize VR control."
+                )
+                self._last_waiting_log_time = now
+
+            return self._build_action(
+                self._last_action_rad,
+                controller,
             )
 
-        # Grip released: freeze the current target.
-        if controller.grip <= self._config.grip_threshold:
-            self._deactivate_following()
-            return self._build_action()
+        if not self._tracking_is_valid(
+            vr_state,
+            controller,
+        ):
+            self._stop_following_only()
 
-        if not self._following:
-            logger.info("VR arm following started.")
-            self._following = True
-            self._kinematics.set_seed(self._last_joint_target)
+            now = time.monotonic()
+            if (
+                now - self._last_tracking_warning_time
+                >= 1.0
+            ):
+                logger.warning(
+                    "VR controller/head tracking is missing or stale; "
+                    "ServoJ transmission disabled."
+                )
+                self._last_tracking_warning_time = now
 
-        try:
-            target_pose = controller_pose_to_rb10e_target(
-                controller.pose_rb,
-                torso_pose,
-                user_scale=self._user_scale,
-                position_scale=self._config.position_scale,
-                x_offset_mm=self._config.target_x_offset_mm,
-                y_offset_mm=self._config.target_y_offset_mm,
-                z_offset_mm=self._config.target_z_offset_mm,
+            return self._build_action(
+                self._last_action_rad,
+                controller,
             )
 
-            solved_q = self._kinematics.solve(
+        torso_pose = head_pose_to_torso(
+            vr_state.head.pose_rb
+        )
+
+        target_pose = controller_pose_to_rb10e_target(
+            controller.pose_rb,
+            torso_pose,
+            self._user_scale
+            * float(self._config.position_scale),
+            target_x_offset_mm=(
+                self._config.target_x_offset_mm
+            ),
+            target_y_offset_mm=(
+                self._config.target_y_offset_mm
+            ),
+            target_z_offset_mm=(
+                self._config.target_z_offset_mm
+            ),
+        )
+
+        grip_pressed = (
+            controller.buttons.grip
+            > self._config.grip_threshold
+        )
+
+        # The original loop keeps the IK solution updated while Grip is not
+        # pressed. That gives Startup a current target joint vector.
+        if self._control_state != _ControlState.STARTUP:
+            kinematics.IKLM(
+                kinematics._q,
                 target_pose,
-                initial_q_rad=self._last_joint_target,
-                iterations=self._config.ik_iterations,
-            )
-        except (ValueError, np.linalg.LinAlgError) as exc:
-            logger.warning(
-                "VR target or IK calculation failed; holding position: %s",
-                exc,
-            )
-            self._kinematics.set_seed(self._last_joint_target)
-            return self._build_action()
-
-        if not self._ik_solution_is_acceptable():
-            info = self._kinematics.last_info
-            logger.warning(
-                "IK target rejected: position_error=%.1f mm, "
-                "orientation_error=%.3f.",
-                info.position_error_mm,
-                info.orientation_error,
-            )
-            self._kinematics.set_seed(self._last_joint_target)
-            return self._build_action()
-
-        if not np.all(np.isfinite(solved_q)):
-            logger.warning(
-                "IK returned NaN or Inf; holding the previous target."
-            )
-            self._kinematics.set_seed(self._last_joint_target)
-            return self._build_action()
-
-        max_delta = self._config.max_joint_delta_rad
-        command_q = np.clip(
-            solved_q,
-            self._last_joint_target - max_delta,
-            self._last_joint_target + max_delta,
-        )
-
-        # Keep the numerical solver seeded with what was actually emitted,
-        # rather than an unclamped target.
-        self._last_joint_target = command_q.astype(
-            np.float64,
-            copy=True,
-        )
-        self._kinematics.set_seed(self._last_joint_target)
-
-        return self._build_action()
-
-    def send_feedback(self, feedback: dict[str, Any]) -> None:
-        if not self.is_connected:
-            raise DeviceNotConnectedError(
-                f"{self} is not connected."
+                self._config.ik_iterations,
             )
 
-        # Haptic feedback is not implemented yet.
-        if feedback:
-            logger.debug(
-                "Ignoring unsupported VR feedback keys: %s",
-                tuple(feedback),
+        if not grip_pressed:
+            if (
+                self._control_state
+                != _ControlState.IDLE
+            ):
+                logger.info(
+                    "VR arm following stopped."
+                )
+
+            robot.disable_servo_commands()
+            self._control_state = _ControlState.IDLE
+
+            # Servo gate is OFF, but retain the current IK target as the
+            # logical action for the next startup transition.
+            self._last_action_rad = (
+                kinematics._q.copy()
             )
 
-    # ------------------------------------------------------------------
-    # Robot synchronization
-    # ------------------------------------------------------------------
-
-    def _sync_from_robot(self, *, force: bool = False) -> None:
-        if self._robot_synced and not force:
-            return
-
-        robot = get_active_rb_cobot()
-
-        if robot is None:
-            raise RuntimeError(
-                "No connected RB follower was found. The VR teleoperator "
-                "must be used together with lerobot_robot_rb."
+            return self._build_action(
+                self._last_action_rad,
+                controller,
             )
 
-        robot_features = set(robot.action_features)
-        teleop_features = set(self.action_features)
+        if self._control_state == _ControlState.IDLE:
+            self._begin_startup_transition()
 
-        if robot_features != teleop_features:
-            raise RuntimeError(
-                "RB robot and VR teleoperator action features do not match.\n"
-                f"Robot: {sorted(robot_features)}\n"
-                f"VR:    {sorted(teleop_features)}\n"
-                "Use robot.action_space=joint and make the robot gripper "
-                "configuration match teleop.use_gripper."
+            return self._build_action(
+                self._last_action_rad,
+                controller,
             )
-
-        observation = robot.get_observation()
-
-        try:
-            current_q = np.array(
-                [
-                    float(observation[name])
-                    for name in JOINT_ACTION_NAMES
-                ],
-                dtype=np.float64,
-            )
-        except KeyError as exc:
-            raise RuntimeError(
-                f"RB observation is missing joint key {exc.args[0]!r}."
-            ) from exc
-
-        if not np.all(np.isfinite(current_q)):
-            raise RuntimeError(
-                f"RB joint observation contains NaN or Inf: {current_q}"
-            )
-
-        self._last_joint_target = current_q
-        self._kinematics.set_seed(current_q)
 
         if (
-            self._config.use_gripper
-            and GRIPPER_NAME in observation
+            self._control_state
+            == _ControlState.STARTUP
         ):
-            self._last_gripper_target = float(
-                np.clip(
-                    float(observation[GRIPPER_NAME]),
-                    0.0,
-                    1.0,
-                )
+            q_out = self._startup_action()
+            self._last_action_rad = q_out
+
+            return self._build_action(
+                q_out,
+                controller,
             )
 
-        self._connected_robot = robot
-        self._robot_synced = True
+        # FOLLOWING
+        robot.enable_servo_commands()
 
-        logger.info(
-            "VR teleoperator synchronized with current RB joints: %s",
-            np.round(np.rad2deg(current_q), 2).tolist(),
+        self._last_action_rad = (
+            kinematics._q.copy()
+        )
+
+        return self._build_action(
+            self._last_action_rad,
+            controller,
         )
 
     # ------------------------------------------------------------------
-    # VR state handling
+    # Button / controller selection
     # ------------------------------------------------------------------
 
-    def _selected_controller(
+    def _selected_controller_and_events(
         self,
-        snapshot: VRSnapshot,
-    ) -> ControllerSnapshot:
+        vr_state: VRState,
+        events: VRButtonEvents,
+    ) -> tuple[
+        VRControllerState,
+        bool,
+        bool,
+    ]:
         if self._config.controller_hand == "right":
-            return snapshot.right
-        return snapshot.left
+            return (
+                vr_state.right,
+                events.right_primary,
+                events.right_secondary,
+            )
 
-    def _selected_button_events(
-        self,
-        events: dict[str, bool],
-    ) -> tuple[bool, bool]:
-        prefix = self._config.controller_hand
+        if self._config.controller_hand == "left":
+            return (
+                vr_state.left,
+                events.left_primary,
+                events.left_secondary,
+            )
 
-        return (
-            bool(events.get(f"{prefix}_primary", False)),
-            bool(events.get(f"{prefix}_secondary", False)),
+        raise ValueError(
+            "controller_hand must be 'right' or 'left', "
+            f"got {self._config.controller_hand!r}."
         )
+
+    # ------------------------------------------------------------------
+    # Initialization / stopping
+    # ------------------------------------------------------------------
 
     def _initialize_control(
         self,
-        *,
-        controller: ControllerSnapshot,
-        torso_pose: FloatArray,
-    ) -> None:
-        assert controller.pose_rb is not None
+        vr_state: VRState,
+        controller: VRControllerState,
+    ) -> bool:
+        robot = self._require_robot()
+
+        if not self._tracking_is_valid(
+            vr_state,
+            controller,
+        ):
+            robot.disable_servo_commands()
+
+            logger.warning(
+                "Primary button received, but controller/head "
+                "tracking is not valid. Initialization was not applied."
+            )
+            return False
+
+        torso_pose = head_pose_to_torso(
+            vr_state.head.pose_rb
+        )
 
         if self._config.auto_user_scale:
             try:
-                self._user_scale = compute_user_scale(
+                user_scale = compute_user_scale(
                     controller.pose_rb,
                     torso_pose,
                     reference_reach_mm=(
@@ -509,24 +555,25 @@ class RbVr(Teleoperator):
                     ),
                 )
             except ValueError as exc:
+                robot.disable_servo_commands()
+
                 logger.warning(
-                    "User-scale calibration failed; "
-                    "VR control remains uninitialized: %s",
+                    "VR user-scale initialization failed: %s",
                     exc,
                 )
-                return
+                return False
+
+            self._user_scale = user_scale
         else:
             self._user_scale = float(
                 self._config.default_user_scale
             )
 
-        # Re-read the actual robot pose so initialization never causes a
-        # jump from a stale internal joint target.
-        self._sync_from_robot(force=True)
-
-        self._is_initialized = True
-        self._is_stopped = False
-        self._following = False
+        # Re-initialization always cancels active motion. The operator must
+        # hold Grip again after the new scale has been applied.
+        robot.disable_servo_commands()
+        self._control_state = _ControlState.IDLE
+        self._initialized = True
 
         logger.info(
             "VR control initialized: user_scale=%.4f. "
@@ -534,53 +581,276 @@ class RbVr(Teleoperator):
             self._user_scale,
         )
 
-    def _deactivate_following(self) -> None:
-        was_following = self._following
-        self._following = False
+        return True
 
-        if was_following:
-            logger.info("VR arm following stopped.")
+    def _stop_following_only(self) -> None:
+        robot = self._require_robot()
 
-        if (
-            was_following
-            and not self._config.hold_last_target
-        ):
-            try:
-                self._sync_from_robot(force=True)
-            except Exception as exc:
-                logger.warning(
-                    "Could not synchronize actual robot pose while "
-                    "stopping VR following: %s",
-                    exc,
-                )
+        robot.disable_servo_commands()
+        self._control_state = _ControlState.IDLE
 
-    def _ik_solution_is_acceptable(self) -> bool:
-        info = self._kinematics.last_info
+    def _stop_and_disarm(
+        self,
+        *,
+        require_reinitialization: bool,
+    ) -> None:
+        self._stop_following_only()
 
-        return (
-            info.position_error_mm
-            <= self._config.max_ik_position_error_mm
-            and info.orientation_error
-            <= self._config.max_ik_orientation_error
+        if require_reinitialization:
+            self._initialized = False
+
+    # ------------------------------------------------------------------
+    # Startup interpolation
+    # ------------------------------------------------------------------
+
+    def _begin_startup_transition(self) -> None:
+        robot = self._require_robot()
+        kinematics = self._require_kinematics()
+
+        q_start = robot.get_joint_positions(
+            measured=True
+        )
+        q_end = kinematics._q.copy()
+
+        self._validate_joint_vector(
+            q_start,
+            name="startup measured joints",
+        )
+        self._validate_joint_vector(
+            q_end,
+            name="startup IK joints",
         )
 
+        self._startup_q_start = q_start
+        self._startup_q_end = q_end
+        self._startup_time = time.monotonic()
+
+        self._last_action_rad = q_start.copy()
+        self._control_state = _ControlState.STARTUP
+
+        robot.enable_servo_commands()
+
+        logger.info(
+            "VR arm following started. "
+            "Beginning %.1f s startup interpolation.",
+            self.STARTUP_DURATION_S,
+        )
+
+    def _startup_action(self) -> np.ndarray:
+        elapsed = (
+            time.monotonic()
+            - self._startup_time
+        )
+
+        phase = float(
+            np.clip(
+                elapsed / self.STARTUP_DURATION_S,
+                0.0,
+                1.0,
+            )
+        )
+
+        # Original interpolation:
+        #
+        # (q_end - q_start)
+        # * (1 - cos(t / 5 * pi)) / 2
+        # + q_start
+        blend = (
+            1.0
+            - math.cos(phase * math.pi)
+        ) / 2.0
+
+        q_out = (
+            self._startup_q_start
+            + (
+                self._startup_q_end
+                - self._startup_q_start
+            )
+            * blend
+        )
+
+        if phase >= 1.0:
+            self._control_state = (
+                _ControlState.FOLLOWING
+            )
+
+            logger.info(
+                "VR startup interpolation completed."
+            )
+
+        return q_out
+
     # ------------------------------------------------------------------
-    # Action construction
+    # Tracking
     # ------------------------------------------------------------------
 
-    def _build_action(self) -> dict[str, Any]:
+    def _tracking_is_valid(
+        self,
+        vr_state: VRState,
+        controller: VRControllerState,
+    ) -> bool:
+        receiver = self._require_receiver()
+
+        if receiver.is_stale(
+            state=vr_state
+        ):
+            return False
+
+        if not controller.tracked:
+            return False
+
+        if not vr_state.head.tracked:
+            return False
+
+        return True
+
+    # ------------------------------------------------------------------
+    # Action conversion
+    # ------------------------------------------------------------------
+
+    def _build_action(
+        self,
+        joint_rad: np.ndarray,
+        controller: VRControllerState,
+    ) -> dict[str, Any]:
+        self._validate_joint_vector(
+            joint_rad,
+            name="joint action",
+        )
+
         action: dict[str, Any] = {
-            name: float(value)
-            for name, value in zip(
-                JOINT_ACTION_NAMES,
-                self._last_joint_target,
-                strict=True,
+            name: float(joint_rad[index])
+            for index, name in enumerate(
+                JOINT_NAMES
             )
         }
 
         if self._config.use_gripper:
-            action[GRIPPER_NAME] = float(
-                self._last_gripper_target
+            # LeRobot convention:
+            #   1.0 = open
+            #
+            # Quest trigger:
+            #   0.0 = released
+            #   1.0 = fully pressed
+            action[GRIPPER_NAME] = (
+                1.0
+                - float(
+                    np.clip(
+                        controller.buttons.trigger,
+                        0.0,
+                        1.0,
+                    )
+                )
             )
 
         return action
+
+    @staticmethod
+    def _validate_joint_vector(
+        joint_rad: np.ndarray,
+        *,
+        name: str,
+    ) -> None:
+        values = np.asarray(
+            joint_rad,
+            dtype=np.float64,
+        )
+
+        expected_shape = (
+            len(JOINT_NAMES),
+        )
+
+        if values.shape != expected_shape:
+            raise ValueError(
+                f"{name} must have shape {expected_shape}, "
+                f"got {values.shape}."
+            )
+
+        if not np.all(np.isfinite(values)):
+            raise ValueError(
+                f"{name} contains non-finite values: "
+                f"{values.tolist()}."
+            )
+
+    # ------------------------------------------------------------------
+    # Required-object helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_robot(self) -> RbCobot:
+        """Resolve and synchronize the RB robot lazily.
+
+        The standard LeRobot script connects the Teleoperator first and
+        the Robot second. By the first get_action() call, robot.connect()
+        has completed and registered the active RbCobot instance.
+        """
+
+        if (
+            self._robot is not None
+            and self._robot.is_connected
+        ):
+            return self._robot
+
+        self._robot = None
+
+        robot = get_active_rb_cobot()
+
+        if robot is None:
+            raise DeviceNotConnectedError(
+                "No connected RB robot is registered. "
+                "RbVr expected robot.connect() to complete before "
+                "the first get_action() call."
+            )
+
+        current_q = robot.get_joint_positions(
+            measured=True
+        )
+
+        self._validate_joint_vector(
+            current_q,
+            name="current robot joints",
+        )
+
+        # Start by returning the physical robot's current pose.
+        self._last_action_rad = current_q.copy()
+
+        # Motion remains blocked until:
+        #   A initialization
+        #   + valid tracking
+        #   + Grip
+        robot.disable_servo_commands()
+
+        self._robot = robot
+
+        logger.info(
+            "VR teleoperator synchronized with current RB joints: %s",
+            np.round(
+                np.rad2deg(current_q),
+                3,
+            ).tolist(),
+        )
+
+        return robot
+
+    def _require_robot(self) -> RbCobot:
+        if self._robot is None:
+            raise DeviceNotConnectedError(
+                "RB robot is not available."
+            )
+
+        return self._robot
+
+    def _require_receiver(self) -> VRReceiver:
+        if self._receiver is None:
+            raise DeviceNotConnectedError(
+                "VR receiver is not available."
+            )
+
+        return self._receiver
+
+    def _require_kinematics(self) -> RB10E:
+        if self._kinematics is None:
+            raise DeviceNotConnectedError(
+                "RB10E kinematics is not available."
+            )
+
+        return self._kinematics

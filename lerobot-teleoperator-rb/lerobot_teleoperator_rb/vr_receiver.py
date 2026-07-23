@@ -1,37 +1,39 @@
-"""Background UDP receiver for Meta Quest teleoperation.
+"""Meta Quest UDP receiver for RB-Series VR teleoperation.
 
-The receiver owns only VR communication and parsing. It does not perform
-inverse kinematics and never commands the robot.
+This receiver preserves the JSON packet structure used by the original
+hardware-tested RB10E teleoperation script:
 
-Unlike the legacy multiprocessing Queue implementation, this receiver keeps
-only the latest VR state. Old controller poses therefore cannot accumulate
-and be replayed later when the consumer is slower than the Quest sender.
-
-Expected packet shape
----------------------
 {
-    "timestamp": ...,
-    "head": {
-        "position": [x, y, z],
-        "rotation": [qx, qy, qz, qw]
-    },
     "hands": {
         "right": {
             "position": [x, y, z],
             "rotation": [qx, qy, qz, qw],
             "buttons": {
-                "primaryButton": false,
-                "secondaryButton": false,
-                "trigger": 0.0,
-                "grip": 0.0
+                "primaryButton": bool,
+                "secondaryButton": bool,
+                "trigger": float,
+                "grip": float
             }
         },
         "left": {...}
+    },
+    "head": {
+        "position": [x, y, z],
+        "rotation": [qx, qy, qz, qw]
     }
 }
 
-Quest positions are converted from metres into RB-frame SE(3) transforms
-whose translations are in millimetres.
+Responsibilities
+----------------
+- Send the PC endpoint handshake to Meta Quest.
+- Receive Quest JSON packets over UDP.
+- Convert raw Quest poses into the original RB-oriented frame.
+- Preserve button levels and expose rising-edge button events.
+- Keep only the latest packet; no queue accumulation.
+- Detect stale controller tracking.
+
+User scaling, torso-relative conversion, IK, A-button initialisation and
+Grip/ServoJ gating are handled by ``rb_vr.py``.
 """
 
 from __future__ import annotations
@@ -42,315 +44,284 @@ import logging
 import socket
 import threading
 import time
-from dataclasses import dataclass
-from typing import Any, Mapping
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
-from numpy.typing import NDArray
 
-from .constants import (
-    GRIP_BUTTON,
-    LEFT_HAND,
-    PRIMARY_BUTTON,
-    RIGHT_HAND,
-    SECONDARY_BUTTON,
-    TRIGGER_BUTTON,
-)
-from .frame_transforms import quest_pose_to_rb_frame
+from .frame_transforms import quest_pose_to_rb
 
 
 logger = logging.getLogger(__name__)
 
-FloatArray = NDArray[np.float64]
+
+# ---------------------------------------------------------------------------
+# State containers
+# ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class ControllerSnapshot:
-    """Parsed state of one Meta Quest controller."""
+@dataclass
+class VRButtons:
+    """Button levels from one Meta Quest controller."""
 
-    tracked: bool
-    pose_rb: FloatArray | None
-    primary_pressed: bool
-    secondary_pressed: bool
-    trigger: float
-    grip: float
+    primary: bool = False
+    secondary: bool = False
+    trigger: float = 0.0
+    grip: float = 0.0
 
 
-@dataclass(frozen=True)
-class VRSnapshot:
-    """Latest complete VR state received from Meta Quest."""
+@dataclass
+class VRControllerState:
+    """Converted pose and buttons for one controller."""
 
-    received_at: float
-    source_timestamp: float | None
-    sender: tuple[str, int] | None
-
-    head_tracked: bool
-    head_pose_rb: FloatArray | None
-
-    right: ControllerSnapshot
-    left: ControllerSnapshot
+    pose_rb: np.ndarray = field(
+        default_factory=lambda: np.eye(4, dtype=np.float64)
+    )
+    buttons: VRButtons = field(default_factory=VRButtons)
+    tracked: bool = False
 
 
-def _empty_controller() -> ControllerSnapshot:
-    return ControllerSnapshot(
-        tracked=False,
-        pose_rb=None,
-        primary_pressed=False,
-        secondary_pressed=False,
-        trigger=0.0,
-        grip=0.0,
+@dataclass
+class VRHeadState:
+    """Converted Meta Quest headset pose."""
+
+    pose_rb: np.ndarray = field(
+        default_factory=lambda: np.eye(4, dtype=np.float64)
+    )
+    tracked: bool = False
+
+
+@dataclass
+class VRState:
+    """Latest complete VR state snapshot."""
+
+    right: VRControllerState = field(
+        default_factory=VRControllerState
+    )
+    left: VRControllerState = field(
+        default_factory=VRControllerState
+    )
+    head: VRHeadState = field(
+        default_factory=VRHeadState
+    )
+
+    packet_monotonic_time: float = 0.0
+    source_ip: str | None = None
+    source_port: int | None = None
+    packet_count: int = 0
+
+
+@dataclass
+class VRButtonEvents:
+    """Rising-edge button events accumulated since the previous read."""
+
+    right_primary: bool = False
+    right_secondary: bool = False
+    left_primary: bool = False
+    left_secondary: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Parsing helpers
+# ---------------------------------------------------------------------------
+
+
+def _clamp_analog(value: Any) -> float:
+    """Convert a controller analog value into [0, 1]."""
+
+    try:
+        converted = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if not np.isfinite(converted):
+        return 0.0
+
+    return float(np.clip(converted, 0.0, 1.0))
+
+
+def _parse_buttons(raw: Any) -> VRButtons:
+    """Parse the original Quest button mapping."""
+
+    if not isinstance(raw, dict):
+        return VRButtons()
+
+    return VRButtons(
+        primary=bool(
+            raw.get(
+                "primaryButton",
+                False,
+            )
+        ),
+        secondary=bool(
+            raw.get(
+                "secondaryButton",
+                False,
+            )
+        ),
+        trigger=_clamp_analog(
+            raw.get(
+                "trigger",
+                0.0,
+            )
+        ),
+        grip=_clamp_analog(
+            raw.get(
+                "grip",
+                0.0,
+            )
+        ),
     )
 
 
-def _normalised_axis(value: Any, *, name: str) -> float:
-    """Convert one analog button value into the [0, 1] range."""
-
-    try:
-        result = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be numeric, got {value!r}.") from exc
-
-    if not np.isfinite(result):
-        raise ValueError(f"{name} contains NaN or Inf.")
-
-    return float(np.clip(result, 0.0, 1.0))
-
-
-def _parse_pose(entity: Mapping[str, Any], *, name: str) -> FloatArray:
-    try:
-        position = entity["position"]
-        rotation = entity["rotation"]
-    except KeyError as exc:
-        raise ValueError(
-            f"{name} must contain position and rotation."
-        ) from exc
-
-    return quest_pose_to_rb_frame(
-        position,
-        rotation,
-    )
-
-
-def _parse_controller(
-    controller: Any,
+def _parse_pose(
+    raw: Any,
     *,
     name: str,
-) -> ControllerSnapshot:
-    if controller is None:
-        return _empty_controller()
+) -> np.ndarray:
+    """Parse and convert one Quest pose into the RB-oriented frame."""
 
-    if not isinstance(controller, Mapping):
+    if not isinstance(raw, dict):
         raise ValueError(
-            f"{name} controller must be an object or null."
+            f"{name} must be a JSON object."
         )
 
-    pose = _parse_pose(controller, name=f"{name} controller")
-
-    buttons = controller.get("buttons", {})
-    if not isinstance(buttons, Mapping):
+    if "position" not in raw:
         raise ValueError(
-            f"{name} controller buttons must be an object."
+            f"{name} is missing 'position'."
         )
 
-    return ControllerSnapshot(
-        tracked=True,
-        pose_rb=pose,
-        primary_pressed=bool(buttons.get(PRIMARY_BUTTON, False)),
-        secondary_pressed=bool(buttons.get(SECONDARY_BUTTON, False)),
-        trigger=_normalised_axis(
-            buttons.get(TRIGGER_BUTTON, 0.0),
-            name=f"{name} trigger",
-        ),
-        grip=_normalised_axis(
-            buttons.get(GRIP_BUTTON, 0.0),
-            name=f"{name} grip",
-        ),
-    )
+    if "rotation" not in raw:
+        raise ValueError(
+            f"{name} is missing 'rotation'."
+        )
 
-
-def parse_vr_payload(
-    payload: Mapping[str, Any],
-    *,
-    received_at: float | None = None,
-    sender: tuple[str, int] | None = None,
-) -> VRSnapshot:
-    """Parse one decoded Meta Quest JSON payload.
-
-    This is a pure function so packet parsing can be unit-tested without
-    opening a UDP socket.
-    """
-
-    if not isinstance(payload, Mapping):
-        raise ValueError("VR payload must be a JSON object.")
-
-    if received_at is None:
-        received_at = time.monotonic()
-
-    source_timestamp_raw = payload.get("timestamp")
-    source_timestamp: float | None
-
-    if source_timestamp_raw is None:
-        source_timestamp = None
-    else:
-        try:
-            source_timestamp = float(source_timestamp_raw)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "VR timestamp must be numeric or null."
-            ) from exc
-
-        if not np.isfinite(source_timestamp):
-            raise ValueError("VR timestamp contains NaN or Inf.")
-
-    hands = payload.get("hands", {})
-    if hands is None:
-        hands = {}
-
-    if not isinstance(hands, Mapping):
-        raise ValueError("VR hands field must be an object or null.")
-
-    right = _parse_controller(
-        hands.get(RIGHT_HAND),
-        name=RIGHT_HAND,
-    )
-    left = _parse_controller(
-        hands.get(LEFT_HAND),
-        name=LEFT_HAND,
-    )
-
-    head_raw = payload.get("head")
-    if head_raw is None:
-        head_tracked = False
-        head_pose = None
-    else:
-        if not isinstance(head_raw, Mapping):
-            raise ValueError("VR head field must be an object or null.")
-
-        head_pose = _parse_pose(head_raw, name="head")
-        head_tracked = True
-
-    return VRSnapshot(
-        received_at=float(received_at),
-        source_timestamp=source_timestamp,
-        sender=sender,
-        head_tracked=head_tracked,
-        head_pose_rb=head_pose,
-        right=right,
-        left=left,
+    return quest_pose_to_rb(
+        position=raw["position"],
+        rotation_quat=raw["rotation"],
     )
 
 
 def _copy_controller(
-    controller: ControllerSnapshot,
-) -> ControllerSnapshot:
-    return ControllerSnapshot(
-        tracked=controller.tracked,
-        pose_rb=(
-            None
-            if controller.pose_rb is None
-            else controller.pose_rb.copy()
-        ),
-        primary_pressed=controller.primary_pressed,
-        secondary_pressed=controller.secondary_pressed,
-        trigger=controller.trigger,
-        grip=controller.grip,
+    state: VRControllerState,
+) -> VRControllerState:
+    return VRControllerState(
+        pose_rb=state.pose_rb.copy(),
+        buttons=copy.copy(state.buttons),
+        tracked=state.tracked,
     )
 
 
-def copy_snapshot(snapshot: VRSnapshot) -> VRSnapshot:
-    """Return a defensive copy of a VR snapshot."""
-
-    return VRSnapshot(
-        received_at=snapshot.received_at,
-        source_timestamp=snapshot.source_timestamp,
-        sender=snapshot.sender,
-        head_tracked=snapshot.head_tracked,
-        head_pose_rb=(
-            None
-            if snapshot.head_pose_rb is None
-            else snapshot.head_pose_rb.copy()
+def _copy_state(
+    state: VRState,
+) -> VRState:
+    return VRState(
+        right=_copy_controller(state.right),
+        left=_copy_controller(state.left),
+        head=VRHeadState(
+            pose_rb=state.head.pose_rb.copy(),
+            tracked=state.head.tracked,
         ),
-        right=_copy_controller(snapshot.right),
-        left=_copy_controller(snapshot.left),
+        packet_monotonic_time=state.packet_monotonic_time,
+        source_ip=state.source_ip,
+        source_port=state.source_port,
+        packet_count=state.packet_count,
     )
+
+
+# ---------------------------------------------------------------------------
+# Receiver
+# ---------------------------------------------------------------------------
 
 
 class VRReceiver:
-    """Receive and retain the latest Meta Quest controller state."""
+    """Latest-state Meta Quest UDP receiver."""
 
     def __init__(
         self,
         *,
         local_ip: str,
         local_port: int,
-        meta_quest_ip: str | None = None,
+        meta_quest_ip: str | None,
         meta_quest_port: int = 6000,
         send_handshake: bool = True,
-        socket_timeout_s: float = 0.1,
+        tracking_timeout_s: float = 0.25,
         receive_buffer_bytes: int = 65535,
     ) -> None:
         if not local_ip:
-            raise ValueError("local_ip must not be empty.")
-
-        if not 0 <= int(local_port) <= 65535:
             raise ValueError(
-                f"local_port must be in [0, 65535], got {local_port}."
+                "local_ip must not be empty."
             )
 
-        if not 0 <= int(meta_quest_port) <= 65535:
+        if not 0 < int(local_port) <= 65535:
             raise ValueError(
-                "meta_quest_port must be in [0, 65535], "
-                f"got {meta_quest_port}."
+                f"Invalid local_port: {local_port}."
             )
 
-        if socket_timeout_s <= 0.0:
-            raise ValueError("socket_timeout_s must be positive.")
+        if not 0 < int(meta_quest_port) <= 65535:
+            raise ValueError(
+                f"Invalid meta_quest_port: {meta_quest_port}."
+            )
+
+        if tracking_timeout_s <= 0.0:
+            raise ValueError(
+                "tracking_timeout_s must be positive."
+            )
 
         if receive_buffer_bytes <= 0:
-            raise ValueError("receive_buffer_bytes must be positive.")
-
-        if send_handshake and meta_quest_ip is None:
             raise ValueError(
-                "meta_quest_ip is required when send_handshake=True."
+                "receive_buffer_bytes must be positive."
             )
 
-        if send_handshake and local_ip == "0.0.0.0":
-            raise ValueError(
-                "An actual LAN/Wi-Fi local_ip is required for the Quest "
-                "handshake; 0.0.0.0 cannot be advertised to Meta Quest."
-            )
+        if send_handshake:
+            if not meta_quest_ip:
+                raise ValueError(
+                    "meta_quest_ip is required when "
+                    "send_handshake=True."
+                )
 
-        self._local_ip = local_ip
-        self._local_port = int(local_port)
-        self._meta_quest_ip = meta_quest_ip
-        self._meta_quest_port = int(meta_quest_port)
-        self._send_handshake = bool(send_handshake)
-        self._socket_timeout_s = float(socket_timeout_s)
-        self._receive_buffer_bytes = int(receive_buffer_bytes)
+            if local_ip == "0.0.0.0":
+                raise ValueError(
+                    "A concrete local_ip is required when "
+                    "send_handshake=True because Meta Quest must "
+                    "receive the PC's reachable IP address."
+                )
 
-        self._socket: socket.socket | None = None
-        self._thread: threading.Thread | None = None
+        self.local_ip = local_ip
+        self.local_port = int(local_port)
+
+        self.meta_quest_ip = meta_quest_ip
+        self.meta_quest_port = int(
+            meta_quest_port
+        )
+
+        self.send_handshake = bool(
+            send_handshake
+        )
+        self.tracking_timeout_s = float(
+            tracking_timeout_s
+        )
+        self.receive_buffer_bytes = int(
+            receive_buffer_bytes
+        )
+
+        self._state = VRState()
+        self._events = VRButtonEvents()
+
+        self._state_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._first_packet_event = threading.Event()
 
-        self._lock = threading.Lock()
-        self._latest_state: VRSnapshot | None = None
+        self._thread: threading.Thread | None = None
+        self._socket: socket.socket | None = None
+        self._thread_error: Exception | None = None
 
-        self._button_down = {
+        self._previous_buttons = {
             "right_primary": False,
             "right_secondary": False,
             "left_primary": False,
             "left_secondary": False,
         }
-        self._pending_button_events = {
-            "right_primary": False,
-            "right_secondary": False,
-            "left_primary": False,
-            "left_secondary": False,
-        }
-
-        self._packet_count = 0
-        self._parse_error_count = 0
-        self._last_error: str | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -358,51 +329,19 @@ class VRReceiver:
 
     @property
     def is_running(self) -> bool:
-        thread = self._thread
         return (
-            thread is not None
-            and thread.is_alive()
+            self._thread is not None
+            and self._thread.is_alive()
             and not self._stop_event.is_set()
         )
 
     @property
-    def bound_port(self) -> int | None:
-        sock = self._socket
-        if sock is None:
-            return None
-        return int(sock.getsockname()[1])
+    def thread_error(self) -> Exception | None:
+        return self._thread_error
 
     @property
-    def packet_count(self) -> int:
-        with self._lock:
-            return self._packet_count
-
-    @property
-    def parse_error_count(self) -> int:
-        with self._lock:
-            return self._parse_error_count
-
-    @property
-    def last_error(self) -> str | None:
-        with self._lock:
-            return self._last_error
-
-    @property
-    def has_state(self) -> bool:
-        with self._lock:
-            return self._latest_state is not None
-
-    @property
-    def age_s(self) -> float:
-        """Age of the latest valid packet, or infinity before first packet."""
-
-        with self._lock:
-            latest = self._latest_state
-
-        if latest is None:
-            return float("inf")
-
-        return max(0.0, time.monotonic() - latest.received_at)
+    def has_received_packet(self) -> bool:
+        return self._first_packet_event.is_set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -410,30 +349,56 @@ class VRReceiver:
 
     def start(self) -> None:
         if self.is_running:
-            raise RuntimeError("VRReceiver is already running.")
+            raise RuntimeError(
+                "VRReceiver is already running."
+            )
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self._local_ip, self._local_port))
-        sock.settimeout(self._socket_timeout_s)
+        self._stop_event.clear()
+        self._first_packet_event.clear()
+        self._thread_error = None
+
+        sock = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_DGRAM,
+        )
+
+        sock.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_REUSEADDR,
+            1,
+        )
+
+        # A short timeout allows stop() to terminate the thread without
+        # waiting for another Quest packet.
+        sock.settimeout(0.1)
+
+        try:
+            sock.bind(
+                (
+                    self.local_ip,
+                    self.local_port,
+                )
+            )
+        except Exception:
+            sock.close()
+            raise
 
         self._socket = sock
-        self._stop_event.clear()
 
-        if self._send_handshake:
-            self._send_quest_handshake()
+        if self.send_handshake:
+            self._send_endpoint_handshake()
 
         self._thread = threading.Thread(
             target=self._receive_loop,
-            name="rb-vr-receiver",
+            name="rb-vr-udp-receiver",
             daemon=True,
         )
         self._thread.start()
 
         logger.info(
             "VR UDP receiver listening on %s:%d.",
-            self._local_ip,
-            self.bound_port,
+            self.local_ip,
+            self.local_port,
         )
 
     def stop(self) -> None:
@@ -449,41 +414,46 @@ class VRReceiver:
                 pass
 
         thread = self._thread
-        if thread is not None:
+
+        if (
+            thread is not None
+            and thread is not threading.current_thread()
+        ):
             thread.join(timeout=1.0)
 
-            if thread.is_alive():
-                logger.warning(
-                    "VR receiver thread did not stop within one second."
-                )
-
         self._thread = None
-        logger.info("VR UDP receiver stopped.")
 
-    def _send_quest_handshake(self) -> None:
-        if self._socket is None:
-            raise RuntimeError(
-                "Cannot send Quest handshake before binding UDP socket."
-            )
+        logger.info(
+            "VR UDP receiver stopped."
+        )
 
-        if self._meta_quest_ip is None:
+    def _send_endpoint_handshake(self) -> None:
+        if self.meta_quest_ip is None:
             raise RuntimeError(
-                "meta_quest_ip is missing for Quest handshake."
+                "meta_quest_ip is not configured."
             )
 
         target_info = {
-            "ip": self._local_ip,
-            "port": self.bound_port,
+            "ip": self.local_ip,
+            "port": self.local_port,
         }
-        message = json.dumps(target_info).encode("utf-8")
 
-        self._socket.sendto(
-            message,
-            (
-                self._meta_quest_ip,
-                self._meta_quest_port,
-            ),
-        )
+        message = json.dumps(
+            target_info
+        ).encode("utf-8")
+
+        # Use a temporary socket, matching the original implementation.
+        with socket.socket(
+            socket.AF_INET,
+            socket.SOCK_DGRAM,
+        ) as handshake_socket:
+            handshake_socket.sendto(
+                message,
+                (
+                    self.meta_quest_ip,
+                    self.meta_quest_port,
+                ),
+            )
 
         logger.info(
             "Sent PC endpoint to Meta Quest: %s",
@@ -491,128 +461,345 @@ class VRReceiver:
         )
 
     # ------------------------------------------------------------------
-    # Consumer API
+    # Public reads
     # ------------------------------------------------------------------
-
-    def get_state(self) -> VRSnapshot | None:
-        """Return the latest state without blocking."""
-
-        with self._lock:
-            latest = self._latest_state
-
-            if latest is None:
-                return None
-
-            return copy_snapshot(latest)
-
-    def is_stale(self, timeout_s: float) -> bool:
-        if timeout_s <= 0.0:
-            raise ValueError("timeout_s must be positive.")
-
-        return self.age_s > timeout_s
 
     def wait_for_first_packet(
         self,
-        *,
         timeout_s: float,
     ) -> bool:
-        """Wait for initial VR data, returning False on timeout."""
-
         if timeout_s <= 0.0:
-            raise ValueError("timeout_s must be positive.")
+            raise ValueError(
+                "timeout_s must be positive."
+            )
 
-        deadline = time.monotonic() + timeout_s
+        ready = self._first_packet_event.wait(
+            timeout_s
+        )
 
-        while time.monotonic() < deadline:
-            if self.has_state:
-                return True
+        self._raise_thread_error()
+        return ready
 
-            if not self.is_running:
-                return False
+    def get_state(
+        self,
+        *,
+        require_fresh: bool = False,
+    ) -> VRState:
+        """Return a copied snapshot of the latest VR state."""
 
-            time.sleep(0.01)
+        self._raise_thread_error()
 
-        return self.has_state
+        with self._state_lock:
+            state = _copy_state(
+                self._state
+            )
 
-    def consume_button_events(self) -> dict[str, bool]:
-        """Return and clear pending rising-edge button events."""
+        if require_fresh and self.is_stale(
+            state=state
+        ):
+            raise TimeoutError(
+                "Meta Quest tracking data is stale."
+            )
 
-        with self._lock:
-            result = copy.copy(self._pending_button_events)
+        return state
 
-            for name in self._pending_button_events:
-                self._pending_button_events[name] = False
+    def consume_button_events(
+        self,
+    ) -> VRButtonEvents:
+        """Return and clear accumulated rising-edge button events."""
 
-        return result
+        self._raise_thread_error()
+
+        with self._state_lock:
+            events = copy.copy(
+                self._events
+            )
+            self._events = VRButtonEvents()
+
+        return events
+
+    def is_stale(
+        self,
+        *,
+        state: VRState | None = None,
+    ) -> bool:
+        if state is None:
+            with self._state_lock:
+                packet_time = (
+                    self._state.packet_monotonic_time
+                )
+        else:
+            packet_time = (
+                state.packet_monotonic_time
+            )
+
+        if packet_time <= 0.0:
+            return True
+
+        return (
+            time.monotonic() - packet_time
+            > self.tracking_timeout_s
+        )
+
+    def tracking_age_s(self) -> float:
+        with self._state_lock:
+            packet_time = (
+                self._state.packet_monotonic_time
+            )
+
+        if packet_time <= 0.0:
+            return float("inf")
+
+        return max(
+            0.0,
+            time.monotonic() - packet_time,
+        )
+
+    def _raise_thread_error(self) -> None:
+        if self._thread_error is not None:
+            raise RuntimeError(
+                "VR UDP receiver failed."
+            ) from self._thread_error
 
     # ------------------------------------------------------------------
-    # Internal receive path
+    # Receive loop
     # ------------------------------------------------------------------
 
     def _receive_loop(self) -> None:
-        while not self._stop_event.is_set():
-            sock = self._socket
-            if sock is None:
-                return
+        sock = self._socket
 
-            try:
-                data, sender = sock.recvfrom(
-                    self._receive_buffer_bytes
-                )
-            except socket.timeout:
-                continue
-            except OSError as exc:
-                if not self._stop_event.is_set():
-                    logger.error("VR UDP receive error: %s", exc)
-                return
+        if sock is None:
+            return
 
-            received_at = time.monotonic()
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    payload, address = sock.recvfrom(
+                        self.receive_buffer_bytes
+                    )
+                except socket.timeout:
+                    continue
+                except OSError:
+                    if self._stop_event.is_set():
+                        return
+                    raise
 
-            try:
-                decoded = data.decode("utf-8")
-                payload = json.loads(decoded)
+                source_ip, source_port = address
 
-                snapshot = parse_vr_payload(
-                    payload,
-                    received_at=received_at,
-                    sender=sender,
-                )
-            except (
-                UnicodeDecodeError,
-                json.JSONDecodeError,
-                ValueError,
-                TypeError,
-            ) as exc:
-                with self._lock:
-                    self._parse_error_count += 1
-                    self._last_error = str(exc)
+                # Ignore unrelated UDP traffic when a Quest address is
+                # explicitly configured.
+                if (
+                    self.meta_quest_ip is not None
+                    and source_ip != self.meta_quest_ip
+                ):
+                    logger.debug(
+                        "Ignored UDP packet from unexpected source %s:%d.",
+                        source_ip,
+                        source_port,
+                    )
+                    continue
 
-                logger.warning(
-                    "Discarded invalid VR packet from %s: %s",
-                    sender,
+                try:
+                    decoded = payload.decode(
+                        "utf-8"
+                    )
+                    packet = json.loads(
+                        decoded
+                    )
+                    self._handle_packet(
+                        packet,
+                        source_ip=source_ip,
+                        source_port=source_port,
+                    )
+                except (
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    TypeError,
+                    ValueError,
+                    KeyError,
+                ) as exc:
+                    logger.warning(
+                        "Ignored invalid Meta Quest packet from %s:%d: %s",
+                        source_ip,
+                        source_port,
+                        exc,
+                    )
+
+        except Exception as exc:
+            if not self._stop_event.is_set():
+                self._thread_error = exc
+                logger.exception(
+                    "VR UDP receiver stopped unexpectedly: %s",
                     exc,
                 )
-                continue
+                self._first_packet_event.set()
 
-            self._accept_snapshot(snapshot)
+    def _handle_packet(
+        self,
+        packet: Any,
+        *,
+        source_ip: str,
+        source_port: int,
+    ) -> None:
+        if not isinstance(packet, dict):
+            raise ValueError(
+                "Quest packet root must be a JSON object."
+            )
 
-    def _accept_snapshot(self, snapshot: VRSnapshot) -> None:
-        current_buttons = {
-            "right_primary": snapshot.right.primary_pressed,
-            "right_secondary": snapshot.right.secondary_pressed,
-            "left_primary": snapshot.left.primary_pressed,
-            "left_secondary": snapshot.left.secondary_pressed,
+        hands = packet.get(
+            "hands",
+            {},
+        )
+
+        if hands is None:
+            hands = {}
+
+        if not isinstance(hands, dict):
+            raise ValueError(
+                "'hands' must be a JSON object."
+            )
+
+        right_raw = hands.get(
+            "right"
+        )
+        left_raw = hands.get(
+            "left"
+        )
+        head_raw = packet.get(
+            "head"
+        )
+
+        with self._state_lock:
+            state = self._state
+
+            # ---------------- Right controller ----------------
+            if right_raw is not None:
+                state.right.pose_rb = _parse_pose(
+                    right_raw,
+                    name="hands.right",
+                )
+                state.right.buttons = _parse_buttons(
+                    right_raw.get(
+                        "buttons",
+                        {},
+                    )
+                )
+                state.right.tracked = True
+            else:
+                state.right.tracked = False
+                state.right.buttons = VRButtons()
+
+            # ---------------- Left controller -----------------
+            if left_raw is not None:
+                state.left.pose_rb = _parse_pose(
+                    left_raw,
+                    name="hands.left",
+                )
+                state.left.buttons = _parse_buttons(
+                    left_raw.get(
+                        "buttons",
+                        {},
+                    )
+                )
+                state.left.tracked = True
+            else:
+                state.left.tracked = False
+                state.left.buttons = VRButtons()
+
+            # ---------------- Head ----------------------------
+            if head_raw is not None:
+                state.head.pose_rb = _parse_pose(
+                    head_raw,
+                    name="head",
+                )
+                state.head.tracked = True
+            else:
+                state.head.tracked = False
+
+            state.packet_monotonic_time = (
+                time.monotonic()
+            )
+            state.source_ip = source_ip
+            state.source_port = int(
+                source_port
+            )
+            state.packet_count += 1
+
+            self._update_button_events_locked(
+                state
+            )
+
+        self._first_packet_event.set()
+
+    def _update_button_events_locked(
+        self,
+        state: VRState,
+    ) -> None:
+        current = {
+            "right_primary": (
+                state.right.tracked
+                and state.right.buttons.primary
+            ),
+            "right_secondary": (
+                state.right.tracked
+                and state.right.buttons.secondary
+            ),
+            "left_primary": (
+                state.left.tracked
+                and state.left.buttons.primary
+            ),
+            "left_secondary": (
+                state.left.tracked
+                and state.left.buttons.secondary
+            ),
         }
 
-        with self._lock:
-            for name, is_pressed in current_buttons.items():
-                was_pressed = self._button_down[name]
+        if (
+            current["right_primary"]
+            and not self._previous_buttons[
+                "right_primary"
+            ]
+        ):
+            self._events.right_primary = True
 
-                if is_pressed and not was_pressed:
-                    self._pending_button_events[name] = True
+        if (
+            current["right_secondary"]
+            and not self._previous_buttons[
+                "right_secondary"
+            ]
+        ):
+            self._events.right_secondary = True
 
-                self._button_down[name] = is_pressed
+        if (
+            current["left_primary"]
+            and not self._previous_buttons[
+                "left_primary"
+            ]
+        ):
+            self._events.left_primary = True
 
-            self._latest_state = copy_snapshot(snapshot)
-            self._packet_count += 1
-            self._last_error = None
+        if (
+            current["left_secondary"]
+            and not self._previous_buttons[
+                "left_secondary"
+            ]
+        ):
+            self._events.left_secondary = True
+
+        self._previous_buttons = current
+
+    # ------------------------------------------------------------------
+    # Context manager
+    # ------------------------------------------------------------------
+
+    def __enter__(self) -> VRReceiver:
+        self.start()
+        return self
+
+    def __exit__(
+        self,
+        exc_type,
+        exc,
+        traceback,
+    ) -> None:
+        self.stop()
