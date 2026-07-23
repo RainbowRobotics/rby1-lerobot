@@ -133,7 +133,12 @@ T_for_RB10E = np.array(
         [0.0, 0.0, 0.0, 1.0],
     ],
     dtype=np.float64,
-)
+) @ np.array([        
+    [           1,            0, 0, 0],
+    [           0, np.cos(_RB10E_ANGLE_Z_RAD), -np.sin(_RB10E_ANGLE_Z_RAD), 0],
+    [           0, np.sin(_RB10E_ANGLE_Z_RAD),  np.cos(_RB10E_ANGLE_Z_RAD), 0],
+    [           0,            0, 0, 1]
+])
 
 
 # PEP 8 aliases for new code.

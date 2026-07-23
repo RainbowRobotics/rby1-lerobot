@@ -374,6 +374,8 @@ class RbCobot(Robot):
             self._cobot = cobot
             self._robot = cobot
 
+            cobot.set_ff_gain_off()
+            
             if cfg.set_speed_bar_on_connect:
                 cobot.SetBaseSpeed(cfg.speed_bar)
                 logger.info(
