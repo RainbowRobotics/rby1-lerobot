@@ -33,7 +33,7 @@ class CobotGripperProtocol(Protocol):
 
     def gripper_dxl_xm_initialization(
         self,
-        device_id: int,
+        mode: int,
     ) -> object:
         ...
 
@@ -74,13 +74,13 @@ class RbDynamixelGripper(RbGripperBase):
         self,
         cobot: CobotGripperProtocol,
         *,
-        device_id: int = 0,
+        mode: int = 0,
         open_current_mA: int = DEFAULT_OPEN_CURRENT_MA,
         close_current_mA: int = DEFAULT_CLOSE_CURRENT_MA,
         invert: bool = False,
     ) -> None:
         self._cobot = cobot
-        self._device_id = int(device_id)
+        self._mode = int(mode)
 
         open_current = int(open_current_mA)
         close_current = int(close_current_mA)
@@ -106,7 +106,7 @@ class RbDynamixelGripper(RbGripperBase):
             return
 
         self._cobot.gripper_dxl_xm_initialization(
-            self._device_id
+            self._mode
         )
 
         # Preserve the proposed control style: initialize in the open state.
@@ -119,8 +119,8 @@ class RbDynamixelGripper(RbGripperBase):
 
         logger.info(
             "RB Dynamixel gripper initialized "
-            "(device_id=%d, open=%d mA, close=%d mA).",
-            self._device_id,
+            "(mode=%d, open=%d mA, close=%d mA).",
+            self._mode,
             self._open_current_mA,
             self._close_current_mA,
         )
@@ -217,15 +217,9 @@ def make_gripper(
                 "gripper_type='rby1_dynamixel'."
             )
 
-        device_id = (
-            int(config.gripper_ids[0])
-            if config.gripper_ids
-            else 0
-        )
-
         return RbDynamixelGripper(
             cobot,
-            device_id=device_id,
+            mode=0,
             invert=config.gripper_invert,
         )
 
