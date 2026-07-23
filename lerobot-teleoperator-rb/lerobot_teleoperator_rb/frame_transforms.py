@@ -351,7 +351,7 @@ def apply_scale(
     matrix[2, 3] *= scale
 
     # Original RB10E target height correction.
-    matrix[2, 3] += target_z_offset_mm
+    # matrix[2, 3] += target_z_offset_mm
 
     return matrix
 
@@ -416,7 +416,7 @@ def controller_pose_to_rb10e_target(
     user_scale: float,
     *,
     target_x_offset_mm: float = 300.0,
-    target_y_offset_mm: float = 200.0,
+    target_y_offset_mm: float = 500.0,
     target_z_offset_mm: float = 600.0,
 ) -> np.ndarray:
     """Convert an RB-frame Quest controller pose to an RB10E IK target."""

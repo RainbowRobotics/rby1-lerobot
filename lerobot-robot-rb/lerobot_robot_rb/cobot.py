@@ -853,6 +853,16 @@ class Cobot:
             CMD_TYPE.NONMOVE
         )
 
+    def set_joint_space_impedance(
+        self,
+    ):
+        """Set feed forward gain off."""
+
+        return self.SendCOMMAND(
+            f"set rb_joint_space_impedance 1,15,15,15,30,30,30,50,50,50,50,50,50,0",
+            CMD_TYPE.NONMOVE
+        )
+
     def ServoJ(
         self,
         joints_deg: Sequence[float],

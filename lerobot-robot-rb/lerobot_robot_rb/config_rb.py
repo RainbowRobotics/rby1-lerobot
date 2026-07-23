@@ -44,8 +44,8 @@ def _default_cameras() -> dict[str, CameraConfig]:
         "front": RealSenseCameraConfig(
             serial_number_or_name="409122274689",
             fps=30,
-            width=640,
-            height=480,
+            width=480,
+            height=640,
             rotation=Cv2Rotation.ROTATE_90,
         ),
     }
