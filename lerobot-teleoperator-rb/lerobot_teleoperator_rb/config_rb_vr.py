@@ -60,7 +60,9 @@ class RbVrConfig(TeleoperatorConfig):
     default_user_scale: float = 1300.0 / 700.0
 
     # Existing apply_scale() adds 300 mm to the target Z position.
-    target_z_offset_mm: float = 300.0
+    target_x_offset_mm: float = 300.0
+    target_y_offset_mm: float = 200.0
+    target_z_offset_mm: float = 600.0
 
     # Optional additional multiplier after user calibration.
     position_scale: float = 1.0
