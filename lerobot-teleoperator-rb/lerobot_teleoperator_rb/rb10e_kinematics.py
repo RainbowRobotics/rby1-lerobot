@@ -1,546 +1,797 @@
-"""Pure RB10E forward and inverse kinematics.
+"""RB10E forward kinematics, Jacobian and iterative IK.
 
-This module intentionally contains no robot communication. It converts an
-RB10E Cartesian target into a six-joint target that can be emitted by a
-LeRobot Teleoperator.
+This module preserves the numerical model and IKLM implementation from the
+original hardware-tested ``RB10E_utils.py``.
 
-Unit conventions
-----------------
-* ``q_rad``: joint angles in radians.
-* Target and FK translations: millimetres.
-* Target and FK rotations: 3x3 rotation matrices.
-* Jacobian translational rows: millimetres per radian.
-* Returned joint targets: radians.
+Only robot communication has been removed. The LeRobot Robot adapter owns the
+single control-box connection; this class performs kinematics only.
 
-The FK and Jacobian equations are retained from the existing RB10E VR
-teleoperation implementation.
+Units
+-----
+Joint values:
+    radians
+
+Cartesian translation:
+    millimetres
+
+Cartesian rotation:
+    3x3 rotation matrix inside a 4x4 homogeneous transform
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable
-
 import numpy as np
-from numpy.typing import NDArray
-
-from .constants import (
-    DEFAULT_IK_BASE_DAMPING,
-    DEFAULT_IK_ERROR_DAMPING_GAIN,
-    DEFAULT_IK_ITERATIONS,
-    DEFAULT_READY_POSE_RAD,
-    DOF,
-    RB10E_JOINT_LIMITS_RAD,
-)
 
 
-FloatArray = NDArray[np.float64]
-
-# cos(pi / 2), retained explicitly from the generated legacy equations.
-_C90 = 6.123233995736766e-17
+RAD2DEG = 180.0 / np.pi
+DEG2RAD = np.pi / 180.0
 
 
-@dataclass(frozen=True)
-class IKSolveInfo:
-    """Diagnostics from the most recent IK solve."""
+class RB10E:
+    """Original RB10E six-axis kinematics and IKLM solver."""
 
-    iterations: int
-    position_error_mm: float
-    orientation_error: float
-    total_error: float
-    used_lstsq_fallback: bool
+    def __init__(self) -> None:
+        self._DIM = 6
 
-
-class RB10EKinematics:
-    """RB10E numerical kinematics without control-box communication."""
-
-    def __init__(
-        self,
-        *,
-        initial_q_rad: Iterable[float] = DEFAULT_READY_POSE_RAD,
-        joint_limits_rad: Iterable[Iterable[float]] = RB10E_JOINT_LIMITS_RAD,
-        iterations: int = DEFAULT_IK_ITERATIONS,
-        base_damping: float = DEFAULT_IK_BASE_DAMPING,
-        error_damping_gain: float = DEFAULT_IK_ERROR_DAMPING_GAIN,
-        max_iteration_step_rad: float | None = None,
-    ) -> None:
-        self._joint_limits = np.asarray(
-            tuple(tuple(limit) for limit in joint_limits_rad),
+        self._q_out = np.zeros(
+            (self._DIM,),
             dtype=np.float64,
         )
 
-        if self._joint_limits.shape != (DOF, 2):
-            raise ValueError(
-                "joint_limits_rad must have shape "
-                f"({DOF}, 2), got {self._joint_limits.shape}."
+        # Original IK seed from RB10E_utils.py.
+        #
+        # This is only a numerical IK seed. It does not command the robot
+        # to move to this pose.
+        self._q = (
+            np.array(
+                [
+                    40.0,
+                    -70.0,
+                    -100.0,
+                    160.0,
+                    -60.0,
+                    0.0,
+                ],
+                dtype=np.float64,
             )
+            * DEG2RAD
+        )
 
-        if np.any(self._joint_limits[:, 0] > self._joint_limits[:, 1]):
-            raise ValueError("Each lower joint limit must be <= its upper limit.")
+        self._fk = np.zeros(
+            (4, 4),
+            dtype=np.float64,
+        )
 
-        if iterations <= 0:
-            raise ValueError("iterations must be greater than zero.")
+        self._jcbn = np.zeros(
+            (
+                self._DIM,
+                self._DIM,
+            ),
+            dtype=np.float64,
+        )
 
-        if base_damping < 0.0:
-            raise ValueError("base_damping must be non-negative.")
+        self._error = np.empty(
+            (6,),
+            dtype=np.float64,
+        )
 
-        if error_damping_gain < 0.0:
-            raise ValueError("error_damping_gain must be non-negative.")
+        # Keep original misspelled attribute names for parity.
+        self._gradiant = np.empty(
+            (self._DIM,),
+            dtype=np.float64,
+        )
+        self._hessian = np.empty(
+            (
+                self._DIM,
+                self._DIM,
+            ),
+            dtype=np.float64,
+        )
 
-        if (
-            max_iteration_step_rad is not None
-            and max_iteration_step_rad <= 0.0
-        ):
-            raise ValueError(
-                "max_iteration_step_rad must be positive or None."
+        # Original RB10E IK joint limits.
+        self._q_min = (
+            np.array(
+                [
+                    -360.0,
+                    -180.0,
+                    -154.0,
+                    -360.0,
+                    -360.0,
+                    -360.0,
+                ],
+                dtype=np.float64,
             )
-
-        self._iterations = int(iterations)
-        self._base_damping = float(base_damping)
-        self._error_damping_gain = float(error_damping_gain)
-        self._max_iteration_step_rad = max_iteration_step_rad
-
-        self._identity = np.eye(DOF, dtype=np.float64)
-
-        self._q_rad = self._validate_joint_vector(initial_q_rad)
-        self._q_rad = np.clip(
-            self._q_rad,
-            self._joint_limits[:, 0],
-            self._joint_limits[:, 1],
+            * DEG2RAD
         )
 
-        self._fk = np.eye(4, dtype=np.float64)
-        self._jacobian = np.zeros((DOF, DOF), dtype=np.float64)
-        self._transforms = tuple(
-            np.eye(4, dtype=np.float64) for _ in range(DOF)
+        self._q_max = (
+            np.array(
+                [
+                    360.0,
+                    180.0,
+                    154.0,
+                    360.0,
+                    360.0,
+                    360.0,
+                ],
+                dtype=np.float64,
+            )
+            * DEG2RAD
         )
-        self._last_info = IKSolveInfo(
-            iterations=0,
-            position_error_mm=0.0,
-            orientation_error=0.0,
-            total_error=0.0,
-            used_lstsq_fallback=False,
+
+        self._q_mid = (
+            self._q_max
+            + self._q_min
+        ) / 2.0
+
+        self.T0 = np.zeros(
+            (4, 4),
+            dtype=np.float64,
+        )
+        self.T1 = np.zeros(
+            (4, 4),
+            dtype=np.float64,
+        )
+        self.T2 = np.zeros(
+            (4, 4),
+            dtype=np.float64,
+        )
+        self.T3 = np.zeros(
+            (4, 4),
+            dtype=np.float64,
+        )
+        self.T4 = np.zeros(
+            (4, 4),
+            dtype=np.float64,
+        )
+        self.T5 = np.zeros(
+            (4, 4),
+            dtype=np.float64,
         )
 
-        self.compute_fk_and_jacobian(self._q_rad)
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
-
-    @property
-    def q_rad(self) -> FloatArray:
-        """Return the most recently solved joint vector in radians."""
-
-        return self._q_rad.copy()
-
-    @property
-    def fk(self) -> FloatArray:
-        """Return the latest 4x4 end-effector pose in millimetres."""
-
-        return self._fk.copy()
-
-    @property
-    def jacobian(self) -> FloatArray:
-        """Return the latest 6x6 geometric Jacobian."""
-
-        return self._jacobian.copy()
-
-    @property
-    def transforms(self) -> tuple[FloatArray, ...]:
-        """Return base-to-link transforms T0 through T5."""
-
-        return tuple(transform.copy() for transform in self._transforms)
-
-    @property
-    def joint_limits_rad(self) -> FloatArray:
-        return self._joint_limits.copy()
-
-    @property
-    def last_info(self) -> IKSolveInfo:
-        return self._last_info
-
-    # ------------------------------------------------------------------
-    # State management
-    # ------------------------------------------------------------------
-
-    def reset(self, q_rad: Iterable[float] = DEFAULT_READY_POSE_RAD) -> None:
-        """Reset the IK seed to a known joint pose."""
-
-        q = self._validate_joint_vector(q_rad)
-        self._q_rad = np.clip(
-            q,
-            self._joint_limits[:, 0],
-            self._joint_limits[:, 1],
+        self._We6 = np.identity(
+            6,
+            dtype=np.float64,
         )
-        self.compute_fk_and_jacobian(self._q_rad)
+        self._we = 1.0e-1
 
-    def set_seed(self, q_rad: Iterable[float]) -> None:
-        """Set the joint seed used by the next IK call."""
-
-        self.reset(q_rad)
+        # Initialise FK and Jacobian for the original seed.
+        self.update_fk_and_jcbn(
+            self._q
+        )
 
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _validate_joint_vector(q_rad: Iterable[float]) -> FloatArray:
-        q = np.asarray(tuple(q_rad), dtype=np.float64)
+    def _validate_joint_vector(
+        q: np.ndarray,
+    ) -> np.ndarray:
+        values = np.asarray(
+            q,
+            dtype=np.float64,
+        )
 
-        if q.shape != (DOF,):
+        if values.shape != (6,):
             raise ValueError(
-                f"Expected a ({DOF},) joint vector, got {q.shape}."
+                "Joint vector must have shape (6,), "
+                f"got {values.shape}."
             )
 
-        if not np.all(np.isfinite(q)):
-            raise ValueError(f"Joint vector contains NaN or Inf: {q}")
+        if not np.all(
+            np.isfinite(values)
+        ):
+            raise ValueError(
+                "Joint vector contains non-finite values."
+            )
 
-        return q.copy()
+        return values
 
     @staticmethod
-    def _validate_pose(target_pose_mm: FloatArray) -> FloatArray:
-        target = np.asarray(target_pose_mm, dtype=np.float64)
+    def _validate_transform(
+        transform: np.ndarray,
+        *,
+        name: str,
+    ) -> np.ndarray:
+        matrix = np.asarray(
+            transform,
+            dtype=np.float64,
+        )
 
-        if target.shape != (4, 4):
+        if matrix.shape != (4, 4):
             raise ValueError(
-                f"Expected a (4, 4) target pose, got {target.shape}."
+                f"{name} must have shape (4, 4), "
+                f"got {matrix.shape}."
             )
 
-        if not np.all(np.isfinite(target)):
-            raise ValueError("Target pose contains NaN or Inf.")
-
-        if not np.allclose(
-            target[3],
-            np.array([0.0, 0.0, 0.0, 1.0]),
-            atol=1e-6,
+        if not np.all(
+            np.isfinite(matrix)
         ):
             raise ValueError(
-                "Target pose must be a homogeneous transform with "
-                "last row [0, 0, 0, 1]."
+                f"{name} contains non-finite values."
             )
 
-        rotation = target[:3, :3]
-        should_be_identity = rotation.T @ rotation
-
-        if not np.allclose(
-            should_be_identity,
-            np.eye(3),
-            atol=1e-4,
-        ):
-            raise ValueError("Target rotation matrix is not orthonormal.")
-
-        determinant = float(np.linalg.det(rotation))
-        if not np.isclose(determinant, 1.0, atol=1e-4):
-            raise ValueError(
-                "Target rotation matrix must have determinant +1, "
-                f"got {determinant:.6f}."
-            )
-
-        return target.copy()
+        return matrix
 
     # ------------------------------------------------------------------
     # Forward kinematics and Jacobian
     # ------------------------------------------------------------------
 
-    def forward_kinematics(
+    def update_fk_and_jcbn(
         self,
-        q_rad: Iterable[float] | None = None,
-    ) -> FloatArray:
-        """Compute and return the RB10E TCP pose.
+        q: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Update FK and geometric Jacobian for one joint vector."""
 
-        The returned translation is in millimetres.
-        """
-
-        if q_rad is None:
-            q = self._q_rad
-        else:
-            q = self._validate_joint_vector(q_rad)
-
-        fk, _ = self.compute_fk_and_jacobian(q)
-        return fk
-
-    def compute_fk_and_jacobian(
-        self,
-        q_rad: Iterable[float],
-    ) -> tuple[FloatArray, FloatArray]:
-        """Compute the TCP pose and geometric Jacobian."""
-
-        q = self._validate_joint_vector(q_rad)
-
-        c0, c1, c2, c3, c4, c5 = np.cos(q)
-        s0, s1, s2, s3, s4, s5 = np.sin(q)
-
-        t0 = np.array(
-            [
-                [c0, -_C90 * s0, -s0, 0.0],
-                [s0, _C90 * c0, c0, 0.0],
-                [0.0, -1.0, _C90, 197.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            dtype=np.float64,
+        q = self._validate_joint_vector(
+            q
         )
 
-        t1 = t0 @ np.array(
+        self.T0 = np.array(
             [
-                [c1, -_C90 * s1, s1, 0.0],
-                [s1, _C90 * c1, -c1, 0.0],
-                [0.0, 1.0, _C90, -187.5],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            dtype=np.float64,
-        )
-
-        t2 = t1 @ np.array(
-            [
-                [c2, -_C90 * s2, s2, 0.0],
                 [
-                    _C90 * s2,
-                    (_C90 * _C90) * c2 + 1.0,
-                    _C90 - _C90 * c2,
-                    148.4,
+                    np.cos(q[0]),
+                    -6.12323399573677e-17
+                    * np.sin(q[0]),
+                    -1.0 * np.sin(q[0]),
+                    0.0,
                 ],
                 [
-                    -s2,
-                    _C90 - _C90 * c2,
-                    c2 + (_C90 * _C90),
-                    612.7,
-                ],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            dtype=np.float64,
-        )
-
-        t3 = t2 @ np.array(
-            [
-                [c3, -_C90 * s3, s3, 0.0],
-                [
-                    _C90 * s3,
-                    (_C90 * _C90) * c3 + 1.0,
-                    _C90 - _C90 * c3,
-                    -117.15,
+                    np.sin(q[0]),
+                    6.12323399573677e-17
+                    * np.cos(q[0]),
+                    1.0 * np.cos(q[0]),
+                    0.0,
                 ],
                 [
-                    -s3,
-                    _C90 - _C90 * c3,
-                    c3 + (_C90 * _C90),
-                    570.15,
+                    0.0,
+                    -1.0,
+                    6.12323399573677e-17,
+                    197.0,
                 ],
-                [0.0, 0.0, 0.0, 1.0],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                ],
             ],
             dtype=np.float64,
         )
 
-        t4 = t3 @ np.array(
-            [
-                [c4, -_C90 * s4, -s4, 0.0],
-                [s4, _C90 * c4, c4, 0.0],
-                [0.0, -1.0, _C90, 117.15],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            dtype=np.float64,
-        )
-
-        t5 = t4 @ np.array(
-            [
-                [c5, -_C90 * s5, s5, 0.0],
-                [s5, _C90 * c5, -c5, 0.0],
-                [0.0, 1.0, _C90, -259.3],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            dtype=np.float64,
-        )
-
-        fk = t5.copy()
-
-        jacobian = np.zeros((DOF, DOF), dtype=np.float64)
-
-        axis_0 = -t0[:3, 1]
-        axis_1 = t1[:3, 1]
-        axis_2 = t2[:3, 1]
-        axis_3 = t3[:3, 1]
-        axis_4 = -t4[:3, 1]
-        axis_5 = t5[:3, 1]
-
-        origins = (
-            t0[:3, 3],
-            t1[:3, 3],
-            t2[:3, 3],
-            t3[:3, 3],
-            t4[:3, 3],
-            t5[:3, 3],
-        )
-        axes = (
-            axis_0,
-            axis_1,
-            axis_2,
-            axis_3,
-            axis_4,
-            axis_5,
-        )
-
-        tcp_position = fk[:3, 3]
-
-        for index, (axis, origin) in enumerate(zip(axes, origins)):
-            jacobian[:3, index] = np.cross(
-                axis,
-                tcp_position - origin,
+        self.T1 = (
+            self.T0
+            @ np.array(
+                [
+                    [
+                        np.cos(q[1]),
+                        -6.12323399573677e-17
+                        * np.sin(q[1]),
+                        1.0 * np.sin(q[1]),
+                        0.0,
+                    ],
+                    [
+                        np.sin(q[1]),
+                        6.12323399573677e-17
+                        * np.cos(q[1]),
+                        -1.0 * np.cos(q[1]),
+                        0.0,
+                    ],
+                    [
+                        0.0,
+                        1.0,
+                        6.12323399573677e-17,
+                        -187.5,
+                    ],
+                    [
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                    ],
+                ],
+                dtype=np.float64,
             )
-            jacobian[3:, index] = axis
+        )
+
+        self.T2 = (
+            self.T1
+            @ np.array(
+                [
+                    [
+                        np.cos(q[2]),
+                        -6.12323399573677e-17
+                        * np.sin(q[2]),
+                        1.0 * np.sin(q[2]),
+                        0.0,
+                    ],
+                    [
+                        6.12323399573677e-17
+                        * np.sin(q[2]),
+                        3.74939945665464e-33
+                        * np.cos(q[2])
+                        + 1.0,
+                        6.12323399573677e-17
+                        - 6.12323399573677e-17
+                        * np.cos(q[2]),
+                        148.4,
+                    ],
+                    [
+                        -1.0 * np.sin(q[2]),
+                        6.12323399573677e-17
+                        - 6.12323399573677e-17
+                        * np.cos(q[2]),
+                        1.0 * np.cos(q[2])
+                        + 3.74939945665464e-33,
+                        612.7,
+                    ],
+                    [
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                    ],
+                ],
+                dtype=np.float64,
+            )
+        )
+
+        self.T3 = (
+            self.T2
+            @ np.array(
+                [
+                    [
+                        np.cos(q[3]),
+                        -6.12323399573677e-17
+                        * np.sin(q[3]),
+                        1.0 * np.sin(q[3]),
+                        0.0,
+                    ],
+                    [
+                        6.12323399573677e-17
+                        * np.sin(q[3]),
+                        3.74939945665464e-33
+                        * np.cos(q[3])
+                        + 1.0,
+                        6.12323399573677e-17
+                        - 6.12323399573677e-17
+                        * np.cos(q[3]),
+                        -117.15,
+                    ],
+                    [
+                        -1.0 * np.sin(q[3]),
+                        6.12323399573677e-17
+                        - 6.12323399573677e-17
+                        * np.cos(q[3]),
+                        1.0 * np.cos(q[3])
+                        + 3.74939945665464e-33,
+                        570.15,
+                    ],
+                    [
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                    ],
+                ],
+                dtype=np.float64,
+            )
+        )
+
+        self.T4 = (
+            self.T3
+            @ np.array(
+                [
+                    [
+                        np.cos(q[4]),
+                        -6.12323399573677e-17
+                        * np.sin(q[4]),
+                        -1.0 * np.sin(q[4]),
+                        0.0,
+                    ],
+                    [
+                        np.sin(q[4]),
+                        6.12323399573677e-17
+                        * np.cos(q[4]),
+                        1.0 * np.cos(q[4]),
+                        0.0,
+                    ],
+                    [
+                        0.0,
+                        -1.0,
+                        6.12323399573677e-17,
+                        117.15,
+                    ],
+                    [
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                    ],
+                ],
+                dtype=np.float64,
+            )
+        )
+
+        self.T5 = (
+            self.T4
+            @ np.array(
+                [
+                    [
+                        np.cos(q[5]),
+                        -6.12323399573677e-17
+                        * np.sin(q[5]),
+                        1.0 * np.sin(q[5]),
+                        0.0,
+                    ],
+                    [
+                        np.sin(q[5]),
+                        6.12323399573677e-17
+                        * np.cos(q[5]),
+                        -1.0 * np.cos(q[5]),
+                        0.0,
+                    ],
+                    [
+                        0.0,
+                        1.0,
+                        6.12323399573677e-17,
+                        -259.3,
+                    ],
+                    [
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                    ],
+                ],
+                dtype=np.float64,
+            )
+        )
+
+        fk = (
+            self.T5
+            @ np.array(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                dtype=np.float64,
+            )
+        )
 
         self._fk = fk.copy()
-        self._jacobian = jacobian.copy()
-        self._transforms = (
-            t0.copy(),
-            t1.copy(),
-            t2.copy(),
-            t3.copy(),
-            t4.copy(),
-            t5.copy(),
+
+        self._jcbn[
+            0:3,
+            0,
+        ] = np.cross(
+            -self.T0[0:3, 1],
+            fk[0:3, 3]
+            - self.T0[0:3, 3],
+        ).astype(
+            np.float64
         )
 
-        return fk.copy(), jacobian.copy()
-
-    # ------------------------------------------------------------------
-    # Pose error
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def pose_error(
-        target_pose_mm: FloatArray,
-        current_pose_mm: FloatArray,
-    ) -> FloatArray:
-        """Return the legacy six-dimensional RB10E IK error vector."""
-
-        target = RB10EKinematics._validate_pose(target_pose_mm)
-        current = RB10EKinematics._validate_pose(current_pose_mm)
-
-        target_rotation = target[:3, :3]
-        current_rotation = current[:3, :3]
-
-        relative_rotation = target_rotation @ current_rotation.T
-
-        error = np.empty(DOF, dtype=np.float64)
-        error[:3] = target[:3, 3] - current[:3, 3]
-
-        # Retain the orientation error definition used by the existing code.
-        error[3] = (
-            relative_rotation[2, 1] - relative_rotation[1, 2]
-        )
-        error[4] = (
-            relative_rotation[0, 2] - relative_rotation[2, 0]
-        )
-        error[5] = (
-            relative_rotation[1, 0] - relative_rotation[0, 1]
+        self._jcbn[
+            0:3,
+            1,
+        ] = np.cross(
+            self.T1[0:3, 1],
+            fk[0:3, 3]
+            - self.T1[0:3, 3],
+        ).astype(
+            np.float64
         )
 
-        return error
+        self._jcbn[
+            0:3,
+            2,
+        ] = np.cross(
+            self.T2[0:3, 1],
+            fk[0:3, 3]
+            - self.T2[0:3, 3],
+        ).astype(
+            np.float64
+        )
+
+        self._jcbn[
+            0:3,
+            3,
+        ] = np.cross(
+            self.T3[0:3, 1],
+            fk[0:3, 3]
+            - self.T3[0:3, 3],
+        ).astype(
+            np.float64
+        )
+
+        self._jcbn[
+            0:3,
+            4,
+        ] = np.cross(
+            -self.T4[0:3, 1],
+            fk[0:3, 3]
+            - self.T4[0:3, 3],
+        ).astype(
+            np.float64
+        )
+
+        self._jcbn[
+            0:3,
+            5,
+        ] = np.cross(
+            self.T5[0:3, 1],
+            fk[0:3, 3]
+            - self.T5[0:3, 3],
+        ).astype(
+            np.float64
+        )
+
+        self._jcbn[
+            3:6,
+            0,
+        ] = -self.T0[0:3, 1]
+
+        self._jcbn[
+            3:6,
+            1,
+        ] = self.T1[0:3, 1]
+
+        self._jcbn[
+            3:6,
+            2,
+        ] = self.T2[0:3, 1]
+
+        self._jcbn[
+            3:6,
+            3,
+        ] = self.T3[0:3, 1]
+
+        self._jcbn[
+            3:6,
+            4,
+        ] = -self.T4[0:3, 1]
+
+        self._jcbn[
+            3:6,
+            5,
+        ] = self.T5[0:3, 1]
+
+        return (
+            fk,
+            self._jcbn.copy(),
+        )
 
     # ------------------------------------------------------------------
-    # Inverse kinematics
+    # Cartesian error
     # ------------------------------------------------------------------
 
-    def solve(
+    def update_error_vector(
         self,
-        target_pose_mm: FloatArray,
-        *,
-        initial_q_rad: Iterable[float] | None = None,
-        iterations: int | None = None,
-    ) -> FloatArray:
-        """Solve a Cartesian target and return six joint angles in radians.
+        targ_6D: np.ndarray,
+        curr_6D: np.ndarray,
+    ) -> np.ndarray:
+        """Calculate the original six-dimensional IK error vector."""
+
+        target = self._validate_transform(
+            targ_6D,
+            name="targ_6D",
+        )
+        current = self._validate_transform(
+            curr_6D,
+            name="curr_6D",
+        )
+
+        rotation_target = target[
+            0:3,
+            0:3,
+        ].copy()
+
+        rotation_current = current[
+            0:3,
+            0:3,
+        ].copy()
+
+        rotation_error = (
+            rotation_target
+            @ rotation_current.T
+        )
+
+        self._error[0] = (
+            target[0, 3]
+            - current[0, 3]
+        )
+        self._error[1] = (
+            target[1, 3]
+            - current[1, 3]
+        )
+        self._error[2] = (
+            target[2, 3]
+            - current[2, 3]
+        )
+
+        self._error[3] = (
+            rotation_error[2, 1]
+            - rotation_error[1, 2]
+        )
+        self._error[4] = (
+            rotation_error[0, 2]
+            - rotation_error[2, 0]
+        )
+        self._error[5] = (
+            rotation_error[1, 0]
+            - rotation_error[0, 1]
+        )
+
+        return self._error
+
+    # ------------------------------------------------------------------
+    # Iterative inverse kinematics
+    # ------------------------------------------------------------------
+
+    def IKLM(
+        self,
+        initial_q: np.ndarray,
+        targ_6D: np.ndarray,
+        iter: int,
+    ) -> np.ndarray:
+        """Run the original iterative IKLM update.
 
         Parameters
         ----------
-        target_pose_mm:
-            Homogeneous 4x4 target pose. Translation must be in millimetres.
-        initial_q_rad:
-            Optional IK seed. When omitted, the previous solution is used.
-        iterations:
-            Optional number of solver iterations. When omitted, the value
-            configured at construction is used.
+        initial_q:
+            Initial six-joint seed in radians.
+
+        targ_6D:
+            Desired 4x4 TCP transform. Translation is in millimetres.
+
+        iter:
+            Number of iterations. The original VR loop uses three.
+
+        Returns
+        -------
+        numpy.ndarray
+            Updated six-joint solution in radians.
+
+        Notes
+        -----
+        The solution is also stored in ``self._q``, matching the original
+        implementation.
         """
 
-        target = self._validate_pose(target_pose_mm)
-
-        if initial_q_rad is None:
-            q = self._q_rad.copy()
-        else:
-            q = self._validate_joint_vector(initial_q_rad)
-            q = np.clip(
-                q,
-                self._joint_limits[:, 0],
-                self._joint_limits[:, 1],
+        if not isinstance(
+            iter,
+            int,
+        ):
+            raise TypeError(
+                "iter must be an integer."
             )
 
-        iteration_count = (
-            self._iterations if iterations is None else int(iterations)
+        if iter <= 0:
+            raise ValueError(
+                f"iter must be > 0, got {iter}."
+            )
+
+        q = self._validate_joint_vector(
+            initial_q
+        ).copy()
+
+        target = self._validate_transform(
+            targ_6D,
+            name="targ_6D",
         )
 
-        if iteration_count <= 0:
-            raise ValueError("iterations must be greater than zero.")
+        for _ in range(iter):
+            fk, jcbn = (
+                self.update_fk_and_jcbn(
+                    q
+                )
+            )
 
-        used_lstsq_fallback = False
+            error = (
+                self.update_error_vector(
+                    target,
+                    fk,
+                )
+            )
 
-        for _ in range(iteration_count):
-            fk, jacobian = self.compute_fk_and_jacobian(q)
-            error = self.pose_error(target, fk)
+            quadratic_error = (
+                error.T
+                @ error
+                * 0.5
+            )
 
-            quadratic_error = 0.5 * float(error @ error)
-            gradient = jacobian.T @ error
-
-            damping = (
-                self._base_damping
-                + self._error_damping_gain * quadratic_error
+            gradiant = (
+                jcbn.T
+                @ error
             )
 
             hessian_approx = (
-                jacobian.T @ jacobian
-                + damping * self._identity
+                jcbn.T
+                @ jcbn
+                + quadratic_error
+                * self._We6
+                + 2.0
+                * self._We6
             )
 
             try:
                 delta_q = np.linalg.solve(
                     hessian_approx,
-                    gradient,
+                    gradiant,
                 )
             except np.linalg.LinAlgError:
-                # The damping should normally make H invertible, but keep a
-                # deterministic fallback so a singular numerical case does
-                # not crash the teleoperation loop.
-                delta_q = np.linalg.lstsq(
-                    hessian_approx,
-                    gradient,
-                    rcond=None,
-                )[0]
-                used_lstsq_fallback = True
-
-            if self._max_iteration_step_rad is not None:
-                delta_q = np.clip(
-                    delta_q,
-                    -self._max_iteration_step_rad,
-                    self._max_iteration_step_rad,
+                # The original calculation uses solve(). This fallback is
+                # only used when numerical singularity prevents a solution.
+                delta_q = (
+                    np.linalg.lstsq(
+                        hessian_approx,
+                        gradiant,
+                        rcond=None,
+                    )[0]
                 )
 
-            q = np.clip(
-                q + delta_q,
-                self._joint_limits[:, 0],
-                self._joint_limits[:, 1],
+            thetas_unlimited = (
+                q
+                + delta_q
             )
 
-        final_fk, _ = self.compute_fk_and_jacobian(q)
-        final_error = self.pose_error(target, final_fk)
+            q = np.clip(
+                thetas_unlimited,
+                self._q_min,
+                self._q_max,
+            )
 
-        position_error_mm = float(np.linalg.norm(final_error[:3]))
-        orientation_error = float(np.linalg.norm(final_error[3:]))
-        total_error = float(np.linalg.norm(final_error))
+            self.update_fk_and_jcbn(
+                q
+            )
 
-        self._q_rad = q.copy()
-        self._last_info = IKSolveInfo(
-            iterations=iteration_count,
-            position_error_mm=position_error_mm,
-            orientation_error=orientation_error,
-            total_error=total_error,
-            used_lstsq_fallback=used_lstsq_fallback,
+        self._q = q.copy()
+
+        return self._q.copy()
+
+    # ------------------------------------------------------------------
+    # Convenience methods
+    # ------------------------------------------------------------------
+
+    def set_q(
+        self,
+        q: np.ndarray,
+        *,
+        clip_to_limits: bool = True,
+    ) -> None:
+        """Set the current IK seed without commanding the robot."""
+
+        values = self._validate_joint_vector(
+            q
         )
 
-        return q.copy()
+        if clip_to_limits:
+            values = np.clip(
+                values,
+                self._q_min,
+                self._q_max,
+            )
+
+        self._q = values.copy()
+        self.update_fk_and_jcbn(
+            self._q
+        )
+
+    def get_q(self) -> np.ndarray:
+        """Return the current IK solution in radians."""
+
+        return self._q.copy()
+
+    def get_fk(self) -> np.ndarray:
+        """Return the latest TCP forward-kinematics transform."""
+
+        return self._fk.copy()
+
+    def get_jacobian(self) -> np.ndarray:
+        """Return the latest geometric Jacobian."""
+
+        return self._jcbn.copy()

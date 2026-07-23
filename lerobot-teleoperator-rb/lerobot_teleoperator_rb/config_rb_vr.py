@@ -1,98 +1,296 @@
+"""Configuration for the RB-Series Meta Quest VR teleoperator.
+
+This configuration contains only values used by the current ``RbVr``
+implementation:
+
+- Meta Quest UDP communication
+- Controller selection and buttons
+- User reach scaling
+- RB10E target translation
+- IK iteration count
+- Optional gripper output
+
+Robot TCP communication and ServoJ parameters belong to
+``lerobot_robot_rb.config_rb.RbCobotConfig``.
+"""
+
 from __future__ import annotations
 
+import ipaddress
+import math
 from dataclasses import dataclass
-from typing import Literal
 
 from lerobot.teleoperators.config import TeleoperatorConfig
 
 
 @TeleoperatorConfig.register_subclass("rb_vr")
-@dataclass(kw_only=True)
+@dataclass
 class RbVrConfig(TeleoperatorConfig):
-    """Configuration for the Meta Quest VR teleoperator for RB cobots.
+    """Meta Quest VR teleoperator configuration.
 
-    The teleoperator receives Meta Quest controller poses over UDP,
-    converts the selected controller pose into the RB10E coordinate frame,
-    solves joint-space IK, and emits six joint targets in radians.
+    The default configuration requires the selected controller's primary
+    button—Right A by default—to initialize VR control.
 
-    The paired robot must use ``action_space="joint"``.
+    Control sequence
+    ----------------
+    1. Receive valid controller and headset tracking.
+    2. Press the primary button to initialize user scale.
+    3. Hold Grip to enable robot following.
+    4. Release Grip to stop ServoJ transmission.
+    5. Press the secondary button to disarm control completely.
     """
 
     # ------------------------------------------------------------------
     # Meta Quest UDP communication
     # ------------------------------------------------------------------
 
-    # PC interface receiving Quest packets.
+    # Concrete PC IP is required when send_handshake=True.
+    #
+    # Use "0.0.0.0" only when:
+    #     send_handshake=False
     local_ip: str = "0.0.0.0"
     local_port: int = 5005
 
-    # Quest address used to send the initial PC IP/port handshake.
-    # Set to None when the Quest application sends directly without
-    # requiring the handshake.
+    # Quest IP may be omitted only when the handshake is disabled.
     meta_quest_ip: str | None = None
     meta_quest_port: int = 6000
-    send_handshake: bool = True
 
-    # ------------------------------------------------------------------
-    # Controller mapping
-    # ------------------------------------------------------------------
+    # Sends:
+    #     {"ip": local_ip, "port": local_port}
+    #
+    # to Meta Quest when the receiver starts.
+    send_handshake: bool = False
 
-    controller_hand: Literal["right", "left"] = "right"
-
-    # Grip activates/deactivates arm following.
-    grip_threshold: float = 0.5
-
-    # Trigger can later be mapped to the physical gripper.
-    use_gripper: bool = False
-
-    # If no packet arrives within this duration, stop updating the target
-    # and hold the last valid joint command.
+    # Tracking packets older than this are considered stale.
     tracking_timeout_s: float = 0.25
 
     # ------------------------------------------------------------------
-    # VR-to-RB workspace mapping
+    # Controller and safety controls
     # ------------------------------------------------------------------
 
-    # Existing implementation:
-    #     user_scale = 1300 mm / measured arm reach.
+    controller_hand: str = "right"
+
+    # Grip values greater than this enable following.
+    grip_threshold: float = 0.5
+
+    # True:
+    #     Primary/A button must be pressed before Grip can move the arm.
+    #
+    # False:
+    #     VR control is armed immediately after connection.
+    require_initialization_button: bool = True
+
+    # ------------------------------------------------------------------
+    # User reach and Cartesian target
+    # ------------------------------------------------------------------
+
+    # Pressing A computes:
+    #
+    #     user_scale =
+    #         reference_reach_mm
+    #         / measured_controller_reach_mm
     auto_user_scale: bool = True
+
     reference_reach_mm: float = 1300.0
+
+    # Used when auto_user_scale=False.
     default_user_scale: float = 1300.0 / 700.0
 
-    # Existing apply_scale() adds 300 mm to the target Z position.
+    # Additional multiplier applied after user calibration.
+    position_scale: float = 1.0
+
+    # Added to the scaled RB10E target Z translation.
     target_x_offset_mm: float = 300.0
     target_y_offset_mm: float = 200.0
     target_z_offset_mm: float = 600.0
 
-    # Optional additional multiplier after user calibration.
-    position_scale: float = 1.0
-
     # ------------------------------------------------------------------
-    # RB10E inverse kinematics
+    # Inverse kinematics
     # ------------------------------------------------------------------
 
+    # Original RB10E VR implementation uses three IKLM iterations per tick.
     ik_iterations: int = 3
 
-    # Start the IK solver from the most recently emitted joint target.
-    # On first use, initialise it from the connected RB robot state.
-    initialize_ik_from_robot: bool = True
-
     # ------------------------------------------------------------------
-    # Safety / fail-safe behavior
+    # Optional gripper
     # ------------------------------------------------------------------
 
-    # Maximum change in the joint target produced by one get_action() call.
-    # The RbCobot follower also performs its own final action clamp.
-    # A 버튼을 누르기 전까지 현재 자세를 유지한다.
-    require_initialization_button: bool = True
+    # When enabled, the selected controller trigger produces:
+    #
+    #     gripper_0 = 1 - trigger
+    #
+    # LeRobot convention:
+    #     1.0 = open
+    #     0.0 = closed
+    use_gripper: bool = False
 
-    # get_action() 한 번당 허용할 최대 joint target 변화량.
-    max_joint_delta_rad: float = 0.10
+    def __post_init__(self) -> None:
+        parent_post_init = getattr(
+            super(),
+            "__post_init__",
+            None,
+        )
+        if parent_post_init is not None:
+            parent_post_init()
 
-    # IK 결과가 이 오차보다 크면 명령을 폐기한다.
-    max_ik_position_error_mm: float = 50.0
-    max_ik_orientation_error: float = 1.0
+        self._validate_ip(
+            self.local_ip,
+            field_name="local_ip",
+            allow_none=False,
+        )
 
-    # When tracking is lost or grip is released, keep emitting the last
-    # valid target rather than zeros.
-    hold_last_target: bool = True
+        self._validate_port(
+            self.local_port,
+            field_name="local_port",
+        )
+
+        self._validate_ip(
+            self.meta_quest_ip,
+            field_name="meta_quest_ip",
+            allow_none=True,
+        )
+
+        self._validate_port(
+            self.meta_quest_port,
+            field_name="meta_quest_port",
+        )
+
+        if self.send_handshake:
+            if self.meta_quest_ip is None:
+                raise ValueError(
+                    "meta_quest_ip is required when "
+                    "send_handshake=True."
+                )
+
+            if self.local_ip == "0.0.0.0":
+                raise ValueError(
+                    "local_ip must be a concrete reachable PC IP "
+                    "when send_handshake=True."
+                )
+
+        if self.controller_hand not in (
+            "right",
+            "left",
+        ):
+            raise ValueError(
+                "controller_hand must be 'right' or 'left', "
+                f"got {self.controller_hand!r}."
+            )
+
+        self._validate_finite_positive(
+            self.tracking_timeout_s,
+            field_name="tracking_timeout_s",
+        )
+
+        if (
+            not math.isfinite(self.grip_threshold)
+            or not 0.0 <= self.grip_threshold <= 1.0
+        ):
+            raise ValueError(
+                "grip_threshold must be finite and in [0, 1], "
+                f"got {self.grip_threshold}."
+            )
+
+        self._validate_finite_positive(
+            self.reference_reach_mm,
+            field_name="reference_reach_mm",
+        )
+
+        self._validate_finite_positive(
+            self.default_user_scale,
+            field_name="default_user_scale",
+        )
+
+        self._validate_finite_positive(
+            self.position_scale,
+            field_name="position_scale",
+        )
+
+        for field_name in (
+            "target_x_offset_mm",
+            "target_y_offset_mm",
+            "target_z_offset_mm",
+        ):
+            value = getattr(self, field_name)
+
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"{field_name} must be finite, got {value}."
+                )
+
+        if not isinstance(
+            self.ik_iterations,
+            int,
+        ):
+            raise TypeError(
+                "ik_iterations must be an integer, "
+                f"got {type(self.ik_iterations).__name__}."
+            )
+
+        if self.ik_iterations <= 0:
+            raise ValueError(
+                "ik_iterations must be > 0, "
+                f"got {self.ik_iterations}."
+            )
+
+    @staticmethod
+    def _validate_ip(
+        value: str | None,
+        *,
+        field_name: str,
+        allow_none: bool,
+    ) -> None:
+        if value is None:
+            if allow_none:
+                return
+
+            raise ValueError(
+                f"{field_name} must not be None."
+            )
+
+        if not isinstance(value, str):
+            raise TypeError(
+                f"{field_name} must be a string, "
+                f"got {type(value).__name__}."
+            )
+
+        try:
+            ipaddress.IPv4Address(value)
+        except ipaddress.AddressValueError as exc:
+            raise ValueError(
+                f"{field_name} must be a valid IPv4 address, "
+                f"got {value!r}."
+            ) from exc
+
+    @staticmethod
+    def _validate_port(
+        value: int,
+        *,
+        field_name: str,
+    ) -> None:
+        if not isinstance(value, int):
+            raise TypeError(
+                f"{field_name} must be an integer, "
+                f"got {type(value).__name__}."
+            )
+
+        if not 0 < value <= 65535:
+            raise ValueError(
+                f"{field_name} must be in [1, 65535], "
+                f"got {value}."
+            )
+
+    @staticmethod
+    def _validate_finite_positive(
+        value: float,
+        *,
+        field_name: str,
+    ) -> None:
+        if (
+            not math.isfinite(value)
+            or value <= 0.0
+        ):
+            raise ValueError(
+                f"{field_name} must be finite and > 0, "
+                f"got {value}."
+            )
