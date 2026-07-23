@@ -843,6 +843,16 @@ class Cobot:
             CMD_TYPE.NONMOVE
         )
 
+    def set_ff_gain_off(
+        self,
+    ):
+        """Set feed forward gain off."""
+
+        return self.SendCOMMAND(
+            f"set_ff_gain(0)",
+            CMD_TYPE.NONMOVE
+        )
+
     def ServoJ(
         self,
         joints_deg: Sequence[float],
