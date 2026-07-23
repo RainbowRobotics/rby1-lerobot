@@ -100,9 +100,9 @@ class RbVrConfig(TeleoperatorConfig):
     position_scale: float = 1.0
 
     # Added to the scaled RB10E target Z translation.
-    target_x_offset_mm: float = 300.0
-    target_y_offset_mm: float = 200.0
-    target_z_offset_mm: float = 600.0
+    target_x_offset_mm: float = 600.0
+    target_y_offset_mm: float = 400.0
+    target_z_offset_mm: float = 900.0
 
     # ------------------------------------------------------------------
     # Inverse kinematics

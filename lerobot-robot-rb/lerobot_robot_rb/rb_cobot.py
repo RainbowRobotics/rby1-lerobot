@@ -31,6 +31,7 @@ import logging
 from typing import Any
 
 import numpy as np
+import time
 
 from lerobot.cameras import make_cameras_from_configs
 from lerobot.robots.robot import Robot
@@ -375,7 +376,10 @@ class RbCobot(Robot):
             self._robot = cobot
 
             cobot.set_ff_gain_off()
-            
+            time.sleep(0.5)
+            cobot.set_joint_space_impedance()
+            time.sleep(0.5)
+
             if cfg.set_speed_bar_on_connect:
                 cobot.SetBaseSpeed(cfg.speed_bar)
                 logger.info(
