@@ -823,13 +823,13 @@ class Cobot:
 
     def gripper_dxl_xm_initialization(
         self,
-        device_id: int = 0,
+        mode: int = 0,
     ):
         """Initialize the control-box Dynamixel XM gripper."""
 
         return self.SendCOMMAND(
-            "gripper_dxl_xm_initialization"
-            f"({int(device_id)})"
+            f"gripper_macro 37,0,0,0,0,0,0,0,0,0",
+            CMD_TYPE.NONMOVE
         )
 
     def gripper_dxl_xm_set_target_current(
@@ -839,8 +839,8 @@ class Cobot:
         """Set the Dynamixel XM gripper target current in mA."""
 
         return self.SendCOMMAND(
-            "gripper_dxl_xm_set_target_current"
-            f"({int(current_mA)})"
+            f"gripper_macro 37,0,2,0,{current_mA},0,0,0,0,0",
+            CMD_TYPE.NONMOVE
         )
 
     def ServoJ(
