@@ -45,7 +45,7 @@ lerobot-teleoperate \
   --teleop.meta_quest_ip=192.168.0.206 \
   --teleop.send_handshake=true \
   --teleop.use_gripper=true \
-  --dataset.fps=35
+  --fps=35
 ```
 
 
