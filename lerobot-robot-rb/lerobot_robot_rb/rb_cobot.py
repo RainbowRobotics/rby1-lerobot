@@ -397,13 +397,12 @@ class RbCobot(Robot):
             for camera in self.cameras.values():
                 camera.connect()
 
-            self._servo_enabled = False
+            self._servo_enabled = True
             self._last_action_rad = None
             self._is_connected = True
 
             self.configure()
             _set_active_rb_cobot(self)
-
             state = cobot.GetLatestState(
                 timeout_s=cfg.first_state_timeout_s
             )
@@ -727,7 +726,6 @@ class RbCobot(Robot):
         ``config.control_rate_hz``. With the default configuration this is
         35 Hz.
         """
-
         if not self.is_connected:
             raise DeviceNotConnectedError(
                 f"{self} is not connected."
