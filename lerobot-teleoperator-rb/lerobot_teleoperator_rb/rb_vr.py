@@ -446,7 +446,7 @@ class RbVr(Teleoperator):
             # Servo gate is OFF, but retain the current IK target as the
             # logical action for the next startup transition.
             self._last_action_rad = (
-                kinematics._q.copy()
+                robot.get_joint_positions(measured=True)
             )
 
             return self._build_action(
@@ -610,6 +610,29 @@ class RbVr(Teleoperator):
         q_start = robot.get_joint_positions(
             measured=True
         )
+        kinematics.set_q(q_start)
+        kinematics.IKLM(
+            kinematics._q,
+            controller_pose_to_rb10e_target(
+                self._require_receiver().get_state().right.pose_rb,
+                head_pose_to_torso(
+                    self._require_receiver().get_state().head.pose_rb
+                ),
+                self._user_scale
+                * float(self._config.position_scale),
+                target_x_offset_mm=(
+                    self._config.target_x_offset_mm
+                ),
+                target_y_offset_mm=(
+                    self._config.target_y_offset_mm
+                ),
+                target_z_offset_mm=(
+                    self._config.target_z_offset_mm
+                ),
+            ),
+            self._config.ik_iterations,
+        )
+
         q_end = kinematics._q.copy()
 
         self._validate_joint_vector(
