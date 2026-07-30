@@ -119,7 +119,7 @@ Add one or more cameras by passing a `cameras` configuration:
 lerobot-teleoperate \
   --robot.type=rby1 \
   --robot.address=192.168.30.1:50051 \
-  --robot.cameras='{"front": {"type": "realsense", "serial_number_or_name": "XXXXXXXXX", "fps": 30, "width": 640, "height": 480}}' \
+  --robot.cameras='{"front": {"type": "intelrealsense", "serial_number_or_name": "XXXXXXXXX", "fps": 30, "width": 640, "height": 480}}' \
   --teleop.type=rby1_leader_arm \
   --display_data=true
 ```
