@@ -109,7 +109,7 @@ class RbVrConfig(TeleoperatorConfig):
     # ------------------------------------------------------------------
 
     # Original RB10E VR implementation uses three IKLM iterations per tick.
-    ik_iterations: int = 3
+    ik_iterations: int = 5
 
     # ------------------------------------------------------------------
     # Optional gripper
