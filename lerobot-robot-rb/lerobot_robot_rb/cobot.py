@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Sequence
+import multiprocessing as mp
 
 
 logger = logging.getLogger(__name__)
@@ -364,16 +365,13 @@ class Cobot:
 
         self._command_lock = threading.Lock()
         self._state_lock = threading.Lock()
-        self._state_ready = threading.Event()
         self._stop_event = threading.Event()
 
         self._data_thread: threading.Thread | None = None
         self._data_error: Exception | None = None
 
         # Compatibility field. New code should use GetLatestState().
-        self.reqdata_queue: queue.Queue[systemSTAT] = (
-            queue.Queue(maxsize=1)
-        )
+        self.reqdata_queue = mp.Queue(maxsize=1)
 
         logger.info("RB TCP client version %s", self.__RB_VERSION__)
 
@@ -461,15 +459,16 @@ class Cobot:
         self.DATASock = data_sock
 
         self._stop_event.clear()
-        self._state_ready.clear()
         self._data_error = None
 
-        self._data_thread = threading.Thread(
-            target=self._read_data_loop,
-            name="rb-cobot-data",
-            daemon=True,
-        )
-        self._data_thread.start()
+        reqdata_process = mp.Process(target=self._read_data_loop, args=(self.reqdata_queue,), daemon=True)
+        reqdata_process.start()
+        # self._data_thread = threading.Thread(
+        #     target=self._read_data_loop,
+        #     name="rb-cobot-data",
+        #     daemon=True,
+        # )
+        # self._data_thread.start()
 
         logger.info(
             "RB command/data ports connected: %s:%d, %s:%d",
@@ -543,27 +542,7 @@ class Cobot:
 
         return b"".join(chunks)
 
-    def _publish_state(self, state: systemSTAT) -> None:
-        with self._state_lock:
-            self.systemstat_global = state
-
-        # Keep only the latest queued state for compatibility.
-        try:
-            self.reqdata_queue.put_nowait(state)
-        except queue.Full:
-            try:
-                self.reqdata_queue.get_nowait()
-            except queue.Empty:
-                pass
-
-            try:
-                self.reqdata_queue.put_nowait(state)
-            except queue.Full:
-                pass
-
-        self._state_ready.set()
-
-    def _read_data_loop(self) -> None:
+    def _read_data_loop(self, queue:mp.Queue) -> None:
         sock = self.DATASock
 
         if sock is None:
@@ -581,9 +560,9 @@ class Cobot:
                     _STATE_PACKET_BYTES,
                 )
                 state = _decode_state_packet(packet)
-
                 if state is not None:
-                    self._publish_state(state)
+                    # self._publish_state(state)
+                    queue.put(state)
 
                 deadline += self._data_request_period_s
                 remaining = deadline - time.perf_counter()
@@ -601,7 +580,6 @@ class Cobot:
                     "RB data receiver stopped: %s",
                     exc,
                 )
-                self._state_ready.set()
 
     def wait_for_first_state(
         self,
@@ -610,7 +588,17 @@ class Cobot:
         if timeout_s <= 0.0:
             raise ValueError("timeout_s must be positive.")
 
-        ready = self._state_ready.wait(timeout_s)
+        start_time = time.perf_counter()
+
+        ready = True
+
+        while True:
+            if not self.reqdata_queue.empty():
+                break
+            if time.perf_counter() - start_time < timeout_s:
+                ready = True
+                break
+            time.sleep(0.02)
 
         if self._data_error is not None:
             raise RuntimeError(
@@ -636,58 +624,12 @@ class Cobot:
                     "timeout_s must be positive or None."
                 )
 
-            if not self._state_ready.wait(timeout_s):
-                raise TimeoutError(
-                    "Timed out waiting for RB state data."
-                )
-
         if self._data_error is not None:
             raise RuntimeError(
                 "RB data receiver failed."
             ) from self._data_error
 
-        with self._state_lock:
-            return self.systemstat_global
-
-    # Original compatibility methods. The thread loop replaces the old
-    # multiprocessing implementations.
-    def ReqDataStart(self, sock: socket.socket) -> None:
-        request = b"reqdata"
-
-        while not self._stop_event.is_set():
-            sock.sendall(request)
-            self._stop_event.wait(0.01)
-
-    def ReadDATA(
-        self,
-        sock: socket.socket,
-        output_queue=None,
-    ) -> None:
-        request = b"reqdata"
-        deadline = time.perf_counter()
-
-        while not self._stop_event.is_set():
-            sock.sendall(request)
-
-            packet = self._recv_exact(
-                sock,
-                _STATE_PACKET_BYTES,
-            )
-            state = _decode_state_packet(packet)
-
-            if state is not None:
-                self._publish_state(state)
-
-                if output_queue is not None:
-                    output_queue.put(state)
-
-            deadline += self._data_request_period_s
-            remaining = deadline - time.perf_counter()
-
-            if remaining > 0.0:
-                self._stop_event.wait(remaining)
-            else:
-                deadline = time.perf_counter()
+        return self.reqdata_queue.get()
 
     # ------------------------------------------------------------------
     # State helpers
