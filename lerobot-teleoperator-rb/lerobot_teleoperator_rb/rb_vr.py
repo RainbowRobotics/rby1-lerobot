@@ -47,11 +47,6 @@ from lerobot_robot_rb.rb_cobot import (
 )
 
 from .config_rb_vr import RbVrConfig
-from .frame_transforms import (
-    compute_user_scale,
-    controller_pose_to_rb10e_target,
-    head_pose_to_torso,
-)
 from .rb10e_kinematics import RB10E
 from .vr_receiver import (
     VRButtonEvents,
@@ -181,6 +176,21 @@ class RbVr(Teleoperator):
             send_handshake=self._config.send_handshake,
             tracking_timeout_s=(
                 self._config.tracking_timeout_s
+            ),
+            grip_threshold=self._config.grip_threshold,
+            initial_user_scale=self._config.default_user_scale,
+            user_scale_reference_mm=self._config.reference_reach_mm,
+            controller_z_rotation_deg=(
+                self._config.controller_z_rotation_deg
+            ),
+            controller_x_offset_mm=(
+                self._config.controller_x_offset_mm
+            ),
+            controller_y_offset_mm=(
+                self._config.controller_y_offset_mm
+            ),
+            controller_z_offset_mm=(
+                self._config.controller_z_offset_mm
             ),
         )
 
@@ -397,25 +407,9 @@ class RbVr(Teleoperator):
                 controller,
             )
 
-        torso_pose = head_pose_to_torso(
-            vr_state.head.pose_rb
-        )
-
-        target_pose = controller_pose_to_rb10e_target(
-            controller.pose_rb,
-            torso_pose,
-            self._user_scale
-            * float(self._config.position_scale),
-            target_x_offset_mm=(
-                self._config.target_x_offset_mm
-            ),
-            target_y_offset_mm=(
-                self._config.target_y_offset_mm
-            ),
-            target_z_offset_mm=(
-                self._config.target_z_offset_mm
-            ),
-        )
+        # MQ3 already publishes the interpolated, torso-relative and scaled
+        # Cartesian target expected by the RB kinematics solver.
+        target_pose = controller.pose_rb
 
         grip_pressed = (
             controller.buttons.grip
@@ -541,33 +535,8 @@ class RbVr(Teleoperator):
             )
             return False
 
-        torso_pose = head_pose_to_torso(
-            vr_state.head.pose_rb
-        )
-
-        if self._config.auto_user_scale:
-            try:
-                user_scale = compute_user_scale(
-                    controller.pose_rb,
-                    torso_pose,
-                    reference_reach_mm=(
-                        self._config.reference_reach_mm
-                    ),
-                )
-            except ValueError as exc:
-                robot.disable_servo_commands()
-
-                logger.warning(
-                    "VR user-scale initialization failed: %s",
-                    exc,
-                )
-                return False
-
-            self._user_scale = user_scale
-        else:
-            self._user_scale = float(
-                self._config.default_user_scale
-            )
+        # Scale calculation is performed in MQ3 on the A-button sample.
+        self._user_scale = vr_state.user_scale
 
         # Re-initialization always cancels active motion. The operator must
         # hold Grip again after the new scale has been applied.
@@ -609,6 +578,17 @@ class RbVr(Teleoperator):
 
         q_start = robot.get_joint_positions(
             measured=True
+        )
+
+        kinematics.set_q(q_start)
+        state = self._require_receiver().get_state(require_fresh=True)
+        controller, _, _ = self._selected_controller_and_events(
+            state, VRButtonEvents()
+        )
+        kinematics.IKLM(
+            kinematics._q,
+            controller.pose_rb,
+            self._config.ik_iterations * 3,
         )
         q_end = kinematics._q.copy()
 

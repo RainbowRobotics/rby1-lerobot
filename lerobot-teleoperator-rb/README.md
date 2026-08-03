@@ -55,18 +55,18 @@ lerobot-teleoperate \
 ```bash
 lerobot-record \
   --robot.type=rb10 \
-  --robot.ip=192.168.0.210 \
+  --robot.ip=192.168.50.100 \
   --robot.gripper_type=rby1_dynamixel \
   --teleop.type=rb_vr \
-  --teleop.local_ip=192.168.0.245 \
-  --teleop.meta_quest_ip=192.168.0.206 \
+  --teleop.local_ip=192.168.50.78 \
+  --teleop.meta_quest_ip=192.168.50.112 \
   --teleop.send_handshake=true \
   --teleop.use_gripper=true \
   --dataset.repo_id=rainbowrobotics/rb10_vr_demo \
   --dataset.num_episodes=20 \
   --dataset.single_task="Control the RB10 arm and gripper using Meta Quest VR." \
-  --dataset.push_to_hub=false \
-  --dataset.fps=35
+  --dataset.push_to_hub=true \
+  --dataset.fps=30
 ```
 
 
