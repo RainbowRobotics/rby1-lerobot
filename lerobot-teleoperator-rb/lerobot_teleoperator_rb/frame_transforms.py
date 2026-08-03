@@ -65,7 +65,7 @@ T_conv = np.array(
 #     rotation around Z by +90 degrees
 #     translation X = -120 mm
 _HEAD_ANGLE_Y_RAD = math.radians(-45.0)
-_HEAD_ANGLE_Z_RAD = math.radians(90.0)
+_HEAD_ANGLE_Z_RAD = math.radians(45.0)
 
 _HEAD_ROT_Y = np.array(
     [
@@ -145,6 +145,12 @@ T_for_RB10E = np.array(
 T_CONV = T_conv
 T_FOR_HEAD = T_for_head
 T_FOR_RB10E = T_for_RB10E
+T_45 = np.array([
+    [math.cos(math.radians(45.0)), -math.sin(math.radians(45.0)), 0.0, 0.0],
+    [math.sin(math.radians(45.0)), math.cos(math.radians(45.0)), 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+])
 
 
 # ---------------------------------------------------------------------------

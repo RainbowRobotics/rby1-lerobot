@@ -507,8 +507,8 @@ class RbCobot(Robot):
         deliberately performs no automatic ready-pose movement.
         """
 
-        self.disable_servo_commands()
-        self._last_action_rad = None
+        # self.disable_servo_commands()
+        # self._last_action_rad = None
 
         logger.info(
             "RB reset: ServoJ gate disabled; "

@@ -70,6 +70,14 @@ class RbVrConfig(TeleoperatorConfig):
 
     controller_hand: str = "right"
 
+    # Rotate Controller locally
+    controller_z_rotation_deg: float = 0.0
+
+    # Torso-frame translation applied after the Z-axis rotation [mm].
+    controller_x_offset_mm: float = 50.0
+    controller_y_offset_mm: float = 1100.0
+    controller_z_offset_mm: float = 400.0
+
     # Grip values greater than this enable following.
     grip_threshold: float = 0.5
 
@@ -94,22 +102,17 @@ class RbVrConfig(TeleoperatorConfig):
     reference_reach_mm: float = 1300.0
 
     # Used when auto_user_scale=False.
-    default_user_scale: float = 1300.0 / 700.0
+    default_user_scale: float = 1300.0 / 500.0 * 1.4
 
     # Additional multiplier applied after user calibration.
-    position_scale: float = 1.0
-
-    # Added to the scaled RB10E target Z translation.
-    target_x_offset_mm: float = 600.0
-    target_y_offset_mm: float = 400.0
-    target_z_offset_mm: float = 900.0
+    position_scale: float = 1.2
 
     # ------------------------------------------------------------------
     # Inverse kinematics
     # ------------------------------------------------------------------
 
     # Original RB10E VR implementation uses three IKLM iterations per tick.
-    ik_iterations: int = 3
+    ik_iterations: int = 8
 
     # ------------------------------------------------------------------
     # Optional gripper
@@ -177,6 +180,19 @@ class RbVrConfig(TeleoperatorConfig):
                 f"got {self.controller_hand!r}."
             )
 
+        for field_name in (
+            "controller_z_rotation_deg",
+            "controller_x_offset_mm",
+            "controller_y_offset_mm",
+            "controller_z_offset_mm",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(
+                    f"{field_name} must be finite, "
+                    f"got {value!r}."
+                )
+
         self._validate_finite_positive(
             self.tracking_timeout_s,
             field_name="tracking_timeout_s",
@@ -207,9 +223,9 @@ class RbVrConfig(TeleoperatorConfig):
         )
 
         for field_name in (
-            "target_x_offset_mm",
-            "target_y_offset_mm",
-            "target_z_offset_mm",
+            "controller_x_offset_mm",
+            "controller_y_offset_mm",
+            "controller_z_offset_mm",
         ):
             value = getattr(self, field_name)
 

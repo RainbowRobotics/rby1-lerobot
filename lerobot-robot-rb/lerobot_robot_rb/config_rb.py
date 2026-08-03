@@ -42,7 +42,7 @@ from .models import MODEL_SPECS
 def _default_cameras() -> dict[str, CameraConfig]:
     return {
         "front": RealSenseCameraConfig(
-            serial_number_or_name="409122274689",
+            serial_number_or_name="260322275300",
             fps=30,
             width=480,
             height=640,
