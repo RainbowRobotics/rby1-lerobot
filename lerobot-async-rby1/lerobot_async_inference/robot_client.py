@@ -224,6 +224,7 @@ class RobotClient:
         self.remote_observation_queue = Queue(maxsize=1)
         self.action_queue_lock = threading.Lock()  # Protect queue operations
         self.action_queue_size = []
+        self._logged_action_dim_mismatch = False
         self.start_barrier = threading.Barrier(2)  # 2 threads: action receiver, control loop
 
         # FPS measurement
@@ -539,7 +540,26 @@ class RobotClient:
             return not self.action_queue.empty()
 
     def _action_tensor_to_action_dict(self, action_tensor: torch.Tensor) -> dict[str, float]:
-        action = {key: action_tensor[i].item() for i, key in enumerate(self.robot.action_features)}
+        action_keys = list(self.robot.action_features)
+        action_dim = int(action_tensor.shape[-1])
+
+        if action_dim < len(action_keys):
+            raise ValueError(
+                f"Received action tensor with {action_dim} dims, "
+                f"but robot exposes {len(action_keys)} action features: {action_keys}"
+            )
+
+        if action_dim > len(action_keys) and not self._logged_action_dim_mismatch:
+            self.logger.warning(
+                "Received action tensor with %d dims, but robot exposes %d action features; "
+                "ignoring trailing action dims. Enable the matching robot gripper feature "
+                "if the policy should control a real gripper.",
+                action_dim,
+                len(action_keys),
+            )
+            self._logged_action_dim_mismatch = True
+
+        action = {key: action_tensor[i].item() for i, key in enumerate(action_keys)}
         return action
 
     def control_loop_action(self, verbose: bool = False) -> dict[str, Any]:

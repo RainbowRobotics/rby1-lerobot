@@ -46,6 +46,7 @@ from lerobot.transport import (
 )
 from lerobot.transport.utils import receive_bytes_in_chunks
 from lerobot.types import PolicyAction
+from lerobot.utils.constants import ACTION, OBS_STATE
 
 from .configs import PolicyServerConfig
 from .constants import SUPPORTED_POLICIES
@@ -87,6 +88,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy = None
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
         self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
+        self._logged_state_padding = False
 
     @property
     def running(self):
@@ -95,6 +97,81 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
     @property
     def policy_image_features(self):
         return self.policy.config.image_features
+
+    @staticmethod
+    def _feature_dim(features: dict[str, Any] | None, key: str) -> int | None:
+        if not features or key not in features:
+            return None
+
+        shape = getattr(features[key], "shape", None)
+        if not shape:
+            return None
+
+        return int(shape[0])
+
+    def _policy_accepts_gripper_padding(self, expected_state_dim: int) -> bool:
+        config = self.policy.config
+        action_dim = self._feature_dim(getattr(config, "output_features", None), ACTION)
+        if action_dim != expected_state_dim:
+            return False
+
+        names = list(getattr(config, "action_feature_names", None) or [])
+        excluded = list(getattr(config, "relative_exclude_joints", None) or [])
+        tokens = [str(name).lower() for name in [*names, *excluded]]
+        return any("gripper" in token for token in tokens)
+
+    def _align_observation_state_to_policy(self, observation: Observation) -> Observation:
+        """Pad a missing gripper state for policies trained with one extra gripper dim."""
+        state = observation.get(OBS_STATE)
+        if state is None:
+            return observation
+
+        expected_state_dim = self._feature_dim(
+            getattr(self.policy.config, "input_features", None),
+            OBS_STATE,
+        )
+        if expected_state_dim is None:
+            return observation
+
+        actual_state_dim = int(state.shape[-1])
+        if actual_state_dim == expected_state_dim:
+            return observation
+
+        if actual_state_dim > expected_state_dim:
+            raise ValueError(
+                f"Robot observation state has {actual_state_dim} dims, "
+                f"but policy expects {expected_state_dim} dims."
+            )
+
+        missing_dims = expected_state_dim - actual_state_dim
+        if missing_dims != 1 or not self._policy_accepts_gripper_padding(expected_state_dim):
+            raise ValueError(
+                f"Robot observation state has {actual_state_dim} dims, "
+                f"but policy expects {expected_state_dim} dims. "
+                "Enable the matching robot gripper feature or use a checkpoint "
+                "trained for this robot state size."
+            )
+
+        padded_observation = observation.copy()
+        gripper_state = torch.ones(
+            *state.shape[:-1],
+            1,
+            dtype=state.dtype,
+            device=state.device,
+        )
+        padded_observation[OBS_STATE] = torch.cat([state, gripper_state], dim=-1)
+
+        if not self._logged_state_padding:
+            self.logger.warning(
+                "Robot observation.state has %d dims but policy expects %d; "
+                "padding missing gripper state with 1.0 (open). "
+                "Enable the robot gripper feature if this policy should control a real gripper.",
+                actual_state_dim,
+                expected_state_dim,
+            )
+            self._logged_state_padding = True
+
+        return padded_observation
 
     def _reset_server(self) -> None:
         """Flushes server state when new client connects."""
@@ -149,7 +226,19 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         policy_class = get_policy_class(self.policy_type)
 
         start = time.perf_counter()
-        self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
+        policy_config = None
+        if self.policy_type == "pi05":
+            from lerobot.configs.policies import PreTrainedConfig
+
+            policy_config = PreTrainedConfig.from_pretrained(policy_specs.pretrained_name_or_path)
+            if getattr(policy_config, "compile_model", False):
+                self.logger.info("Disabling torch.compile for PI05 async inference")
+                policy_config.compile_model = False
+
+        self.policy = policy_class.from_pretrained(
+            policy_specs.pretrained_name_or_path,
+            config=policy_config,
+        )
         self.policy.to(self.device)
 
         # Load preprocessor and postprocessor, overriding device to match requested device
@@ -261,7 +350,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             return services_pb2.Empty()
 
         except Exception as e:
-            self.logger.error(f"Error in StreamActions: {e}")
+            self.logger.exception(f"Error in StreamActions: {e}")
 
             return services_pb2.Empty()
 
@@ -348,6 +437,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         """2. Apply preprocessor"""
         start_preprocess = time.perf_counter()
+        observation = self._align_observation_state_to_policy(observation)
         observation = self.preprocessor(observation)
         self.last_processed_obs: TimedObservation = observation_t
         preprocessing_time = time.perf_counter() - start_preprocess
