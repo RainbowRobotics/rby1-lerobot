@@ -20,8 +20,8 @@ Action keys
 -----------
     right_arm_0 … right_arm_6   (rad)
     left_arm_0  … left_arm_6    (rad)
-    right_gripper_0             (0.0 = open, 1.0 = closed)
-    left_gripper_0              (0.0 = open, 1.0 = closed)
+    right_gripper_0             (1.0 = open, 0.0 = closed)
+    left_gripper_0              (1.0 = open, 0.0 = closed)
 
 Button mapping
 --------------

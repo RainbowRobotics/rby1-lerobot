@@ -44,23 +44,25 @@ from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnected
 
 from . import command_builders as cb
 from . import model_probe
-from .config_rby1 import Rby1Config
+from .config_rby1 import (
+    READY_HEAD,
+    READY_LEFT,
+    READY_POSE,
+    READY_RIGHT,
+    Rby1Config,
+    ready_pose_for_version,
+)
 from .constants import (
     ARM_DOF,
     BASE_VEL_NAMES,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
-    READY_HEAD,
-    READY_LEFT,
-    READY_POSE,
-    READY_RIGHT,
     RIGHT_ARM_NAMES,
     RIGHT_EE_NAMES,
     TORSO_DOF,
     TORSO_EE_NAMES,
     TORSO_NAMES,
     TOTAL_BODY_DOF,
-    ready_pose_for_version,
 )
 from .gripper import Rby1Gripper
 
@@ -548,13 +550,13 @@ class Rby1(Robot):
         self._read_ee_observation(obs, state)
 
         # Grippers. Dataset convention is 1.0 = open, 0.0 = closed; Rby1Gripper
-        # reports 0 = open, 1 = closed, so the right side is flipped here.
+        # reports 0 = open, 1 = closed, so both sides are flipped here.
         if self._config.use_gripper and self._gripper is not None:
             gripper_pos = self._gripper.get_positions()  # [right, left], 0=open 1=closed
             if self._config.use_right_arm:
                 obs["right_gripper_0"] = 1.0 - float(gripper_pos[0])
             if self._config.use_left_arm:
-                obs["left_gripper_0"] = float(gripper_pos[1])
+                obs["left_gripper_0"] = 1.0 - float(gripper_pos[1])
 
         # Cameras.
         for cam_key, cam in self.cameras.items():
@@ -764,7 +766,7 @@ class Rby1(Robot):
                 1.0 - action.get("right_gripper_0", 1.0)
                 if self._config.use_right_arm
                 else current_gripper[0],
-                action.get("left_gripper_0", 1.0)
+                1.0 - action.get("left_gripper_0", 1.0)
                 if self._config.use_left_arm
                 else current_gripper[1],
             ]
