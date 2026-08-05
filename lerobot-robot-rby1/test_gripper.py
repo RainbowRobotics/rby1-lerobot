@@ -19,7 +19,7 @@ import time
 import numpy as np
 
 
-# ── Constants (same as rby1.py) ───────────────────────────────────────
+# ── Constants (standalone test values; constants.py uses different torques) ──
 GRIPPER_BAUD_RATE = 2_000_000
 GRIPPER_IDS = [0, 1]           # 0 = right, 1 = left
 HOMING_TORQUE = 0.5            # Nm
