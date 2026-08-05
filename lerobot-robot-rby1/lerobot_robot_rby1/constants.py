@@ -35,6 +35,12 @@ GRIPPER_NAMES: list[str] = ["right_gripper_0", "left_gripper_0"]
 # convention used by LeKiwi: linear x / y (m/s) and yaw rate (rad/s).
 BASE_VEL_NAMES: list[str] = ["x.vel", "y.vel", "theta.vel"]
 
+# Mobile-base wheel joints and their measured velocity observation keys.
+# These values are read from ``RobotState.velocity`` when
+# ``use_mobile_base=True``.
+WHEEL_NAMES: list[str] = ["wheel_fr", "wheel_fl", "wheel_rr", "wheel_rl"]
+WHEEL_VEL_NAMES: list[str] = [f"{name}.vel" for name in WHEEL_NAMES]
+
 # End-effector action keys (``action_mode="ee"``): pose of each enabled
 # component in the robot base frame, following the LeRobot EE convention —
 # position in metres plus a rotation vector in radians.
@@ -82,12 +88,12 @@ LEFT_ARM_Q_MAX = np.array(
 # joints (arm_4, arm_5, arm_6). The torso and head poses are version-independent.
 # ---------------------------------------------------------------------------
 
-READY_TORSO = np.deg2rad([0.0, 0.0, 0.0, 20.0, 0.0, 0.0])
+READY_TORSO = np.deg2rad([0.0, 55.0, -60.0, 6.0, 0.0, 0.0])
 READY_HEAD = np.deg2rad([0.0, 49.0])  # head_0, head_1
 
 # v1.2 (and earlier) arm ready pose.
-READY_RIGHT = np.deg2rad([15.0, -65.0, -15.0, -115.0, 75.0, -65.0, -5.0])
-READY_LEFT = np.deg2rad([15.0, 65.0, 15.0, -115.0, -75.0, -65.0, -5.0])
+READY_RIGHT = np.deg2rad([7.0, -21.0, -17.0, -129.0, -23.0, 53.0, 12.0])
+READY_LEFT = np.deg2rad([7.0, 21.0, 17.0, -129.0, 23.0, 53.0, -12.0])
 READY_POSE = np.concatenate([READY_TORSO, READY_RIGHT, READY_LEFT])  # (20,)
 
 # v1.3 arm ready pose: wrist joints (arm_4, arm_5, arm_6) are zeroed.

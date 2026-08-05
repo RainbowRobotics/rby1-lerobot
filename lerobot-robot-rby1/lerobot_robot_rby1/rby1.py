@@ -6,7 +6,7 @@ imitation-learning inference).
 
 Joint layout (Model M, 26-DOF)::
 
-    wheel_fr/fl/rr/rl   mobility            (excluded from obs/action)
+    wheel_fr/fl/rr/rl   mobility            (velocity obs + body-velocity action)
     torso_0 .. torso_5  torso, 6 DOF        (observation only by default)
     right_arm_0 .. _6   right arm, 7 DOF    (obs + action)
     left_arm_0 .. _6    left arm, 7 DOF     (obs + action)
@@ -60,6 +60,8 @@ from .constants import (
     TORSO_EE_NAMES,
     TORSO_NAMES,
     TOTAL_BODY_DOF,
+    WHEEL_NAMES,
+    WHEEL_VEL_NAMES,
     ready_pose_for_version,
 )
 from .gripper import Rby1Gripper
@@ -86,6 +88,8 @@ class Rby1(Robot):
     * Gripper positions (normalised, 1.0 = open) for each enabled arm.
     * Optional ``<joint>.vel`` and ``<joint>.torque`` channels for the 20 body
       joints when ``use_velocity`` / ``use_torque`` are set.
+    * Measured wheel velocities (``wheel_fr/fl/rr/rl.vel``) whenever
+      ``use_mobile_base`` is enabled.
     * One ``(H, W, 3)`` image per configured camera.
 
     Action features
@@ -131,6 +135,8 @@ class Rby1(Robot):
         # EE mode: dynamics model + FK state for end-effector observations.
         self._dyn_robot: Any = None
         self._fk_state: Any = None
+        # Indices used to read measured wheel velocities from RobotState.
+        self._wheel_indices: np.ndarray | None = None
         # Resolved model / version (set at connect() — possibly via auto-probe)
         # and the version-specific ready pose selected from them.
         self._resolved_model: str | None = None
@@ -205,9 +211,17 @@ class Rby1(Robot):
 
     @property
     def _base_ft(self) -> dict[str, type]:
+        """Body-frame velocity command features used by actions."""
         if not self._config.use_mobile_base:
             return {}
         return {name: float for name in BASE_VEL_NAMES}
+
+    @property
+    def _base_obs_ft(self) -> dict[str, type]:
+        """Measured wheel-velocity features stored in observations."""
+        if not self._config.use_mobile_base:
+            return {}
+        return {name: float for name in WHEEL_VEL_NAMES}
 
     @property
     def _ee_obs_ft(self) -> dict[str, type]:
@@ -245,6 +259,7 @@ class Rby1(Robot):
             for name in self._obs_ft:
                 features[f"{name}.torque"] = float
         features.update(self._ee_obs_ft)
+        features.update(self._base_obs_ft)
         features.update(self._cameras_ft)
         return features
 
@@ -318,6 +333,7 @@ class Rby1(Robot):
         # 4. Cache the model (joint index arrays) and URDF velocity / acceleration
         #    limits from the dynamics model.
         self._model = self._robot.model()
+        self._wheel_indices = self._resolve_wheel_indices()
         dyn_model = self._robot.get_dynamics()
         dyn_state = dyn_model.make_state([], self._model.robot_joint_names)
         self._max_qdot = dyn_model.get_limit_qdot_upper(dyn_state)
@@ -400,9 +416,57 @@ class Rby1(Robot):
         self._last_ee_targets = None
         self._dyn_robot = None
         self._fk_state = None
+        self._wheel_indices = None
         self._resolved_model = None
         self._resolved_version = None
         logger.info(f"{self} disconnected.")
+
+    def _resolve_wheel_indices(self) -> np.ndarray | None:
+        """Resolve the four wheel indices used by ``RobotState.velocity``.
+
+        Name-based lookup is preferred because it preserves the explicit
+        ``front-right, front-left, rear-right, rear-left`` feature ordering.
+        Some SDK model objects also expose ``mobility_idx``; that is used as a
+        fallback when the wheel joint names are not present.
+        """
+        if not self._config.use_mobile_base:
+            return None
+
+        joint_names = [str(name) for name in self._model.robot_joint_names]
+        if all(name in joint_names for name in WHEEL_NAMES):
+            indices = np.asarray(
+                [joint_names.index(name) for name in WHEEL_NAMES],
+                dtype=np.int64,
+            )
+        else:
+            mobility_idx = getattr(self._model, "mobility_idx", None)
+            if mobility_idx is None:
+                missing = [name for name in WHEEL_NAMES if name not in joint_names]
+                raise RuntimeError(
+                    "Mobile-base observation is enabled, but wheel joints "
+                    f"could not be resolved. Missing names={missing}; "
+                    f"available joints={joint_names}."
+                )
+
+            indices = np.asarray(mobility_idx, dtype=np.int64).reshape(-1)
+            if indices.size != len(WHEEL_VEL_NAMES):
+                raise RuntimeError(
+                    "Expected exactly four mobility indices for wheel "
+                    f"observation, received {indices.tolist()}."
+                )
+            logger.warning(
+                "Wheel joint names were not found; using SDK mobility_idx=%s "
+                "with observation names=%s.",
+                indices.tolist(),
+                WHEEL_VEL_NAMES,
+            )
+
+        logger.info(
+            "Mobile-base wheel observation enabled: names=%s, indices=%s.",
+            WHEEL_VEL_NAMES,
+            indices.tolist(),
+        )
+        return indices
 
     # ------------------------------------------------------------------ #
     #  Calibration / configuration                                         #
@@ -547,6 +611,9 @@ class Rby1(Robot):
         # End-effector poses (EE mode): forward kinematics of the enabled groups.
         self._read_ee_observation(obs, state)
 
+        # Actual measured wheel velocities when mobile-base control is enabled.
+        self._read_base_observation(obs, state)
+
         # Grippers. Dataset convention is 1.0 = open, 0.0 = closed; Rby1Gripper
         # reports 0 = open, 1 = closed, so the right side is flipped here.
         if self._config.use_gripper and self._gripper is not None:
@@ -582,6 +649,37 @@ class Rby1(Robot):
             left = values[model.left_arm_idx]
             for i, name in enumerate(LEFT_ARM_NAMES):
                 obs[f"{name}{suffix}"] = float(left[i])
+
+    def _read_base_observation(
+        self, obs: dict[str, Any], state: Any
+    ) -> None:
+        """Add measured wheel angular velocities to ``obs``.
+
+        The action keys ``x.vel``, ``y.vel`` and ``theta.vel`` are commanded
+        body velocities. These observation keys instead contain the four
+        measured wheel-joint velocities from ``RobotState.velocity``.
+        """
+        if not self._config.use_mobile_base:
+            return
+        if self._wheel_indices is None:
+            raise RuntimeError(
+                "Mobile-base observation is enabled, but wheel indices "
+                "were not initialized during connect()."
+            )
+
+        velocity = np.asarray(state.velocity, dtype=np.float64).reshape(-1)
+        if np.any(self._wheel_indices < 0) or np.any(
+            self._wheel_indices >= velocity.size
+        ):
+            raise RuntimeError(
+                "Wheel indices are outside RobotState.velocity: "
+                f"indices={self._wheel_indices.tolist()}, "
+                f"velocity_size={velocity.size}."
+            )
+
+        wheel_velocity = velocity[self._wheel_indices]
+        for name, value in zip(WHEEL_VEL_NAMES, wheel_velocity, strict=True):
+            obs[name] = float(value)
 
     def _read_ee_observation(self, obs: dict[str, Any], state: Any) -> None:
         """Add the end-effector pose of each enabled group to ``obs``.
