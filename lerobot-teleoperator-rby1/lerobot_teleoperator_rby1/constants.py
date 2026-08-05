@@ -70,7 +70,7 @@ LEFT_ARM_Q_MAX = np.array(
 # Version-specific leader-arm init (ready) pose, in degrees (7 DOF per arm).
 #
 # The single source of truth for the ready pose is the follower robot package
-# (lerobot_robot_rby1.constants.ready_pose_for_version). The leader arm output
+# (lerobot_robot_rby1.config_rby1.ready_pose_for_version). The leader arm output
 # adds a per-side wrist offset on the last joint before sending it to the robot
 # (see Rby1LeaderArm.get_action), so the leader init pose subtracts that offset
 # on joint 6 — guaranteeing the robot lands exactly on its ready pose.
@@ -88,11 +88,11 @@ def leader_init_pose_for_version(
     """Return ``(right_init_q_deg, left_init_q_deg)`` for the given version.
 
     The pose is taken from the follower robot's ready pose
-    (:func:`lerobot_robot_rby1.constants.ready_pose_for_version`) so the two
+    (:func:`lerobot_robot_rby1.config_rby1.ready_pose_for_version`) so the two
     packages never drift apart. The leader output applies a wrist offset on the
     last joint, so it is subtracted here so the robot reaches its ready pose.
     """
-    from lerobot_robot_rby1.constants import ready_pose_for_version
+    from lerobot_robot_rby1.config_rby1 import ready_pose_for_version
 
     _, right_ready, left_ready, _ = ready_pose_for_version(version)
     right_deg = list(np.rad2deg(right_ready))
