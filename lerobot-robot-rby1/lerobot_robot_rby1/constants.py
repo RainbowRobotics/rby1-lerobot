@@ -1,10 +1,10 @@
 """Shared constants for the RB-Y1 robot package.
 
 These describe *physical* properties of the robot — joint counts, joint names,
-URDF position limits, the default ready pose, and the Dynamixel gripper bus
-parameters.  They are deliberately kept out of the user-tunable
-:class:`~lerobot_robot_rby1.config_rby1.Rby1Config` because they describe the
-hardware itself rather than a user preference.
+URDF position limits, the Cartesian impedance solver defaults, and the
+Dynamixel gripper bus parameters.  They are deliberately kept out of the
+user-tunable :class:`~lerobot_robot_rby1.config_rby1.Rby1Config` because they
+describe the hardware itself rather than a user preference.
 
 The joint names mirror ``lerobot_teleoperator_rby1.constants`` so that the
 teleoperator action dict and this robot's ``action_features`` stay aligned.
@@ -12,7 +12,12 @@ teleoperator action dict and this robot's ``action_features`` stay aligned.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
+
+# Joint-limit dictionary type alias: joint name -> (lower, upper) in radians.
+JointLimits = dict[str, tuple[float, float]]
 
 # ---------------------------------------------------------------------------
 # Degrees of freedom
@@ -74,38 +79,38 @@ LEFT_ARM_Q_MAX = np.array(
 )
 
 # ---------------------------------------------------------------------------
-# Ready pose (radians) — a safe, known configuration the robot moves to on
-# connect and (optionally per-arm) between record episodes.
-#
-# RB-Y1 v1.2 and v1.3 differ in the joint configuration near the wrist, so each
-# version needs its own arm ready pose. The v1.3 pose zeroes the three wrist
-# joints (arm_4, arm_5, arm_6). The torso and head poses are version-independent.
+# EE action mode defaults (Cartesian impedance).
 # ---------------------------------------------------------------------------
 
-READY_TORSO = np.deg2rad([0.0, 0.0, 0.0, 20.0, 0.0, 0.0])
-READY_HEAD = np.deg2rad([0.0, 49.0])  # head_0, head_1
+# Nullspace arm targets (degrees) used by the per-component Cartesian solver.
+DEFAULT_NULL_RIGHT_DEG = [40.0, -30.0, -5.0, -135.0, -10.0, 20.0,  40.0]
+DEFAULT_NULL_LEFT_DEG  = [40.0,  30.0, -5.0, -135.0,  10.0, 20.0, -40.0]
 
-# v1.2 (and earlier) arm ready pose.
-READY_RIGHT = np.deg2rad([15.0, -65.0, -15.0, -115.0, 75.0, -65.0, -5.0])
-READY_LEFT = np.deg2rad([15.0, 65.0, 15.0, -115.0, -75.0, -65.0, -5.0])
-READY_POSE = np.concatenate([READY_TORSO, READY_RIGHT, READY_LEFT])  # (20,)
+# Joint limits enforced by the Cartesian impedance solvers (radians).
+DEFAULT_WB_JOINT_LIMITS: JointLimits = {
+    "right_arm_3": (-2.6, -0.5),
+    "right_arm_5": (0.2, 1.9),
+    "left_arm_3":  (-2.6, -0.5),
+    "left_arm_5":  (0.2, 1.9),
+    "torso_1":     (-0.523598776, 1.3),
+    "torso_2":     (-2.617993878, -0.2),
+}
 
-# v1.3 arm ready pose: wrist joints (arm_4, arm_5, arm_6) are zeroed.
-READY_RIGHT_V13 = np.deg2rad([15.0, -65.0, -15.0, -115.0, 0.0, 0.0, 0.0])
-READY_LEFT_V13 = np.deg2rad([15.0, 65.0, 15.0, -115.0, 0.0, 0.0, 0.0])
-READY_POSE_V13 = np.concatenate([READY_TORSO, READY_RIGHT_V13, READY_LEFT_V13])  # (20,)
+DEFAULT_TORSO_JOINT_LIMITS: JointLimits = {
+    "torso_1": (-0.523598776, 1.6),
+    "torso_2": (-2.617993878, -0.2),
+}
 
+DEFAULT_RIGHT_ARM_JOINT_LIMITS: JointLimits = {"right_arm_3": (-2.6, -0.5)}
+DEFAULT_LEFT_ARM_JOINT_LIMITS: JointLimits  = {"left_arm_3":  (-2.6, -0.5)}
 
-def ready_pose_for_version(version: str):
-    """Return ``(body_pose, right_arm, left_arm, head)`` for a firmware version.
-
-    ``body_pose`` is the 20-DOF [torso | right arm | left arm] vector. v1.3 uses
-    the wrist-zeroed arm pose; every other version uses the v1.2 pose.
-    """
-    if (version or "").strip() == "1.3":
-        return READY_POSE_V13, READY_RIGHT_V13, READY_LEFT_V13, READY_HEAD
-    return READY_POSE, READY_RIGHT, READY_LEFT, READY_HEAD
-
+# Cartesian add_target gain tuples for rby1_sdk add_target(...):
+# (linear_acc_limit, linear_vel_limit, angular_acc_limit, angular_vel_limit).
+_PI = math.pi
+TORSO_TARGET_GAINS_WB = (1.0, _PI * 0.5, 10.0, _PI * 20.0)
+TORSO_TARGET_GAINS_PC = (1.0, _PI * 0.5, 20.0, _PI * 40.0)
+ARM_TARGET_GAINS_WB   = (2.0, _PI * 2.0,  20.0, _PI * 80.0)
+ARM_TARGET_GAINS_PC   = (3.0, _PI * 2.0, 150.0, _PI * 80.0)
 
 # ---------------------------------------------------------------------------
 # Dynamixel gripper bus (two motors on /dev/rby1_gripper).
