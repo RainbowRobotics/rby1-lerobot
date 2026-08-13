@@ -1,50 +1,60 @@
 from dataclasses import dataclass, field
-import math
 from typing import List, Tuple
+
+import numpy as np
 
 from lerobot.cameras import CameraConfig, Cv2Rotation
 from lerobot.robots.config import RobotConfig
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
 
-from .constants import ARM_DOF, TORSO_DOF
-
-# Joint-limit dictionary type alias: joint name -> (lower, upper) in radians.
-JointLimits = dict[str, Tuple[float, float]]
-
+from .constants import (
+    ARM_DOF,
+    ARM_TARGET_GAINS_PC,
+    ARM_TARGET_GAINS_WB,
+    DEFAULT_LEFT_ARM_JOINT_LIMITS,
+    DEFAULT_NULL_LEFT_DEG,
+    DEFAULT_NULL_RIGHT_DEG,
+    DEFAULT_RIGHT_ARM_JOINT_LIMITS,
+    DEFAULT_TORSO_JOINT_LIMITS,
+    DEFAULT_WB_JOINT_LIMITS,
+    JointLimits,
+    TORSO_DOF,
+    TORSO_TARGET_GAINS_PC,
+    TORSO_TARGET_GAINS_WB,
+)
 
 # ---------------------------------------------------------------------------
-# EE action mode defaults (Cartesian impedance).
+# Ready pose (radians) — a safe, known configuration the robot moves to on
+# connect and (optionally per-arm) between record episodes.
+#
+# RB-Y1 v1.2 and v1.3 differ in the joint configuration near the wrist, so each
+# version needs its own arm ready pose. The v1.3 pose zeroes the three wrist
+# joints (arm_4, arm_5, arm_6). The torso and head poses are version-independent.
 # ---------------------------------------------------------------------------
 
-# Nullspace arm targets (degrees) used by the per-component Cartesian solver.
-_DEFAULT_NULL_RIGHT_DEG = [40.0, -30.0, -5.0, -135.0, -10.0, 20.0,  40.0]
-_DEFAULT_NULL_LEFT_DEG  = [40.0,  30.0, -5.0, -135.0,  10.0, 20.0, -40.0]
+READY_TORSO = np.deg2rad([0.0, 0.0, 0.0, 20.0, 0.0, 0.0])
+READY_HEAD = np.deg2rad([0.0, 49.0])  # head_0, head_1
 
-# Joint limits enforced by the Cartesian impedance solvers (radians).
-_DEFAULT_WB_JOINT_LIMITS: JointLimits = {
-    "right_arm_3": (-2.6, -0.5),
-    "right_arm_5": (0.2, 1.9),
-    "left_arm_3":  (-2.6, -0.5),
-    "left_arm_5":  (0.2, 1.9),
-    "torso_1":     (-0.523598776, 1.3),
-    "torso_2":     (-2.617993878, -0.2),
-}
+# v1.2 (and earlier) arm ready pose.
+READY_RIGHT = np.deg2rad([15.0, -65.0, -15.0, -115.0, 75.0, -65.0, -5.0])
+READY_LEFT = np.deg2rad([15.0, 65.0, 15.0, -115.0, -75.0, -65.0, -5.0])
+READY_POSE = np.concatenate([READY_TORSO, READY_RIGHT, READY_LEFT])  # (20,)
 
-_DEFAULT_TORSO_JOINT_LIMITS: JointLimits = {
-    "torso_1": (-0.523598776, 1.6),
-    "torso_2": (-2.617993878, -0.2),
-}
+# v1.3 arm ready pose: wrist joints (arm_4, arm_5, arm_6) are zeroed.
+READY_RIGHT_V13 = np.deg2rad([15.0, -65.0, -15.0, -115.0, 0.0, 0.0, 0.0])
+READY_LEFT_V13 = np.deg2rad([15.0, 65.0, 15.0, -115.0, 0.0, 0.0, 0.0])
+READY_POSE_V13 = np.concatenate([READY_TORSO, READY_RIGHT_V13, READY_LEFT_V13])  # (20,)
 
-_DEFAULT_RIGHT_ARM_JOINT_LIMITS: JointLimits = {"right_arm_3": (-2.6, -0.5)}
-_DEFAULT_LEFT_ARM_JOINT_LIMITS: JointLimits  = {"left_arm_3":  (-2.6, -0.5)}
 
-# Cartesian add_target gain tuples for rby1_sdk add_target(...):
-# (linear_acc_limit, linear_vel_limit, angular_acc_limit, angular_vel_limit).
-_PI = math.pi
-_TORSO_TARGET_GAINS_WB = (1.0, _PI * 0.5, 10.0, _PI * 20.0)
-_TORSO_TARGET_GAINS_PC = (1.0, _PI * 0.5, 20.0, _PI * 40.0)
-_ARM_TARGET_GAINS_WB   = (2.0, _PI * 2.0,  20.0, _PI * 80.0)
-_ARM_TARGET_GAINS_PC   = (3.0, _PI * 2.0, 150.0, _PI * 80.0)
+def ready_pose_for_version(version: str):
+    """Return ``(body_pose, right_arm, left_arm, head)`` for a firmware version.
+
+    ``body_pose`` is the 20-DOF [torso | right arm | left arm] vector. v1.3 uses
+    the wrist-zeroed arm pose; every other version uses the v1.2 pose.
+    """
+    if (version or "").strip() == "1.3":
+        return READY_POSE_V13, READY_RIGHT_V13, READY_LEFT_V13, READY_HEAD
+    return READY_POSE, READY_RIGHT, READY_LEFT, READY_HEAD
 
 
 def _default_cameras() -> dict[str, CameraConfig]:
@@ -228,7 +238,7 @@ class Rby1Config(RobotConfig):
         default_factory=lambda: [500.0] * 6 + [30.0] * 7 + [30.0] * 7
     )
     wb_joint_limits: JointLimits = field(
-        default_factory=lambda: dict(_DEFAULT_WB_JOINT_LIMITS)
+        default_factory=lambda: dict(DEFAULT_WB_JOINT_LIMITS)
     )
 
     # ── Per-component solver tuning (ee_whole_body=False) ───────────────
@@ -236,7 +246,7 @@ class Rby1Config(RobotConfig):
     torso_torque_limit: List[float] = field(default_factory=lambda: [600.0] * 6)
     torso_damping_ratio: float = 0.7
     torso_joint_limits: JointLimits = field(
-        default_factory=lambda: dict(_DEFAULT_TORSO_JOINT_LIMITS)
+        default_factory=lambda: dict(DEFAULT_TORSO_JOINT_LIMITS)
     )
 
     right_arm_stiffness: List[float] = field(
@@ -247,7 +257,7 @@ class Rby1Config(RobotConfig):
     )
     right_arm_damping_ratio: float = 0.6
     right_arm_joint_limits: JointLimits = field(
-        default_factory=lambda: dict(_DEFAULT_RIGHT_ARM_JOINT_LIMITS)
+        default_factory=lambda: dict(DEFAULT_RIGHT_ARM_JOINT_LIMITS)
     )
 
     left_arm_stiffness: List[float] = field(
@@ -258,21 +268,21 @@ class Rby1Config(RobotConfig):
     )
     left_arm_damping_ratio: float = 0.4
     left_arm_joint_limits: JointLimits = field(
-        default_factory=lambda: dict(_DEFAULT_LEFT_ARM_JOINT_LIMITS)
+        default_factory=lambda: dict(DEFAULT_LEFT_ARM_JOINT_LIMITS)
     )
 
     # ── Cartesian add_target gain tuples ─────────────────────────────
-    torso_target_gains_wb: Tuple[float, float, float, float] = _TORSO_TARGET_GAINS_WB
-    torso_target_gains_pc: Tuple[float, float, float, float] = _TORSO_TARGET_GAINS_PC
-    arm_target_gains_wb:   Tuple[float, float, float, float] = _ARM_TARGET_GAINS_WB
-    arm_target_gains_pc:   Tuple[float, float, float, float] = _ARM_TARGET_GAINS_PC
+    torso_target_gains_wb: Tuple[float, float, float, float] = TORSO_TARGET_GAINS_WB
+    torso_target_gains_pc: Tuple[float, float, float, float] = TORSO_TARGET_GAINS_PC
+    arm_target_gains_wb:   Tuple[float, float, float, float] = ARM_TARGET_GAINS_WB
+    arm_target_gains_pc:   Tuple[float, float, float, float] = ARM_TARGET_GAINS_PC
 
     # ── Nullspace targets (per-component arm solvers) ─────────────────
     null_right_arm_deg: List[float] = field(
-        default_factory=lambda: list(_DEFAULT_NULL_RIGHT_DEG)
+        default_factory=lambda: list(DEFAULT_NULL_RIGHT_DEG)
     )
     null_left_arm_deg: List[float] = field(
-        default_factory=lambda: list(_DEFAULT_NULL_LEFT_DEG)
+        default_factory=lambda: list(DEFAULT_NULL_LEFT_DEG)
     )
     nullspace_weight: List[float] = field(
         default_factory=lambda: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]

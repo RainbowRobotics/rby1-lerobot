@@ -141,14 +141,11 @@ class Rby1Gripper:
             [(dev_id, GRIPPER_POSITION_TORQUE) for dev_id in GRIPPER_IDS]
         )
 
-        # The motors are mirror-mounted, so the encoder direction differs per side.
-        #   Right (ID 0): high encoder = CLOSED, low encoder = OPEN
-        #   Left  (ID 1): low encoder  = CLOSED, high encoder = OPEN
-        # Mapping the normalised range so that 0.0 = open and 1.0 = closed for both:
-        #   open_rad  = [min_q[0] (OPEN),   max_q[1] (CLOSED)]
-        #   close_rad = [max_q[0] (CLOSED), min_q[1] (OPEN)]
-        self._open_rad = np.array([min_q[0], max_q[1]])
-        self._close_rad = np.array([max_q[0], min_q[1]])
+        # Both motors read low encoder = OPEN, high encoder = CLOSED (verified
+        # on hardware; encoder direction is per-robot — cf. GRIPPER_DIRECTION
+        # in SDK example 35), so no per-side mirroring is applied.
+        self._open_rad = min_q.copy()
+        self._close_rad = max_q.copy()
         self._homed = True
 
         # Sanity check: warn if a side did not travel a meaningful distance.
