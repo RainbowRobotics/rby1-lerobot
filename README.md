@@ -57,9 +57,12 @@ conda activate lerobot
 ```
 
 ```bash
+# 0. Install required lerobot packages
+pip install -e ".[core_scripts]"
+
 # 1. Create a working directory and move into it
 #    (to avoid accidentally cloning inside the LeRobot package folder)
-mkdir -p ~/rby1-lerobot && cd ~/rby1-lerobot
+mkdir -p ~/rby1-lerobot && cd ~
 
 # 2. Install the RB-Y1 SDK
 pip install rby1-sdk
@@ -71,7 +74,6 @@ cd rby1-lerobot
 # 4. Install the RB-Y1 robot, teleoperator plugins and dependencies
 pip install -e lerobot-robot-rby1
 pip install -e lerobot-teleoperator-rby1
-pip install pynput lerobot[dataset]
 
 # 5. (for RB-Y1's UPC only) Install pyrealsense2
 #    The official pyrealsense2 package on PyPI does not support ARM64.
