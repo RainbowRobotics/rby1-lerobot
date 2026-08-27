@@ -1,6 +1,6 @@
 # RB-Y1
 
-[Rainbow Robotics RB-Y1](https://www.rainbow-robotics.com/rby1) is a bimanual robot designed for physical AI research. This repository provides a LeRobot plugin for controlling RB-Y1 with a leader arm teleoperation setup, enabling intuitive data collection and experimentation.
+[Rainbow Robotics RB-Y1](https://rainbow-robotics.com/en/products/rb-y1/) is a bimanual robot designed for physical AI research. This repository provides a LeRobot plugin for controlling RB-Y1 with a leader arm teleoperation setup, enabling intuitive data collection and experimentation.
 
 ## Overview
 <img width="1599" height="905" alt="Image" src="https://github.com/user-attachments/assets/bbea002e-b8b5-4a8b-8aae-a5fb38f830f0" />
@@ -202,8 +202,8 @@ The LeRobot framework is installed as a Python package dependency (`pip install 
 
 ## Resources
 
-- [Rainbow Robotics Website](https://www.rainbow-robotics.com)
-- [RB-Y1 Product Page](https://www.rainbow-robotics.com/en_rby1)
+- [Rainbow Robotics Website](https://rainbow-robotics.com/en/)
+- [RB-Y1 Product Page](https://rainbow-robotics.com/en/products/rb-y1/)
 - [RB-Y1 Documentation](https://rainbowrobotics.github.io/rby1-dev/)
 - [LeRobot Documentation](https://huggingface.co/docs/lerobot)
 - [LeRobot Installation Guide](https://huggingface.co/docs/lerobot/installation)
