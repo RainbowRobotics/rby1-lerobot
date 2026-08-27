@@ -191,6 +191,46 @@ lerobot-record \
 | `reset_right_arm_on_record` | `False` | Return right arm to init pose between episodes |
 | `reset_left_arm_on_record` | `False` | Return left arm to init pose between episodes |
 
+### Observation / Action Keys
+
+Keys follow the LeRobot naming convention:
+
+| Kind | Key | Example |
+|------|-----|---------|
+| Joint position | `<joint>.pos` | `right_arm_0.pos`, `torso_0.pos` |
+| Gripper position | `<gripper>.pos` | `right_gripper_0.pos` (1.0 = open) |
+| Mobile base velocity | `x.vel`, `y.vel`, `theta.vel` | action only |
+| Joint velocity (`use_velocity`) | `<joint>.vel` | `right_arm_0.vel` |
+| Joint torque (`use_torque`) | `<joint>.torque` | `right_arm_0.torque` |
+| End-effector pose (`action_mode="ee"`) | `<group>_ee.{x,y,z,wx,wy,wz}` | `right_ee.x` |
+
+> [!WARNING]
+> Datasets recorded before the `.pos` suffix was introduced use bare keys
+> (`right_arm_0`). Feature names must match to append episodes, so **start a new
+> dataset** rather than continuing an old one. Inference with a checkpoint trained
+> on an older dataset still works — the key order is unchanged.
+
+## Rollout
+
+Deploy a trained policy on the robot with `lerobot-rollout`:
+
+```bash
+lerobot-rollout \
+  --robot.type=rby1 \
+  --robot.address=192.168.30.1:50051 \
+  --policy.path=<hf_username>/<policy_name>
+```
+
+Limitations:
+
+- Requires **lerobot 0.6.0 or newer** (`lerobot-rollout` does not exist in earlier releases).
+- `action_mode="ee"` is **not supported**. Rollout keeps only `.pos` / `.vel` state and
+  action features, and end-effector keys (`right_ee.x`, …) match neither — this is an
+  upstream limitation that applies to LeRobot's own EE robots too.
+- `use_torque=True` datasets do not round-trip: rollout drops the `.torque` channels, so
+  the state dimension will not match a policy trained on such a dataset. `connect()` logs
+  a warning when this is set.
+
 ## Repository Layout
 
 | Path | Description |

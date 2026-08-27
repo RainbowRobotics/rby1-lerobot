@@ -57,6 +57,7 @@ from .constants import (
     BASE_VEL_NAMES,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
+    POS_SUFFIX,
     RIGHT_ARM_NAMES,
     RIGHT_EE_NAMES,
     TORSO_DOF,
@@ -83,9 +84,12 @@ class Rby1(Robot):
 
     Observation features
     --------------------
-    * Joint positions (radians) for each enabled group: ``torso_0..5`` (only
-      when ``use_torso``), ``right_arm_0..6``, ``left_arm_0..6``.
-    * Gripper positions (normalised, 1.0 = open) for each enabled arm.
+    * Joint positions (radians) for each enabled group: ``torso_0..5.pos``
+      (only when ``use_torso``), ``right_arm_0..6.pos``, ``left_arm_0..6.pos``.
+      The ``.pos`` suffix follows the LeRobot convention and is what
+      ``lerobot-rollout`` filters the policy state on.
+    * Gripper positions (normalised, 1.0 = open) for each enabled arm:
+      ``right_gripper_0.pos`` / ``left_gripper_0.pos``.
     * Optional ``<joint>.vel`` and ``<joint>.torque`` channels for the 20 body
       joints when ``use_velocity`` / ``use_torque`` are set.
     * One ``(H, W, 3)`` image per configured camera.
@@ -181,10 +185,14 @@ class Rby1(Robot):
             names += RIGHT_ARM_NAMES
         if self._config.use_left_arm:
             names += LEFT_ARM_NAMES
-        return {name: float for name in names}
+        return {f"{name}{POS_SUFFIX}": float for name in names}
 
     @property
-    def _obs_ft(self) -> dict[str, type]:
+    def _obs_joint_names(self) -> list[str]:
+        """Bare joint names behind the observation channels.
+
+        The ``.pos`` / ``.vel`` / ``.torque`` keys are all built from this list.
+        """
         names: list[str] = []
         if self._config.use_torso:
             names += TORSO_NAMES
@@ -192,7 +200,11 @@ class Rby1(Robot):
             names += RIGHT_ARM_NAMES
         if self._config.use_left_arm:
             names += LEFT_ARM_NAMES
-        return {name: float for name in names}
+        return names
+
+    @property
+    def _obs_ft(self) -> dict[str, type]:
+        return {f"{name}{POS_SUFFIX}": float for name in self._obs_joint_names}
 
     @property
     def _gripper_ft(self) -> dict[str, type]:
@@ -203,7 +215,7 @@ class Rby1(Robot):
             names.append("right_gripper_0")
         if self._config.use_left_arm:
             names.append("left_gripper_0")
-        return {name: float for name in names}
+        return {f"{name}{POS_SUFFIX}": float for name in names}
 
     @property
     def _base_ft(self) -> dict[str, type]:
@@ -241,10 +253,10 @@ class Rby1(Robot):
     def observation_features(self) -> dict[str, Any]:
         features: dict[str, Any] = {**self._obs_ft, **self._gripper_ft}
         if self._config.use_velocity:
-            for name in self._obs_ft:
+            for name in self._obs_joint_names:
                 features[f"{name}.vel"] = float
         if self._config.use_torque:
-            for name in self._obs_ft:
+            for name in self._obs_joint_names:
                 features[f"{name}.torque"] = float
         features.update(self._ee_obs_ft)
         features.update(self._cameras_ft)
@@ -268,6 +280,14 @@ class Rby1(Robot):
             raise ImportError("rby1_sdk is required. Install it from the RB-Y1 SDK.") from e
 
         logger.info(f"Connecting to RB-Y1 at {self._config.address} ...")
+
+        if self._config.use_torque:
+            logger.warning(
+                "use_torque=True: lerobot-rollout keeps only .pos / .vel state "
+                "features, so the .torque channels recorded here are dropped at "
+                "rollout time and a policy trained on this dataset will see a "
+                "different state dimension."
+            )
 
         # 0. Resolve the model and firmware version. When either is "auto" this
         #    probes the robot via rby1-sdk; the version selects the ready pose.
@@ -540,7 +560,7 @@ class Rby1(Robot):
         obs: dict[str, Any] = {}
 
         # Joint positions (and optional velocities / torques) per enabled group.
-        self._read_group(obs, state.position, model, "")
+        self._read_group(obs, state.position, model, POS_SUFFIX)
         if self._config.use_velocity:
             self._read_group(obs, state.velocity, model, ".vel")
         if self._config.use_torque:
@@ -554,9 +574,9 @@ class Rby1(Robot):
         if self._config.use_gripper and self._gripper is not None:
             gripper_pos = self._gripper.get_positions()  # [right, left], 0=open 1=closed
             if self._config.use_right_arm:
-                obs["right_gripper_0"] = 1.0 - float(gripper_pos[0])
+                obs[f"right_gripper_0{POS_SUFFIX}"] = 1.0 - float(gripper_pos[0])
             if self._config.use_left_arm:
-                obs["left_gripper_0"] = 1.0 - float(gripper_pos[1])
+                obs[f"left_gripper_0{POS_SUFFIX}"] = 1.0 - float(gripper_pos[1])
 
         # Cameras.
         for cam_key, cam in self.cameras.items():
@@ -569,8 +589,8 @@ class Rby1(Robot):
     ) -> None:
         """Copy the enabled torso / arm joints of ``values`` into ``obs``.
 
-        ``suffix`` is appended to each key (``""`` for positions, ``".vel"`` /
-        ``".torque"`` for the optional channels).
+        ``suffix`` is appended to each key (``".pos"`` for positions, ``".vel"``
+        / ``".torque"`` for the optional channels).
         """
         if self._config.use_torso:
             torso = values[model.torso_idx]
@@ -763,10 +783,10 @@ class Rby1(Robot):
         current_gripper = self._gripper.get_positions()
         gripper_target = np.array(
             [
-                1.0 - action.get("right_gripper_0", 1.0)
+                1.0 - action.get(f"right_gripper_0{POS_SUFFIX}", 1.0)
                 if self._config.use_right_arm
                 else current_gripper[0],
-                1.0 - action.get("left_gripper_0", 1.0)
+                1.0 - action.get(f"left_gripper_0{POS_SUFFIX}", 1.0)
                 if self._config.use_left_arm
                 else current_gripper[1],
             ]

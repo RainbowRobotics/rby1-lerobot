@@ -25,6 +25,7 @@ from .constants import (
     LEFT_ARM_NAMES,
     LEFT_ARM_Q_MAX,
     LEFT_ARM_Q_MIN,
+    POS_SUFFIX,
     RIGHT_ARM_NAMES,
     RIGHT_ARM_Q_MAX,
     RIGHT_ARM_Q_MIN,
@@ -288,7 +289,7 @@ def build_body_command(
 
     if cfg.use_right_arm:
         right_q = np.clip(
-            np.array([action[name] for name in RIGHT_ARM_NAMES]),
+            np.array([action[f"{name}{POS_SUFFIX}"] for name in RIGHT_ARM_NAMES]),
             RIGHT_ARM_Q_MIN,
             RIGHT_ARM_Q_MAX,
         )
@@ -308,7 +309,7 @@ def build_body_command(
 
     if cfg.use_left_arm:
         left_q = np.clip(
-            np.array([action[name] for name in LEFT_ARM_NAMES]),
+            np.array([action[f"{name}{POS_SUFFIX}"] for name in LEFT_ARM_NAMES]),
             LEFT_ARM_Q_MIN,
             LEFT_ARM_Q_MAX,
         )

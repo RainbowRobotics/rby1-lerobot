@@ -50,6 +50,7 @@ from .config_rby1_vr import Rby1VRConfig
 from .constants import (
     BASE_VEL_NAMES,
     LEFT_EE_NAMES,
+    POS_SUFFIX,
     RIGHT_EE_NAMES,
     TORSO_EE_NAMES,
 )
@@ -169,9 +170,9 @@ class Rby1VR(Teleoperator):
         features: dict[str, type] = {n: float for n in names}
         if cfg.use_gripper:
             if cfg.use_right_arm:
-                features["right_gripper_0"] = float
+                features[f"right_gripper_0{POS_SUFFIX}"] = float
             if cfg.use_left_arm:
-                features["left_gripper_0"] = float
+                features[f"left_gripper_0{POS_SUFFIX}"] = float
         if cfg.use_mobile_base:
             for name in BASE_VEL_NAMES:
                 features[name] = float
@@ -507,9 +508,9 @@ class Rby1VR(Teleoperator):
         if cfg.use_gripper:
             right_trigger, left_trigger = self._triggers_from_vr(vr)
             if cfg.use_right_arm:
-                action["right_gripper_0"] = 1.0 - right_trigger
+                action[f"right_gripper_0{POS_SUFFIX}"] = 1.0 - right_trigger
             if cfg.use_left_arm:
-                action["left_gripper_0"] = 1.0 - left_trigger
+                action[f"left_gripper_0{POS_SUFFIX}"] = 1.0 - left_trigger
 
         # Mobile base: body-frame velocity from the thumbstick integrator.
         if cfg.use_mobile_base:

@@ -18,10 +18,10 @@ the follower's :meth:`send_action`'s job, per LeRobot convention.
 
 Action keys
 -----------
-    right_arm_0 … right_arm_6   (rad)
-    left_arm_0  … left_arm_6    (rad)
-    right_gripper_0             (1.0 = open, 0.0 = closed)
-    left_gripper_0              (1.0 = open, 0.0 = closed)
+    right_arm_0.pos … right_arm_6.pos   (rad)
+    left_arm_0.pos  … left_arm_6.pos    (rad)
+    right_gripper_0.pos                 (1.0 = open, 0.0 = closed)
+    left_gripper_0.pos                  (1.0 = open, 0.0 = closed)
 
 Button mapping
 --------------
@@ -48,6 +48,7 @@ from .constants import (
     LEFT_ARM_NAMES,
     LEFT_ARM_Q_MAX,
     LEFT_ARM_Q_MIN,
+    POS_SUFFIX,
     RIGHT_ARM_NAMES,
     RIGHT_ARM_Q_MAX,
     RIGHT_ARM_Q_MIN,
@@ -113,12 +114,12 @@ class Rby1LeaderArm(Teleoperator):
             names += RIGHT_ARM_NAMES
         if cfg.use_left_arm:
             names += LEFT_ARM_NAMES
-        features: dict[str, type] = {n: float for n in names}
+        features: dict[str, type] = {f"{n}{POS_SUFFIX}": float for n in names}
         if cfg.use_gripper:
             if cfg.use_right_arm:
-                features["right_gripper_0"] = float
+                features[f"right_gripper_0{POS_SUFFIX}"] = float
             if cfg.use_left_arm:
-                features["left_gripper_0"] = float
+                features[f"left_gripper_0{POS_SUFFIX}"] = float
         return features
 
     @property
@@ -282,30 +283,30 @@ class Rby1LeaderArm(Teleoperator):
             # Leader arm has no torso DOFs — emit zeros as placeholder so
             # action_features stay consistent with the follower robot.
             for name in TORSO_NAMES:
-                action[name] = 0.0
+                action[f"{name}{POS_SUFFIX}"] = 0.0
 
         if cfg.use_right_arm:
             right_q_out = right_q.copy()
             right_q_out[6] += np.deg2rad(cfg.right_wrist_offset_deg)
             right_q_out = np.clip(right_q_out, RIGHT_ARM_Q_MIN, RIGHT_ARM_Q_MAX)
             for i, name in enumerate(RIGHT_ARM_NAMES):
-                action[name] = float(right_q_out[i])
+                action[f"{name}{POS_SUFFIX}"] = float(right_q_out[i])
 
         if cfg.use_left_arm:
             left_q_out = left_q.copy()
             left_q_out[6] += np.deg2rad(cfg.left_wrist_offset_deg)
             left_q_out = np.clip(left_q_out, LEFT_ARM_Q_MIN, LEFT_ARM_Q_MAX)
             for i, name in enumerate(LEFT_ARM_NAMES):
-                action[name] = float(left_q_out[i])
+                action[f"{name}{POS_SUFFIX}"] = float(left_q_out[i])
 
         if cfg.use_gripper:
             tmax = cfg.gripper_trigger_max
             if cfg.use_right_arm:
-                action["right_gripper_0"] = float(
+                action[f"right_gripper_0{POS_SUFFIX}"] = float(
                     np.clip(right_trigger / tmax, 0.0, 1.0)
                 )
             if cfg.use_left_arm:
-                action["left_gripper_0"] = float(
+                action[f"left_gripper_0{POS_SUFFIX}"] = float(
                     np.clip(left_trigger / tmax, 0.0, 1.0)
                 )
 

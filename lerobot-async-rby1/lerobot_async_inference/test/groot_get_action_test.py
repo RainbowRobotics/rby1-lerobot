@@ -11,10 +11,10 @@ from lerobot_async_inference.policy.groot_zmq import (
 # fake obs 준비
 
 raw_observation = {
-    **{f"right_arm_{i}": 0.0 for i in range(7)},
-    **{f"left_arm_{i}": 0.0 for i in range(7)},
-    "right_gripper_0": 0.0,
-    "left_gripper_0": 0.0,
+    **{f"right_arm_{i}.pos": 0.0 for i in range(7)},
+    **{f"left_arm_{i}.pos": 0.0 for i in range(7)},
+    "right_gripper_0.pos": 0.0,
+    "left_gripper_0.pos": 0.0,
 
     "front": np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8),
     "left_wrist": np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8),

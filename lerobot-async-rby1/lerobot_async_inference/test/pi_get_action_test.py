@@ -14,10 +14,10 @@ import imageio.v3 as iio
 # fake obs 준비 
 
 # raw_observation = {
-#     **{f"right_arm_{i}": 0.0 for i in range(7)},
-#     **{f"left_arm_{i}": 0.0 for i in range(7)},
-#     "right_gripper_0": 0.0,
-#     "left_gripper_0": 0.0,
+#     **{f"right_arm_{i}.pos": 0.0 for i in range(7)},
+#     **{f"left_arm_{i}.pos": 0.0 for i in range(7)},
+#     "right_gripper_0.pos": 0.0,
+#     "left_gripper_0.pos": 0.0,
 
 #     "front": np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8),
 #     "left_wrist": np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8),
@@ -50,10 +50,10 @@ right_img = iio.imread(right_video_path, index=idx)
 state = row["observation.state"]
 
 raw_observation = {
-    **{f"right_arm_{i}": float(state[i]) for i in range(7)},
-    **{f"left_arm_{i}": float(state[7 + i]) for i in range(7)},
-    "right_gripper_0": float(state[14]),
-    "left_gripper_0": float(state[15]),
+    **{f"right_arm_{i}.pos": float(state[i]) for i in range(7)},
+    **{f"left_arm_{i}.pos": float(state[7 + i]) for i in range(7)},
+    "right_gripper_0.pos": float(state[14]),
+    "left_gripper_0.pos": float(state[15]),
 
     "front": front_img,
     "left_wrist": left_img,
