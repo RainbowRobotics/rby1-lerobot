@@ -54,10 +54,10 @@ def main():
 
     print("3. SendObservations test")
     raw_observation = {
-        **{f"right_arm_{i}": 0.0 for i in range(7)},
-        **{f"left_arm_{i}": 0.0 for i in range(7)},
-        "right_gripper_0": 0.0,
-        "left_gripper_0": 0.0,
+        **{f"right_arm_{i}.pos": 0.0 for i in range(7)},
+        **{f"left_arm_{i}.pos": 0.0 for i in range(7)},
+        "right_gripper_0.pos": 0.0,
+        "left_gripper_0.pos": 0.0,
         "task": "dummy",
     }
 

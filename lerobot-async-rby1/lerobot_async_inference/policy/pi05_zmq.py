@@ -11,9 +11,12 @@ ARM_DOF = 7
 GRIPPER_DOF = 1
 ACTION_DOF = 16
 
-RIGHT_ARM_KEYS = [f"right_arm_{i}" for i in range(ARM_DOF)]
-LEFT_ARM_KEYS = [f"left_arm_{i}" for i in range(ARM_DOF)]
-GRIPPER_KEYS = ["right_gripper_0", "left_gripper_0"]
+# Keys follow the LeRobot ".pos" convention emitted by
+# ``lerobot_robot_rby1.Rby1`` — see its ``POS_SUFFIX``. The vector order is
+# unchanged, so the contract with the policy server is unaffected.
+RIGHT_ARM_KEYS = [f"right_arm_{i}.pos" for i in range(ARM_DOF)]
+LEFT_ARM_KEYS = [f"left_arm_{i}.pos" for i in range(ARM_DOF)]
+GRIPPER_KEYS = ["right_gripper_0.pos", "left_gripper_0.pos"]
 
 PI05_ACTION_KEYS = [*RIGHT_ARM_KEYS, *LEFT_ARM_KEYS, *GRIPPER_KEYS]
 PI05_STATE_KEYS = PI05_ACTION_KEYS
@@ -145,7 +148,8 @@ def validate_pi05_robot_compatibility(
     if action_keys != PI05_ACTION_KEYS:
         raise ValueError(
             "The 'pi05_zmq' backend currently supports only "
-            "right_arm_0..6 + left_arm_0..6 + right_gripper_0 + left_gripper_0 actions. "
+            "right_arm_0..6.pos + left_arm_0..6.pos + right_gripper_0.pos + "
+            "left_gripper_0.pos actions. "
             f"Received action features: {action_keys}"
         )
 

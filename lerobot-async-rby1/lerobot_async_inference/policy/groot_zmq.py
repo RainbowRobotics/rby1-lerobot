@@ -9,9 +9,12 @@ import torch
 from ..helpers import TimedAction
 
 
-GROOT_N16_RIGHT_ARM_KEYS = [f"right_arm_{i}" for i in range(7)]
-GROOT_N16_LEFT_ARM_KEYS = [f"left_arm_{i}" for i in range(7)]
-GROOT_N16_GRIPPER_KEYS = ["right_gripper_0", "left_gripper_0"]
+# Keys follow the LeRobot ".pos" convention emitted by
+# ``lerobot_robot_rby1.Rby1`` — see its ``POS_SUFFIX``. The vector order is
+# unchanged, so the contract with the policy server is unaffected.
+GROOT_N16_RIGHT_ARM_KEYS = [f"right_arm_{i}.pos" for i in range(7)]
+GROOT_N16_LEFT_ARM_KEYS = [f"left_arm_{i}.pos" for i in range(7)]
+GROOT_N16_GRIPPER_KEYS = ["right_gripper_0.pos", "left_gripper_0.pos"]
 
 GROOT_N16_ACTION_KEYS = [
     *GROOT_N16_RIGHT_ARM_KEYS,
@@ -152,7 +155,8 @@ def validate_groot_robot_compatibility(
     if action_keys != GROOT_N16_ACTION_KEYS:
         raise ValueError(
             "The 'groot_zmq' backend currently supports only "
-            "right_arm_0..6 + left_arm_0..6 + right_gripper_0 + left_gripper_0 actions. "
+            "right_arm_0..6.pos + left_arm_0..6.pos + right_gripper_0.pos + "
+            "left_gripper_0.pos actions. "
             f"Received action features: {action_keys}"
         )
 
@@ -214,8 +218,12 @@ def build_groot_n16_observation(
         [raw_observation[key] for key in GROOT_N16_LEFT_ARM_KEYS],
         dtype=np.float32,
     )
-    right_gripper = np.asarray([raw_observation["right_gripper_0"]], dtype=np.float32)
-    left_gripper = np.asarray([raw_observation["left_gripper_0"]], dtype=np.float32)
+    right_gripper = np.asarray(
+        [raw_observation[GROOT_N16_GRIPPER_KEYS[0]]], dtype=np.float32
+    )
+    left_gripper = np.asarray(
+        [raw_observation[GROOT_N16_GRIPPER_KEYS[1]]], dtype=np.float32
+    )
 
     task = str(raw_observation.get("task", ""))
 

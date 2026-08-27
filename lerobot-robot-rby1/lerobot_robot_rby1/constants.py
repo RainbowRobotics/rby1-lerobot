@@ -36,6 +36,13 @@ RIGHT_ARM_NAMES: list[str] = [f"right_arm_{i}" for i in range(ARM_DOF)]
 LEFT_ARM_NAMES: list[str] = [f"left_arm_{i}" for i in range(ARM_DOF)]
 GRIPPER_NAMES: list[str] = ["right_gripper_0", "left_gripper_0"]
 
+# LeRobot key convention: joint / gripper positions carry a ".pos" suffix
+# (see lerobot.robots.lekiwi). lerobot-rollout filters the robot features by
+# this suffix, so bare names are dropped from the policy-facing tensors. The
+# names above stay bare — they are the base for the ".pos", ".vel" and
+# ".torque" observation channels.
+POS_SUFFIX = ".pos"
+
 # Mobile-base velocity action keys (body frame), following the LeRobot
 # convention used by LeKiwi: linear x / y (m/s) and yaw rate (rad/s).
 BASE_VEL_NAMES: list[str] = ["x.vel", "y.vel", "theta.vel"]
