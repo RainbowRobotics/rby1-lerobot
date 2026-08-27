@@ -39,6 +39,14 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # Leader arm control callback frequency in Hz.
     control_frequency: float = 100.0
 
+    # ── 12V power (leader-arm Dynamixel supply) ──────────────────────
+    # lerobot-teleoperate connects the teleoperator BEFORE the robot, so
+    # Rby1.connect()'s power_on(".*") has not run yet. Power the 12V rail
+    # here so the Dynamixel bus answers initialize().
+    auto_power_on_12v: bool = True
+    robot_address: str = "192.168.30.1:50051"
+    connect_timeout_sec: float = 3.0
+
     # ── Joint group selection ─────────────────────────────────────────
     # Must match the corresponding flags in Rby1Config so that
     # action_features are consistent between teleoperator and robot.
@@ -148,6 +156,8 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
             raise ValueError("control_frequency must be > 0")
         if self.init_duration < 0:
             raise ValueError("init_duration must be >= 0")
+        if self.connect_timeout_sec <= 0:
+            raise ValueError("connect_timeout_sec must be > 0")
 
     @staticmethod
     def _check_len(name: str, value: List[float], expected: int) -> None:

@@ -59,6 +59,10 @@ logger = logging.getLogger(__name__)
 
 _FALLBACK_URDF_PATH = "/home/nvidia/rby1-sdk/models/leader_arm/model.urdf"
 
+# Settle time after switching the 12V rail on, before the Dynamixel bus is
+# probed. Mirrors the capacitor-stabilisation sleep in Rby1.connect().
+_POWER_SETTLE_TIME = 0.1
+
 
 class Rby1LeaderArm(Teleoperator):
     """Teleoperator that reads joint positions from the RB-Y1 leader arm."""
@@ -132,6 +136,11 @@ class Rby1LeaderArm(Teleoperator):
         rby = self._import_sdk()
         cfg = self._config
 
+        # 0. Power the 12V rail that feeds the leader-arm servos. This must
+        #    happen before the Dynamixel bus is opened below.
+        if cfg.auto_power_on_12v:
+            self._power_on_12v(rby, cfg)
+
         model_path = self._resolve_urdf_path(cfg)
 
         logger.info("Initialising leader-arm device …")
@@ -145,7 +154,10 @@ class Rby1LeaderArm(Teleoperator):
         if len(active_ids) != expected:
             raise RuntimeError(
                 f"Leader-arm device count mismatch: expected {expected}, "
-                f"got {len(active_ids)} (active IDs: {active_ids})"
+                f"got {len(active_ids)} (active IDs: {active_ids}). "
+                "The leader-arm servos are powered from the RB-Y1 12V rail — "
+                "check that 12V is on, that the leader arm is plugged in, and "
+                "that teleop.robot_address points at your robot."
             )
 
         right_init_q = np.deg2rad(cfg.right_init_q_deg)
@@ -320,6 +332,61 @@ class Rby1LeaderArm(Teleoperator):
                 "Install it from the RB-Y1 SDK."
             ) from e
         return rby
+
+    @staticmethod
+    def _power_on_12v(rby: Any, cfg: Rby1LeaderArmConfig) -> None:
+        """Power the 12V rail that supplies the leader-arm Dynamixel servos.
+
+        ``lerobot-teleoperate`` connects the teleoperator before the robot, so
+        the follower's ``power_on(".*")`` has not run yet and the servos would
+        not answer ``initialize()``. This mirrors the RB-Y1 SDK examples, which
+        call ``power_on("12v")`` before touching the leader arm.
+
+        Uses a short-lived A-template handle — the gRPC backend is the same for
+        every model (see ``lerobot_robot_rby1.model_probe``), and the follower
+        robot keeps ownership of servos, control manager and command streams.
+        A connection failure is only a warning: when 12V is already on the
+        teleoperator works without ever reaching the robot.
+        """
+        timeout_ms = max(1, int(round(cfg.connect_timeout_sec * 1000.0)))
+        unreachable = (
+            f"Could not reach the RB-Y1 at '{cfg.robot_address}' to check the "
+            "12V rail; continuing. Pass teleop.robot_address if the robot "
+            "lives elsewhere."
+        )
+
+        try:
+            robot = rby.create_robot_a(cfg.robot_address)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"{unreachable} ({exc})")
+            return
+
+        try:
+            try:
+                connected = robot.connect(max_retries=1, timeout_ms=timeout_ms)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"{unreachable} ({exc})")
+                return
+            if not connected:
+                logger.warning(unreachable)
+                return
+
+            if robot.is_power_on("12v"):
+                logger.info("RB-Y1 12V rail already on.")
+                return
+
+            logger.info("Powering on the RB-Y1 12V rail for the leader arm ...")
+            if not robot.power_on("12v"):
+                raise RuntimeError(
+                    "Failed to power on the RB-Y1 12V rail; the leader-arm "
+                    "servos will not respond."
+                )
+            time.sleep(_POWER_SETTLE_TIME)
+        finally:
+            try:
+                robot.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
 
     @staticmethod
     def _resolve_urdf_path(cfg: Rby1LeaderArmConfig) -> str:
