@@ -356,17 +356,40 @@ def _port_free(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) != 0
 
 
+LOG_DIR = Path.home() / "preflight_logs"
+
+
+def _first_error_summary(text: str) -> str:
+    """First exception line(s) of the log — the root cause, not the shutdown noise."""
+    lines = text.splitlines()
+    summary: list[str] = []
+    for i, line in enumerate(lines):
+        if line.startswith("Traceback (most recent call last)"):
+            for j in range(i + 1, min(i + 80, len(lines))):
+                if lines[j] and not lines[j].startswith((" ", "\t", "Traceback")):
+                    summary.append(lines[j])
+                    break
+            if len(summary) >= 3:
+                break
+    return "\n".join(f"  ! {x}" for x in summary)
+
+
 def run_stage_subprocess(name: str, argv: list[str]) -> tuple[str, dict | str]:
     cmd = [sys.executable, __file__, "--stage", name, *argv]
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-25:])
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / f"{name}.log"
+    log_path.write_text(f"$ {' '.join(cmd)}\n\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}")
     if proc.returncode == 0:
         for line in reversed(proc.stdout.splitlines()):
             if line.startswith("RESULT "):
                 return "PASS", json.loads(line[len("RESULT "):])
         return "PASS", {}
     kind = "ABORT(SIGABRT)" if proc.returncode == -6 else f"FAIL(rc={proc.returncode})"
-    return kind, tail
+    combined = proc.stdout + proc.stderr
+    tail = "\n".join(combined.splitlines()[-15:])
+    detail = f"full log: {log_path}\n{_first_error_summary(combined)}\n--- tail ---\n{tail}"
+    return kind, detail
 
 
 def verdict(results: dict[str, tuple[str, object]]) -> str:
@@ -422,6 +445,10 @@ def main() -> int:
     results: dict[str, tuple[str, object]] = {}
     for name in stages:
         print(f"\n== {name}: {STAGES[name]} ==")
+        if name != "S_session" and results.get("S_session", ("PASS",))[0] != "PASS":
+            print("  -> SKIPPED (S_session failed; fix the session first, logs in ~/preflight_logs)")
+            results[name] = ("SKIPPED", {"skipped": "S_session failed"})
+            continue
         status, detail = run_stage_subprocess(name, passthrough)
         results[name] = (status, detail)
         print(f"  -> {status}")
