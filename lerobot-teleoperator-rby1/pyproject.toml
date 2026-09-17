@@ -12,7 +12,7 @@ authors = [
 ]
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
-keywords = ["lerobot", "teleoperation", "rby1", "rainbow-robotics", "vr", "meta-quest", "robotics"]
+keywords = ["lerobot", "teleoperation", "rby1", "rainbow-robotics", "vr", "meta-quest", "isaac-teleop", "cloudxr", "robotics"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -32,6 +32,12 @@ dependencies = [
   "lerobot_robot_rby1",
 ]
 
+[project.optional-dependencies]
+# NVIDIA Isaac Teleop device (--teleop.type=rby1_isaac). retargeters-lite is
+# the aarch64-friendly extra (scipy only); cloudxr adds the runtime launcher.
+isaac = ["isaacteleop[cloudxr,retargeters-lite]==1.4.142"]
+test = ["pytest"]
+
 [project.urls]
 Homepage = "https://github.com/RainbowRobotics/lerobot-teleoperator-rby1"
 Repository = "https://github.com/RainbowRobotics/lerobot-teleoperator-rby1"
@@ -41,3 +47,9 @@ Issues = "https://github.com/RainbowRobotics/lerobot-teleoperator-rby1/issues"
 where = ["."]
 include = ["lerobot_teleoperator_rby1*"]
 exclude = ["*.egg-info"]
+
+[tool.setuptools.package-data]
+"lerobot_teleoperator_rby1.isaac_teleop" = ["default.env"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -10,7 +10,7 @@ Joint layout (Model M, 26-DOF)::
     torso_0 .. torso_5  torso, 6 DOF        (observation only by default)
     right_arm_0 .. _6   right arm, 7 DOF    (obs + action)
     left_arm_0 .. _6    left arm, 7 DOF     (obs + action)
-    head_0, head_1      head                (excluded from obs/action)
+    head_0, head_1      head                (obs + action when use_head)
     + two Dynamixel gripper motors (right=0, left=1) on /dev/rby1_gripper
 
 The two arm grippers are exposed as normalised scalars; see
@@ -55,6 +55,7 @@ from .config_rby1 import (
 from .constants import (
     ARM_DOF,
     BASE_VEL_NAMES,
+    HEAD_NAMES,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
     POS_SUFFIX,
@@ -90,6 +91,8 @@ class Rby1(Robot):
       ``lerobot-rollout`` filters the policy state on.
     * Gripper positions (normalised, 1.0 = open) for each enabled arm:
       ``right_gripper_0.pos`` / ``left_gripper_0.pos``.
+    * Head joints ``head_0.pos`` (pan) / ``head_1.pos`` (tilt) when
+      ``use_head`` is set (also part of the action, in either mode).
     * Optional ``<joint>.vel`` and ``<joint>.torque`` channels for the 20 body
       joints when ``use_velocity`` / ``use_torque`` are set.
     * One ``(H, W, 3)`` image per configured camera.
@@ -179,13 +182,23 @@ class Rby1(Robot):
                 names += RIGHT_EE_NAMES
             if self._config.use_left_arm:
                 names += LEFT_EE_NAMES
-            return {name: float for name in names}
-        # Joint mode: torso is observation-only and is intentionally excluded.
-        if self._config.use_right_arm:
-            names += RIGHT_ARM_NAMES
-        if self._config.use_left_arm:
-            names += LEFT_ARM_NAMES
-        return {f"{name}{POS_SUFFIX}": float for name in names}
+            features = {name: float for name in names}
+        else:
+            # Joint mode: torso is observation-only and is intentionally excluded.
+            if self._config.use_right_arm:
+                names += RIGHT_ARM_NAMES
+            if self._config.use_left_arm:
+                names += LEFT_ARM_NAMES
+            features = {f"{name}{POS_SUFFIX}": float for name in names}
+        # The head is joint-space in both modes.
+        features.update(self._head_ft)
+        return features
+
+    @property
+    def _head_ft(self) -> dict[str, type]:
+        if not self._config.use_head:
+            return {}
+        return {f"{name}{POS_SUFFIX}": float for name in HEAD_NAMES}
 
     @property
     def _obs_joint_names(self) -> list[str]:
@@ -200,6 +213,8 @@ class Rby1(Robot):
             names += RIGHT_ARM_NAMES
         if self._config.use_left_arm:
             names += LEFT_ARM_NAMES
+        if self._config.use_head:
+            names += HEAD_NAMES
         return names
 
     @property
@@ -604,6 +619,10 @@ class Rby1(Robot):
             left = values[model.left_arm_idx]
             for i, name in enumerate(LEFT_ARM_NAMES):
                 obs[f"{name}{suffix}"] = float(left[i])
+        if self._config.use_head:
+            head = values[model.head_idx]
+            for i, name in enumerate(HEAD_NAMES):
+                obs[f"{name}{suffix}"] = float(head[i])
 
     def _read_ee_observation(self, obs: dict[str, Any], state: Any) -> None:
         """Add the end-effector pose of each enabled group to ``obs``.
@@ -689,6 +708,7 @@ class Rby1(Robot):
         cbc = rby.ComponentBasedCommandBuilder()
         if has_body:
             cbc.set_body_command(body)
+        self._add_head_command(rby, cbc, action, minimum_time)
         if self._config.use_mobile_base:
             linear, angular = self._base_velocity_from_action(action)
             cbc.set_mobility_command(
@@ -730,6 +750,9 @@ class Rby1(Robot):
                 rby, cfg, targets, reset, self._null_right, self._null_left
             )
         cbc = rby.ComponentBasedCommandBuilder().set_body_command(body)
+        self._add_head_command(
+            rby, cbc, action, cfg.ee_dt * cfg.min_time_factor_pc, cfg.ee_hold_time
+        )
         if cfg.use_mobile_base:
             linear, angular = self._base_velocity_from_action(action)
             cbc.set_mobility_command(
@@ -741,6 +764,46 @@ class Rby1(Robot):
             rby.RobotCommandBuilder().set_command(cbc)
         )
         self._last_ee_targets = targets
+
+    def _head_target_from_action(self, action: dict[str, Any]) -> np.ndarray | None:
+        """Return the (2,) head joint target from the action, or None.
+
+        None when ``use_head`` is off or the action carries no head keys — the
+        head command is then omitted and the head holds its position.
+        """
+        if not self._config.use_head:
+            return None
+        keys = [f"{name}{POS_SUFFIX}" for name in HEAD_NAMES]
+        if not all(k in action for k in keys):
+            return None
+        return np.array([float(action[k]) for k in keys], dtype=np.float64)
+
+    def _add_head_command(
+        self,
+        rby: Any,
+        cbc: Any,
+        action: dict[str, Any],
+        minimum_time: float,
+        hold_time: float | None = None,
+    ) -> None:
+        """Attach a head joint-position command to ``cbc`` when the action has one."""
+        head_q = self._head_target_from_action(action)
+        if head_q is None:
+            return
+        head_idx = self._model.head_idx
+        kwargs = {} if hold_time is None else {"hold_time": hold_time}
+        cbc.set_head_command(
+            cb.build_head_command(
+                rby,
+                head_q,
+                velocity_limit=self._max_qdot[head_idx],
+                acceleration_limit=(
+                    self._max_qddot[head_idx] * self._config.acceleration_limit_scale
+                ),
+                minimum_time=minimum_time,
+                **kwargs,
+            )
+        )
 
     def _detect_ee_reset(self, targets: cb.CartesianTargets) -> cb.ResetFlags:
         """Flag components whose target jumped since the last command."""

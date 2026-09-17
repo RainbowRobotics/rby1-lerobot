@@ -25,6 +25,7 @@ TORSO_NAMES: list[str] = [f"torso_{i}" for i in range(TORSO_DOF)]
 RIGHT_ARM_NAMES: list[str] = [f"right_arm_{i}" for i in range(ARM_DOF)]
 LEFT_ARM_NAMES: list[str] = [f"left_arm_{i}" for i in range(ARM_DOF)]
 GRIPPER_NAMES: list[str] = ["right_gripper_0", "left_gripper_0"]
+HEAD_NAMES: list[str] = ["head_0", "head_1"]  # pan (yaw), tilt (pitch)
 
 # LeRobot key convention: joint / gripper positions carry a ".pos" suffix,
 # matching `lerobot_robot_rby1.constants.POS_SUFFIX`. lerobot-rollout filters

@@ -22,6 +22,8 @@ from scipy.spatial.transform import Rotation as R
 from .constants import (
     ARM_DOF,
     EE_SUFFIXES,
+    HEAD_Q_MAX,
+    HEAD_Q_MIN,
     LEFT_ARM_NAMES,
     LEFT_ARM_Q_MAX,
     LEFT_ARM_Q_MIN,
@@ -255,6 +257,32 @@ def build_limb_command(
         .set_position(position)
         .set_velocity_limit(velocity_limit)
         .set_acceleration_limit(acceleration_limit)
+    )
+
+
+def build_head_command(
+    rby: Any,
+    position: np.ndarray,
+    velocity_limit: np.ndarray,
+    acceleration_limit: np.ndarray,
+    minimum_time: float,
+    hold_time: float = _CONTROL_HOLD_TIME,
+) -> Any:
+    """Build a joint-position command for the 2-DOF head (pan, tilt).
+
+    The target is clipped to the URDF limits. Used per tick in both action
+    modes when ``use_head`` is set; the head is never part of the Cartesian
+    solvers, so it always rides a plain ``JointPositionCommandBuilder``.
+    """
+    head_q = np.clip(np.asarray(position, dtype=np.float64), HEAD_Q_MIN, HEAD_Q_MAX)
+    return build_limb_command(
+        rby,
+        position=head_q,
+        velocity_limit=velocity_limit,
+        acceleration_limit=acceleration_limit,
+        minimum_time=minimum_time,
+        use_impedance=False,
+        hold_time=hold_time,
     )
 
 

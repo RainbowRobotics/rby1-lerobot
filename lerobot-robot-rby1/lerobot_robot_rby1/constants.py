@@ -25,6 +25,7 @@ JointLimits = dict[str, tuple[float, float]]
 
 TORSO_DOF = 6
 ARM_DOF = 7
+HEAD_DOF = 2
 TOTAL_BODY_DOF = TORSO_DOF + 2 * ARM_DOF  # 20
 
 # ---------------------------------------------------------------------------
@@ -35,6 +36,9 @@ TORSO_NAMES: list[str] = [f"torso_{i}" for i in range(TORSO_DOF)]
 RIGHT_ARM_NAMES: list[str] = [f"right_arm_{i}" for i in range(ARM_DOF)]
 LEFT_ARM_NAMES: list[str] = [f"left_arm_{i}" for i in range(ARM_DOF)]
 GRIPPER_NAMES: list[str] = ["right_gripper_0", "left_gripper_0"]
+# Head pan (head_0, yaw) / tilt (head_1, pitch). Exposed in observation and
+# action only when ``Rby1Config.use_head`` is set; always joint-space.
+HEAD_NAMES: list[str] = [f"head_{i}" for i in range(HEAD_DOF)]
 
 # LeRobot key convention: joint / gripper positions carry a ".pos" suffix
 # (see lerobot.robots.lekiwi). lerobot-rollout filters the robot features by
@@ -84,6 +88,10 @@ LEFT_ARM_Q_MIN = np.array(
 LEFT_ARM_Q_MAX = np.array(
     [3.141592654, 3.141592654, 3.141592654, 0.017453293, 3.141592654, 1.919862177, 2.705260340]
 )
+
+# Head joints (head_0 yaw, head_1 pitch), from the rby1m URDF.
+HEAD_Q_MIN = np.array([-1.570796327, -1.570796327])
+HEAD_Q_MAX = np.array([1.570796327, 1.570796327])
 
 # ---------------------------------------------------------------------------
 # EE action mode defaults (Cartesian impedance).

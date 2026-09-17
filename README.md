@@ -9,7 +9,7 @@
 - **RB-Y1**: Currently, **only robots version 1.2 or lower are supported.** Support for version 1.3 is coming soon.
 - **Linux**: Tested on Ubuntu 22.04 (x86-64 and ARM64).
 - **Ethernet connection to RPC**: Ethernet connection to the RPC at `192.168.30.1` (or desired IP).
-- **Teleoperation device**: Leader arm connection via 4-Pin MOCO cable to the RB-Y1 UPC(VR-based teleoperation is not currently supported; this feature is coming soon).
+- **Teleoperation device**: Leader arm connection via 4-Pin MOCO cable to the RB-Y1 UPC, or an XR headset (Meta Quest 3 / Pico) through [NVIDIA Isaac Teleop](https://github.com/NVIDIA/IsaacTeleop) — see [Teleoperate with NVIDIA Isaac Teleop](#teleoperate-with-nvidia-isaac-teleop-xr-headset).
 
 ## ⚠️Safety Guide
 
@@ -129,6 +129,81 @@ lerobot-teleoperate \
 Replace `XXXXXXXXX` with your RealSense serial number. You can add `right` and
 `left` cameras using the same pattern.
 
+## Teleoperate with NVIDIA Isaac Teleop (XR headset)
+
+`--teleop.type=rby1_isaac` drives the RB-Y1 from an XR headset through
+[NVIDIA Isaac Teleop](https://github.com/NVIDIA/IsaacTeleop): the CloudXR runtime
+runs on the host that runs `lerobot-teleoperate` / `lerobot-record`, and the headset
+connects with its **browser** (no app to install). Both controllers move the arms
+(end-effector space, executed by the robot's onboard Cartesian impedance solver), the
+headset orientation drives the head joints, body tracking drives the torso and the
+thumbsticks drive the mobile base.
+
+### Requirements
+
+- Host with an NVIDIA GPU: Ubuntu 22.04/24.04, Python ≥ 3.11. x86_64 workstations are
+  the documented target; `isaacteleop` also ships aarch64 wheels and selects an
+  experimental CloudXR runtime on **Jetson Orin** (the RB-Y1 UPC). On the UPC run the
+  preflight first (below).
+- Headset: Meta Quest 3 (controllers, head and inside-out body tracking) or Pico 4
+  Ultra (+ motion trackers for body tracking). The headset and the host must be on
+  the same network.
+
+### Install
+
+```bash
+pip install -e "lerobot-teleoperator-rby1[isaac]"   # isaacteleop[cloudxr,retargeters-lite]
+python -m isaacteleop.cloudxr --accept-eula          # once: downloads the CloudXR runtime
+```
+
+### Jetson Orin (UPC) preflight
+
+The CloudXR runtime on Orin can abort the process when a Python thread is created
+after the runtime started; `lerobot-record` creates its keyboard and camera threads
+after `teleop.connect()`. The preflight runs each ordering in a subprocess and prints
+a verdict (`GO`, `GO-DEFERRED` → add `--teleop.session_start=first_action`, or
+`NO-GO` → run on an x86 host):
+
+```bash
+python lerobot-teleoperator-rby1/scripts/isaac_preflight_upc.py \
+  --robot 192.168.30.1:50051 --camera-serial XXXXXXXXX --record-dryrun
+```
+
+### Run
+
+```bash
+lerobot-teleoperate \
+  --robot.type=rby1 \
+  --robot.address=192.168.30.1:50051 \
+  --robot.action_mode=ee \
+  --robot.use_torso=true \
+  --robot.use_head=true \
+  --robot.use_mobile_base=true \
+  --teleop.type=rby1_isaac \
+  --teleop.robot_address=192.168.30.1:50051
+```
+
+`lerobot-record` takes the same `--robot.*` / `--teleop.*` arguments plus the
+`--dataset.*` ones from the sections below. The teleoperator's `use_torso`,
+`use_right_arm`, `use_left_arm`, `use_gripper`, `use_mobile_base` and `use_head`
+flags **must mirror the robot's** so the action keys match.
+
+The process prints the host IP addresses and waits for the headset:
+
+1. In the headset browser open `https://nvidia.github.io/IsaacTeleop/client`.
+2. Enter the host IP, accept the self-signed certificate at `https://<ip>:48322/`, Connect.
+3. Once the controllers are tracked the robot holds its pose until you squeeze a grip.
+
+| Input | Effect |
+|-------|--------|
+| Squeeze (grip) > `clutch_threshold` | That arm follows its controller (clutch engaged); release to hold |
+| Trigger | Gripper (fully pressed = closed) |
+| Right thumbstick / left thumbstick | Base linear velocity / yaw rate |
+| Right **B** | Stop: freeze every target, zero the base |
+| Right **A** | Resume after a stop; re-centre the head origin |
+| Headset orientation | `head_0` (pan) / `head_1` (tilt) relative to the pose at the first tracked frame |
+| Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, only while **both** arms are clutched |
+
 ## Record Data and upload to HF
 
 ```bash
@@ -171,6 +246,7 @@ lerobot-record \
 | `use_right_arm` | `True` | Include right arm in observation / action |
 | `use_left_arm` | `True` | Include left arm in observation / action |
 | `use_torso` | `False` | Include torso joints |
+| `use_head` | `False` | Include the head pan / tilt joints (`head_0.pos`, `head_1.pos`) in observation and action, in either action mode |
 | `use_gripper` | `True` | Enable RB-Y1 grippers |
 | `use_mobile_base` | `False` | Enable base control (Model M/A) |
 | `use_velocity` | `False` | Add `.vel` channels to observations |
@@ -191,6 +267,26 @@ lerobot-record \
 | `reset_right_arm_on_record` | `False` | Return right arm to init pose between episodes |
 | `reset_left_arm_on_record` | `False` | Return left arm to init pose between episodes |
 
+### Teleoperator (`Rby1XRConfig`, `--teleop.type=rby1_isaac`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `robot_address`, `robot_model` | `"192.168.30.1:50051"`, `"m"` | Read-only robot link (state + forward kinematics for the clutch) |
+| `use_torso`, `use_right_arm`, `use_left_arm`, `use_gripper`, `use_mobile_base`, `use_head` | `True` | Must mirror `Rby1Config` |
+| `auto_launch_cloudxr` | `True` | Launch the CloudXR runtime from this process (`LEROBOT_CLOUDXR_SKIP_AUTOLAUNCH=1` also disables it) |
+| `cloudxr_env_file` | `None` | KEY=value profile for CloudXR; default is the packaged `default.env` (Quest3 profile) |
+| `session_start` | `"connect"` | `"first_action"` opens the XR session on the first `get_action()` (Jetson Orin mitigation) |
+| `tracking_wait_timeout_s` | `0.0` | Give up waiting for the headset after this many seconds (0 = forever) |
+| `clutch_threshold` | `0.5` | Squeeze value above which an arm follows |
+| `latch_orientation` | `"measured"` | Home orientation on engage: measured EE pose (`"commanded"` = upstream SO-101 behaviour) |
+| `thumbstick_deadzone`, `base_max_linear`, `base_max_angular` | `0.15`, `0.3`, `0.6` | Thumbstick → base velocity mapping |
+| `head_yaw_sign`, `head_pitch_sign` | `1.0`, `-1.0` | Flip if the head moves the wrong way |
+| `head_yaw_limit_deg`, `head_pitch_min_deg`, `head_pitch_max_deg` | `80`, `-45`, `80` | Head joint clamps |
+| `head_smoothing` | `0.3` | EMA weight of the new head sample (1.0 = no filtering) |
+| `torso_source` | `"body"` | `"body"` (Isaac Teleop body tracking), `"head"` or `"none"` |
+| `torso_body_joint` | `"SPINE3"` | Body joint driving the torso (XR_BD 24-joint names) |
+| `torso_max_rot_delta_deg`, `torso_max_z_delta_m` | `35`, `0.15` | Safety clamps on the torso delta since engage |
+
 ### Observation / Action Keys
 
 Keys follow the LeRobot naming convention:
@@ -203,6 +299,7 @@ Keys follow the LeRobot naming convention:
 | Joint velocity (`use_velocity`) | `<joint>.vel` | `right_arm_0.vel` |
 | Joint torque (`use_torque`) | `<joint>.torque` | `right_arm_0.torque` |
 | End-effector pose (`action_mode="ee"`) | `<group>_ee.{x,y,z,wx,wy,wz}` | `right_ee.x` |
+| Head joints (`use_head`) | `head_0.pos`, `head_1.pos` | pan, tilt (rad) |
 
 > [!WARNING]
 > Datasets recorded before the `.pos` suffix was introduced use bare keys
@@ -236,7 +333,7 @@ Limitations:
 | Path | Description |
 |------|-------------|
 | [`lerobot-robot-rby1/`](lerobot-robot-rby1) | RB-Y1 follower robot plugin (`--robot.type=rby1`) |
-| [`lerobot-teleoperator-rby1/`](lerobot-teleoperator-rby1) | RB-Y1 teleoperator plugins (`--teleop.type=rby1_leader_arm`, `--teleop.type=rby1_vr`) |
+| [`lerobot-teleoperator-rby1/`](lerobot-teleoperator-rby1) | RB-Y1 teleoperator plugins (`--teleop.type=rby1_leader_arm`, `--teleop.type=rby1_vr`, `--teleop.type=rby1_isaac`) |
 
 The LeRobot framework is installed as a Python package dependency (`pip install lerobot[dataset]`).
 
@@ -247,4 +344,5 @@ The LeRobot framework is installed as a Python package dependency (`pip install 
 - [RB-Y1 Documentation](https://rainbowrobotics.github.io/rby1-dev/)
 - [LeRobot Documentation](https://huggingface.co/docs/lerobot)
 - [LeRobot Installation Guide](https://huggingface.co/docs/lerobot/installation)
+- [NVIDIA Isaac Teleop](https://github.com/NVIDIA/IsaacTeleop) · [LeRobot Isaac Teleop example](https://github.com/huggingface/lerobot/tree/main/examples/isaac_teleop_to_so101)
 

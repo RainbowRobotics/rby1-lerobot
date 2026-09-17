@@ -121,6 +121,13 @@ class Rby1Config(RobotConfig):
     use_right_arm: bool = True
     use_left_arm: bool = True
 
+    # Include the head pan / tilt joints (head_0.pos, head_1.pos) in both the
+    # observation and the action, in either action mode. The head is always
+    # commanded in joint space (JointPositionCommand). When the action carries
+    # no head keys the head simply holds its position. Produced e.g. by the
+    # rby1_isaac teleoperator (headset orientation → head joints).
+    use_head: bool = False
+
     # ── Action mode ────────────────────────────────────────────────────
     # "joint": actions are joint positions (radians) for the enabled arms,
     #          executed as joint position / impedance commands.
