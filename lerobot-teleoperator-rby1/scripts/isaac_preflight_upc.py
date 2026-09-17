@@ -84,10 +84,23 @@ def _open_session(with_body: bool):
             env_config=default_cloudxr_env_file(),
             accept_eula=False,
         )
-    pipeline, body_in_graph = build_pipeline(with_body=with_body)
-    _log(f"pipeline built (body rebased in-graph: {body_in_graph})")
-    session = TeleopSession(TeleopSessionConfig(app_name="rby1_isaac_preflight", pipeline=pipeline))
-    session.__enter__()
+    try:
+        from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import verify_index_layout
+
+        _log(f"index layout check: {verify_index_layout()}")
+        pipeline, body_in_graph = build_pipeline(with_body=with_body)
+        _log(f"pipeline built (body rebased in-graph: {body_in_graph})")
+        session = TeleopSession(TeleopSessionConfig(app_name="rby1_isaac_preflight", pipeline=pipeline))
+        session.__enter__()
+    except Exception:
+        # Stop the runtime we launched so the failure is not followed by
+        # shutdown noise from the WSS proxy / CloudXR service threads.
+        if launcher is not None:
+            try:
+                launcher.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        raise
     _log("TeleopSession entered")
     return launcher, session, body_in_graph
 

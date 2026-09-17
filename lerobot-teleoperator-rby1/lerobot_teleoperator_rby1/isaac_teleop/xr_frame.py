@@ -14,6 +14,7 @@ installed package before a session is built.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import IntEnum
@@ -21,6 +22,8 @@ from typing import Any
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Tensor layouts (mirrors of isaacteleop.retargeting_engine.tensor_types.indices)
@@ -206,13 +209,21 @@ def _parse_head(group: Any) -> HeadState | None:
     if _is_none(group):
         return None
     try:
-        if not bool(group[HeadInputIndex.IS_VALID]):
-            return None
         pos = np.asarray(group[HeadInputIndex.POSITION], dtype=float).reshape(3)
         quat = np.asarray(group[HeadInputIndex.ORIENTATION], dtype=float).reshape(4)
-        tracked = bool(group[HeadInputIndex.IS_TRACKED])
     except (IndexError, KeyError, TypeError, ValueError):
         return None
+    # is_valid / is_tracked exist on newer isaacteleop only; older layouts
+    # (3-field HeadPose) have neither, so treat a present sample as valid.
+    try:
+        if not bool(group[HeadInputIndex.IS_VALID]):
+            return None
+    except (IndexError, KeyError, TypeError, ValueError):
+        pass
+    try:
+        tracked = bool(group[HeadInputIndex.IS_TRACKED])
+    except (IndexError, KeyError, TypeError, ValueError):
+        tracked = True
     if not (np.all(np.isfinite(pos)) and np.all(np.isfinite(quat))):
         return None
     return HeadState(pos, quat, tracked)
@@ -284,24 +295,58 @@ class ButtonEdge:
 # ---------------------------------------------------------------------------
 
 
-def verify_index_layout() -> None:
-    """Assert the local index enums match the installed ``isaacteleop``."""
+# Candidate names of each layout enum across isaacteleop releases.
+_REMOTE_ENUM_NAMES: dict[type[IntEnum], tuple[str, ...]] = {
+    ControllerInputIndex: ("ControllerInputIndex",),
+    HeadInputIndex: ("HeadInputIndex", "HeadPoseIndex"),
+    FullBodyInputIndex: ("FullBodyInputIndex", "BodyInputIndex"),
+    BodyJointIndex: ("BodyJointIndex",),
+}
+
+
+def verify_index_layout() -> dict[str, str]:
+    """Check the local index enums against the installed ``isaacteleop``.
+
+    Members present on both sides must agree (a mismatch raises, since it
+    would silently corrupt every parsed pose). Enums or members missing from
+    the installed package only log a warning — e.g. 1.4.x has no
+    ``HeadInputIndex``/``IS_TRACKED`` — and the parsers tolerate them.
+    Returns ``{local_enum_name: "verified" | "missing:<names>" | "absent"}``.
+    """
     from isaacteleop.retargeting_engine.tensor_types import indices as idx
 
-    pairs = (
-        (ControllerInputIndex, idx.ControllerInputIndex),
-        (HeadInputIndex, idx.HeadInputIndex),
-        (FullBodyInputIndex, idx.FullBodyInputIndex),
-        (BodyJointIndex, idx.BodyJointIndex),
-    )
-    for local, remote in pairs:
+    report: dict[str, str] = {}
+    for local, names in _REMOTE_ENUM_NAMES.items():
+        remote = next((getattr(idx, n) for n in names if hasattr(idx, n)), None)
+        if remote is None:
+            logger.warning(
+                "isaacteleop has none of %s; %s layout could not be verified.",
+                names,
+                local.__name__,
+            )
+            report[local.__name__] = "absent"
+            continue
+        missing: list[str] = []
         for member in local:
+            if not hasattr(remote, member.name):
+                missing.append(member.name)
+                continue
             remote_value = int(getattr(remote, member.name))
             if remote_value != int(member):
                 raise RuntimeError(
                     f"isaacteleop layout mismatch: {local.__name__}.{member.name} is "
                     f"{remote_value} in the installed package, {int(member)} here."
                 )
+        if missing:
+            logger.warning(
+                "isaacteleop %s lacks %s (older layout); those fields are treated as absent.",
+                remote.__name__,
+                missing,
+            )
+            report[local.__name__] = "missing:" + ",".join(missing)
+        else:
+            report[local.__name__] = "verified"
+    return report
 
 
 def build_pipeline(*, with_body: bool) -> tuple[Any, bool]:

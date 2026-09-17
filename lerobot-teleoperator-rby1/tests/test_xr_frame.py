@@ -66,3 +66,16 @@ def test_button_edges_fire_once_per_press():
     assert edges.update(held)["right_a"]
     gone = frame_from_outputs({}, want_body=False)
     assert not any(edges.update(gone).values())
+
+
+def test_head_without_valid_or_tracked_fields_is_accepted():
+    from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import HeadInputIndex
+
+    three_field = fakes.FakeGroup(
+        {
+            HeadInputIndex.POSITION: np.array([0, 0, 1.5], np.float32),
+            HeadInputIndex.ORIENTATION: np.array([0, 0, 0, 1], np.float32),
+        }
+    )
+    f = frame_from_outputs({OUT_HEAD: three_field}, want_body=False)
+    assert f.head is not None and f.head.is_tracked
