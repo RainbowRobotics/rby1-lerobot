@@ -344,13 +344,28 @@ class Rby1(Robot):
             rby.ControlManagerState.State.MajorFault,
             rby.ControlManagerState.State.MinorFault,
         ):
-            logger.warning("Clearing RB-Y1 control manager fault ...")
-            self._robot.reset_fault_control_manager()
+            logger.warning(
+                f"Clearing RB-Y1 control manager fault (state={cm_state.state}) ... "
+                f"recent faults: {self._fault_log_summary()}"
+            )
+            ok = self._robot.reset_fault_control_manager()
+            logger.warning(f"reset_fault_control_manager -> {ok}")
         # EE mode runs the Cartesian impedance solver at teleop speeds and
         # needs the unlimited mode (as the VR teleoperator previously used).
-        self._robot.enable_control_manager(
+        ok = self._robot.enable_control_manager(
             unlimited_mode_enabled=(self._config.action_mode == "ee")
         )
+        cm_state = self._robot.get_control_manager_state()
+        logger.info(
+            f"Control manager: enable -> {ok}, state={cm_state.state}, "
+            f"control_state={getattr(cm_state, 'control_state', '?')}, "
+            f"unlimited_mode={getattr(cm_state, 'unlimited_mode_enabled', '?')}"
+        )
+        if cm_state.state != rby.ControlManagerState.State.Enabled:
+            raise RuntimeError(
+                f"RB-Y1 control manager is not Enabled after enable_control_manager() "
+                f"(state={cm_state.state}). Recent faults: {self._fault_log_summary()}"
+            )
 
         # 4. Cache the model (joint index arrays) and URDF velocity / acceleration
         #    limits from the dynamics model.
@@ -421,6 +436,14 @@ class Rby1(Robot):
             cam.disconnect()
 
         if self._robot is not None:
+            # Cancel the command stream before disabling the control manager;
+            # disabling with a live stream leaves the manager in a fault state
+            # that the next session then has to clear.
+            if self._stream is not None:
+                try:
+                    self._stream.cancel()
+                except Exception:  # noqa: BLE001
+                    pass
             self._robot.disable_control_manager()
             if self._config.use_gripper:
                 self._robot.set_tool_flange_output_voltage("right", 0)
@@ -664,12 +687,67 @@ class Rby1(Robot):
         except ImportError as e:
             raise ImportError("rby1_sdk is required.") from e
 
+        try:
+            self._dispatch_action(rby, action)
+        except RuntimeError as e:
+            if "expired" not in str(e).lower():
+                raise
+            # The stream expires when the command it carries ended on the robot
+            # (finished, rejected or faulted). Report why and retry once on a
+            # fresh stream; a second failure is fatal.
+            self._report_expired_stream(e)
+            self._stream = self._robot.create_command_stream(priority=1)
+            self._last_ee_targets = None  # force a reference reset on the retry
+            logger.warning("Command stream re-created; retrying the command once.")
+            try:
+                self._dispatch_action(rby, action)
+            except RuntimeError as e2:
+                self._report_expired_stream(e2)
+                raise RuntimeError(
+                    "RB-Y1 command stream expired twice in a row — the robot is "
+                    "rejecting the command (see the control manager state / fault "
+                    "log above)."
+                ) from e2
+        self._send_gripper_action(action)
+        return action
+
+    def _dispatch_action(self, rby: Any, action: dict[str, Any]) -> None:
         if self._config.action_mode == "ee":
             self._send_ee_action(rby, action)
         else:
             self._send_joint_action(rby, action)
-        self._send_gripper_action(action)
-        return action
+
+    def _fault_log_summary(self, limit: int = 3) -> str:
+        try:
+            logs = self._robot.get_fault_log_list()
+        except Exception as e:  # noqa: BLE001
+            return f"<unavailable: {e.__class__.__name__}>"
+        try:
+            items = list(logs)[-limit:]
+            return "; ".join(str(x) for x in items) if items else "<none>"
+        except Exception:  # noqa: BLE001
+            return str(logs)
+
+    def _report_expired_stream(self, err: Exception) -> None:
+        """Log everything that explains why the robot ended the streamed command."""
+        feedback = "<n/a>"
+        try:
+            feedback = str(self._stream.request_feedback(timeout_ms=200))
+        except Exception as e:  # noqa: BLE001
+            feedback = f"<unavailable: {e.__class__.__name__}: {e}>"
+        cm = "<n/a>"
+        try:
+            st = self._robot.get_control_manager_state()
+            cm = (
+                f"state={st.state} control_state={getattr(st, 'control_state', '?')} "
+                f"unlimited_mode={getattr(st, 'unlimited_mode_enabled', '?')}"
+            )
+        except Exception as e:  # noqa: BLE001
+            cm = f"<unavailable: {e.__class__.__name__}>"
+        logger.error(
+            f"Command stream expired ({err}). control manager: {cm}. "
+            f"last stream feedback: {feedback}. recent faults: {self._fault_log_summary()}"
+        )
 
     def _send_joint_action(self, rby: Any, action: dict[str, Any]) -> None:
         """Execute a joint-position action (``action_mode="joint"``)."""
