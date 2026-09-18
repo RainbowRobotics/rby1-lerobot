@@ -109,6 +109,14 @@ class Rby1Config(RobotConfig):
     # Enable physical Dynamixel gripper (set False for simulation / gripper-less setups)
     use_gripper: bool = True
 
+    # Forward the robot's own log stream (control manager / solver messages)
+    # into this process's logger: warn/error always, info when
+    # forward_robot_logs_info is set. This is how "why did the command end /
+    # fault" reasons become visible on the UPC.
+    forward_robot_logs: bool = True
+    forward_robot_logs_info: bool = False
+    robot_log_stream_rate: float = 10.0
+
     # Map of camera name -> CameraConfig. Defaults to no cameras (the
     # RealSense layout in _default_cameras() is a commented-out template);
     # pass an explicit dict to enable cameras.
@@ -216,6 +224,14 @@ class Rby1Config(RobotConfig):
     # Use a single whole-body Cartesian impedance solver for torso + arms.
     # False → separate torso / right-arm / left-arm solvers (more stable).
     ee_whole_body: bool = False
+
+    # Torso joint angles (degrees, torso_0..5) used as the ready pose in EE
+    # mode instead of READY_TORSO. The upright READY_TORSO ([0,0,0,20,0,0])
+    # leaves the three torso pitch joints nearly aligned, which the Cartesian
+    # torso solver can treat as a singularity; the SDK Cartesian examples
+    # start from a crouched torso instead (e.g. [0, 5.7, -11.5, 5.7, 0, 0] or
+    # [0, 45, -90, 45, 0, 0]). None keeps READY_TORSO.
+    ee_ready_torso_deg: List[float] | None = None
 
     # Expected action period (s); Cartesian command minimum_time is
     # ee_dt * min_time_factor_wb (whole-body / mobility) or

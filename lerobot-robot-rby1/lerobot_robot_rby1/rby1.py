@@ -117,6 +117,7 @@ class Rby1(Robot):
 
     config_class = Rby1Config
     name = "rby1"
+    _STREAM_RECREATE_COOLDOWN_S = 5.0
 
     def __init__(self, config: Rby1Config) -> None:
         super().__init__(config)
@@ -148,6 +149,9 @@ class Rby1(Robot):
         self._ready_right: np.ndarray = READY_RIGHT
         self._ready_left: np.ndarray = READY_LEFT
         self._ready_head: np.ndarray = READY_HEAD
+        # Expired-stream recovery bookkeeping (see send_action).
+        self._last_stream_recreate: float = -1e9
+        self._robot_log_streaming: bool = False
 
     # ------------------------------------------------------------------ #
     #  Properties                                                          #
@@ -318,6 +322,14 @@ class Rby1(Robot):
             self._ready_left,
             self._ready_head,
         ) = ready_pose_for_version(self._resolved_version)
+        if self._config.action_mode == "ee" and self._config.ee_ready_torso_deg is not None:
+            torso = np.deg2rad(np.asarray(self._config.ee_ready_torso_deg, dtype=np.float64))
+            if torso.shape != (TORSO_DOF,):
+                raise ValueError(
+                    f"ee_ready_torso_deg must have {TORSO_DOF} values, got {torso.shape}."
+                )
+            self._ready_body = np.concatenate([torso, self._ready_right, self._ready_left])
+            logger.info(f"EE mode: torso ready pose overridden to {np.rad2deg(torso).round(1)} deg.")
         logger.info(
             f"Using RB-Y1 model='{self._resolved_model}' "
             f"version='{self._resolved_version}'."
@@ -366,6 +378,11 @@ class Rby1(Robot):
                 f"RB-Y1 control manager is not Enabled after enable_control_manager() "
                 f"(state={cm_state.state}). Recent faults: {self._fault_log_summary()}"
             )
+
+        # 3b. Forward the robot's own log stream (control manager / solver
+        #     messages such as "Control state check result: ...") so the reason
+        #     for a fault or an ended command shows up in this terminal.
+        self._start_robot_log_stream()
 
         # 4. Cache the model (joint index arrays) and URDF velocity / acceleration
         #    limits from the dynamics model.
@@ -436,6 +453,7 @@ class Rby1(Robot):
             cam.disconnect()
 
         if self._robot is not None:
+            self._stop_robot_log_stream()
             # Cancel the command stream before disabling the control manager;
             # disabling with a live stream leaves the manager in a fault state
             # that the next session then has to clear.
@@ -692,22 +710,26 @@ class Rby1(Robot):
         except RuntimeError as e:
             if "expired" not in str(e).lower():
                 raise
-            # The stream expires when the command it carries ended on the robot
-            # (finished, rejected or faulted). Report why and retry once on a
-            # fresh stream; a second failure is fatal.
-            self._report_expired_stream(e)
+            # The stream expires when the command it carries ended on the robot:
+            # the Cartesian solver finished it (e.g. no QP solution) or the
+            # control manager faulted. Never loop on this — re-creating streams
+            # against a faulted manager hammers the RPC (it dropped the
+            # connection when we did). Re-create at most once per cooldown and
+            # only while the manager is Enabled; otherwise stop with the reason.
+            cm_state = self._report_expired_stream(e)
+            now = time.monotonic()
+            enabled = cm_state is not None and cm_state == rby.ControlManagerState.State.Enabled
+            if not enabled or now - self._last_stream_recreate < self._STREAM_RECREATE_COOLDOWN_S:
+                raise RuntimeError(
+                    "RB-Y1 ended the streamed command (control manager "
+                    f"state={cm_state}). See the robot-side log lines above "
+                    "('[ControlManager] Control state check result' / solver) for the reason."
+                ) from e
+            self._last_stream_recreate = now
             self._stream = self._robot.create_command_stream(priority=1)
             self._last_ee_targets = None  # force a reference reset on the retry
-            logger.warning("Command stream re-created; retrying the command once.")
-            try:
-                self._dispatch_action(rby, action)
-            except RuntimeError as e2:
-                self._report_expired_stream(e2)
-                raise RuntimeError(
-                    "RB-Y1 command stream expired twice in a row — the robot is "
-                    "rejecting the command (see the control manager state / fault "
-                    "log above)."
-                ) from e2
+            logger.warning("Command stream re-created (control manager Enabled); retrying once.")
+            self._dispatch_action(rby, action)
         self._send_gripper_action(action)
         return action
 
@@ -716,6 +738,41 @@ class Rby1(Robot):
             self._send_ee_action(rby, action)
         else:
             self._send_joint_action(rby, action)
+
+    def _start_robot_log_stream(self) -> None:
+        if not self._config.forward_robot_logs or self._robot_log_streaming:
+            return
+
+        def _on_logs(logs: Any) -> None:
+            try:
+                for entry in logs:
+                    level = str(getattr(entry, "level", "")).split(".")[-1].lower()
+                    msg = getattr(entry, "message", None)
+                    if msg is None:
+                        msg = str(entry)
+                    if level in ("error", "critical"):
+                        logger.error(f"[robot] {msg}")
+                    elif level in ("warn", "warning"):
+                        logger.warning(f"[robot] {msg}")
+                    elif self._config.forward_robot_logs_info:
+                        logger.info(f"[robot] {msg}")
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            self._robot.start_log_stream(_on_logs, self._config.robot_log_stream_rate)
+            self._robot_log_streaming = True
+            logger.info("Robot log stream forwarded to this logger (warn/error).")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not start the robot log stream: {e}")
+
+    def _stop_robot_log_stream(self) -> None:
+        if self._robot_log_streaming and self._robot is not None:
+            try:
+                self._robot.stop_log_stream()
+            except Exception:  # noqa: BLE001
+                pass
+        self._robot_log_streaming = False
 
     def _fault_log_summary(self, limit: int = 3) -> str:
         try:
@@ -728,26 +785,21 @@ class Rby1(Robot):
         except Exception:  # noqa: BLE001
             return str(logs)
 
-    def _report_expired_stream(self, err: Exception) -> None:
-        """Log everything that explains why the robot ended the streamed command."""
-        feedback = "<n/a>"
-        try:
-            feedback = str(self._stream.request_feedback(timeout_ms=200))
-        except Exception as e:  # noqa: BLE001
-            feedback = f"<unavailable: {e.__class__.__name__}: {e}>"
+    def _report_expired_stream(self, err: Exception) -> Any:
+        """Log why the robot ended the streamed command; return the CM state (or None)."""
         cm = "<n/a>"
+        state = None
         try:
             st = self._robot.get_control_manager_state()
+            state = st.state
             cm = (
                 f"state={st.state} control_state={getattr(st, 'control_state', '?')} "
                 f"unlimited_mode={getattr(st, 'unlimited_mode_enabled', '?')}"
             )
         except Exception as e:  # noqa: BLE001
             cm = f"<unavailable: {e.__class__.__name__}>"
-        logger.error(
-            f"Command stream expired ({err}). control manager: {cm}. "
-            f"last stream feedback: {feedback}. recent faults: {self._fault_log_summary()}"
-        )
+        logger.error(f"Command stream expired ({err}). control manager: {cm}.")
+        return state
 
     def _send_joint_action(self, rby: Any, action: dict[str, Any]) -> None:
         """Execute a joint-position action (``action_mode="joint"``)."""
