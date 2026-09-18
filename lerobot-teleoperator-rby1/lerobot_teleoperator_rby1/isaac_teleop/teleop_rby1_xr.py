@@ -318,6 +318,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
 
         self._resync_disengaged(snap)
 
+        if any(events.values()):
+            logger.info("xr button edge: %s", [k for k, v in events.items() if v])
         if events["right_b"]:
             logger.info("Right B — stopping: targets frozen, base zeroed.")
             self._stopped = True
@@ -551,7 +553,13 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._last_status_log = now
 
         def ctrl(c: ControllerState | None) -> str:
-            return "-" if c is None else f"sq={c.squeeze:.2f} tr={c.trigger:.2f}"
+            if c is None:
+                return "-"
+            return (
+                f"sq={c.squeeze:.2f} tr={c.trigger:.2f} "
+                f"stick=({c.thumbstick[0]:+.2f},{c.thumbstick[1]:+.2f}) "
+                f"A={int(c.primary)} B={int(c.secondary)}"
+            )
 
         def eng(side: str) -> str:
             c = self._clutch.get(side)
@@ -562,8 +570,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
             body = f"valid {int(frame.body.valid.sum())}/24"
         elif self.config.torso_source == "body":
             body = "none"
+        vx, vy, wz = self._base_vel
         logger.info(
-            "xr status | right: %s [%s] | left: %s [%s] | head: %s | body: %s | torso: %s%s",
+            "xr status | right: %s [%s] | left: %s [%s] | head: %s | body: %s | torso: %s | "
+            "base=(%.2f,%.2f,%.2f)%s",
             ctrl(frame.right),
             eng("right"),
             ctrl(frame.left),
@@ -571,6 +581,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
             "ok" if frame.head is not None else "-",
             body,
             self._torso_hold_reason if self._clutch.get("torso") is not None else "disabled",
+            vx,
+            vy,
+            wz,
             " | STOPPED" if self._stopped else "",
         )
 

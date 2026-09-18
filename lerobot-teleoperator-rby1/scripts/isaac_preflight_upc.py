@@ -346,9 +346,17 @@ def stage_S_headset(args) -> dict:
                 raw_body = out.get("full_body")
                 raw_state = "absent" if raw_body is None else ("is_none" if getattr(raw_body, "is_none", False) else "present")
                 r, h, b = f.right, f.head, f.body
+
+                def _c(c):
+                    if c is None:
+                        return "-"
+                    return (
+                        f"pos={c.position.round(2)} sq={c.squeeze:.2f} tr={c.trigger:.2f} "
+                        f"stick=({c.thumbstick[0]:+.2f},{c.thumbstick[1]:+.2f}) A={int(c.primary)} B={int(c.secondary)}"
+                    )
+
                 _log(
-                    f"t={now - t0:5.1f}s right={'-' if r is None else f'pos={r.position.round(2)} sq={r.squeeze:.2f}'} "
-                    f"left={'-' if f.left is None else f'sq={f.left.squeeze:.2f}'} "
+                    f"t={now - t0:5.1f}s right=[{_c(r)}] left=[{_c(f.left)}] "
                     f"head={'-' if h is None else h.position.round(2)} "
                     f"body[raw={raw_state}]={'-' if b is None else f'valid={int(b.valid.sum())}/24 req_ok={all(bool(b.valid[i]) for i in required)} spine3={b.positions[BodyJointIndex.SPINE3].round(2)}'}"
                 )
