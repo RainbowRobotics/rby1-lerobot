@@ -14,6 +14,7 @@ import time
 import numpy as np
 
 from .constants import (
+    GRIPPER_PING_TIMEOUT_S,
     GRIPPER_BAUD_RATE,
     GRIPPER_HOMING_STEPS,
     GRIPPER_HOMING_TORQUE,
@@ -64,9 +65,19 @@ class Rby1Gripper:
             raise RuntimeError("Failed to set gripper baud rate.")
         self._bus.set_torque_constant([1.0, 1.0])
 
+        # The motors are powered from the tool flange 12 V rail that the robot
+        # switched on moments ago; a Dynamixel needs up to ~2 s to boot, so
+        # retry the ping instead of failing on the first attempt.
+        deadline = time.monotonic() + GRIPPER_PING_TIMEOUT_S
         for dev_id in GRIPPER_IDS:
-            if not self._bus.ping(dev_id):
-                raise RuntimeError(f"Gripper motor {dev_id} did not respond to ping.")
+            while not self._bus.ping(dev_id):
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"Gripper motor {dev_id} did not respond to ping within "
+                        f"{GRIPPER_PING_TIMEOUT_S:.0f}s (check tool-flange 12 V, cable, motor ID; "
+                        "run lerobot-robot-rby1/test_gripper.py)."
+                    )
+                time.sleep(0.2)
 
         self._home()
         logger.info("Rby1Gripper connected and homed.")

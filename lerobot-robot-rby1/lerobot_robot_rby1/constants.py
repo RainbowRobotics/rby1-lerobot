@@ -137,3 +137,4 @@ GRIPPER_IDS = [0, 1]
 GRIPPER_HOMING_TORQUE = 0.46     # Nm, applied during the homing sweeps
 GRIPPER_HOMING_STEPS = 30        # 0.1 s x 30 = 3 s per direction
 GRIPPER_POSITION_TORQUE = 0.46   # Nm, max torque in position mode
+GRIPPER_PING_TIMEOUT_S = 3.0     # wait for the motors to boot after flange power-on
