@@ -173,6 +173,7 @@ def test_torso_follows_body_only_when_both_arms_clutched(stubbed_pipeline):
     assert abs(a["torso_ee.wy"]) == pytest.approx(math.radians(10))
 
     # Release one arm -> torso freezes even though the body keeps moving.
+    readers[0].torso[2, 3] = z0 - 0.15  # robot has reached the commanded height
     pos3 = pos2.copy()
     pos3[BodyJointIndex.SPINE3] = [0.0, 0.0, 1.2]
     session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.0), body=fakes.body(positions=pos3, orientations=quat2)))
@@ -180,12 +181,15 @@ def test_torso_follows_body_only_when_both_arms_clutched(stubbed_pipeline):
     assert a["torso_ee.z"] == pytest.approx(z0 - 0.15)
 
     # Invalid body -> torso holds; valid again -> re-latches without a jump.
+    # (The fake robot does not move by itself; emulate it having reached the
+    # commanded torso height, otherwise the drift re-sync would snap the held
+    # target back to the measured pose.)
+    readers[0].torso[2, 3] = z0 - 0.15
     valid = np.ones(24, np.uint8)
     valid[BodyJointIndex.PELVIS] = 0
     session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.9), body=fakes.body(positions=pos3, orientations=quat2, valid=valid)))
     a = t.get_action()
     assert a["torso_ee.z"] == pytest.approx(z0 - 0.15)
-    readers[0].torso[2, 3] = z0 - 0.15
     session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.9), body=fakes.body(positions=pos3, orientations=quat2)))
     a = t.get_action()
     assert a["torso_ee.z"] == pytest.approx(z0 - 0.15)
@@ -244,3 +248,44 @@ def test_torso_engage_policy(stubbed_pipeline, policy, squeeze_left, expect_foll
     else:
         assert a["torso_ee.z"] == pytest.approx(z0)
         assert "arms not clutched" in t._torso_hold_reason
+
+
+def test_first_action_resyncs_to_ready_pose_reached_after_connect(stubbed_pipeline):
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(0))))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none")
+    t.connect()  # latched at the pre-ready pose
+    r = readers[0]
+    # The follower now moves to a very different ready pose (after teleop.connect()).
+    r.right_ee[:3, 3] = [0.2, -0.3, 0.6]
+    r.left_ee[:3, 3] = [0.2, 0.3, 0.6]
+    r.torso[2, 3] = 0.7
+    r.head_q = np.array([0.0, 0.85])
+    a = t.get_action()
+    assert a["right_ee.x"] == pytest.approx(0.2) and a["right_ee.z"] == pytest.approx(0.6)
+    assert a["left_ee.y"] == pytest.approx(0.3)
+    assert a["torso_ee.z"] == pytest.approx(0.7)
+    assert a["head_1.pos"] == pytest.approx(0.85)
+
+
+def test_disengaged_components_follow_robot_after_reset(stubbed_pipeline):
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(squeeze=0.9)))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", use_head=False)
+    t.connect()
+    t.get_action()  # right engaged, left held
+    r = readers[0]
+    left_before = t.get_action()["left_ee.x"]
+    # A record reset moved the LEFT arm (not clutched) by 20 cm: target follows.
+    r.left_ee[0, 3] += 0.2
+    a = t.get_action()
+    assert a["left_ee.x"] == pytest.approx(left_before + 0.2)
+    # A small sag (below threshold) does not move the held target.
+    r.left_ee[0, 3] += 0.01
+    assert t.get_action()["left_ee.x"] == pytest.approx(left_before + 0.2)
+    # The clutched RIGHT arm is never re-synced by robot motion.
+    right_before = a["right_ee.x"]
+    r.right_ee[0, 3] += 0.5
+    assert t.get_action()["right_ee.x"] == pytest.approx(right_before)

@@ -125,6 +125,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._warned_no_body = False
         self._last_status_log = 0.0
         self._torso_hold_reason = "not started"
+        self._needs_initial_resync = True
 
         self._torso_joint = int(BodyJointIndex[config.torso_body_joint])
         self._torso_required = [int(BodyJointIndex[n]) for n in config.body_required_joints]
@@ -290,6 +291,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._gripper = {"right": 1.0, "left": 1.0}
         self._base_vel = (0.0, 0.0, 0.0)
         self._stopped = False
+        # The follower connects (and moves to its ready pose) after this, so
+        # the targets are re-seeded again on the first get_action().
+        self._needs_initial_resync = True
         logger.info("rby1_isaac: targets latched to the current robot pose (squeeze to follow).")
 
     # ------------------------------------------------------------------
@@ -305,13 +309,14 @@ class Rby1XR(IsaacTeleopTeleoperator):
         frame = self._read_frame()
         events = self._edges.update(frame)
 
-        # Lazy, at-most-once robot read per tick (only engage edges need it).
-        snap_cache: list[RobotSnapshot] = []
+        # One robot read per tick: engage edges latch from it and disengaged
+        # components are re-synchronised to it when the robot moved on its own.
+        snap = self._reader.read()
 
         def get_snap() -> RobotSnapshot:
-            if not snap_cache:
-                snap_cache.append(self._reader.read())
-            return snap_cache[0]
+            return snap
+
+        self._resync_disengaged(snap)
 
         if events["right_b"]:
             logger.info("Right B — stopping: targets frozen, base zeroed.")
@@ -339,6 +344,68 @@ class Rby1XR(IsaacTeleopTeleoperator):
     # ------------------------------------------------------------------
     # Per-tick helpers
     # ------------------------------------------------------------------
+
+    def _resync_disengaged(self, snap: RobotSnapshot) -> None:
+        """Re-seed held targets from the measured pose when the robot moved on its own.
+
+        On the first tick this is unconditional: the follower reaches its ready
+        pose only after ``teleop.connect()`` latched the targets, so commanding
+        those would drag the robot straight back. Afterwards it triggers per
+        component when it is not clutched and the measured pose drifted past
+        the ``resync_*`` thresholds (record reset, manual move).
+        """
+        cfg = self.config
+        force = self._needs_initial_resync
+        self._needs_initial_resync = False
+        pos_thr = cfg.resync_position_threshold_m
+        rot_thr = math.radians(cfg.resync_rotation_threshold_deg)
+        synced: list[str] = []
+
+        for side, measured in (("right", snap.right_ee), ("left", snap.left_ee)):
+            clutch = self._clutch[side]
+            if clutch is None or clutch.engaged:
+                continue
+            if force or _pose_drift(clutch.last_commanded, measured, pos_thr, rot_thr):
+                clutch.hold_at(measured)
+                synced.append(side)
+
+        torso = self._clutch["torso"]
+        if torso is not None and not torso.engaged and self._torso_target is not None:
+            if force or _pose_drift(self._torso_target, snap.torso, pos_thr, rot_thr):
+                torso.hold_at(snap.torso)
+                self._torso_target = snap.torso.copy()
+                synced.append("torso")
+
+        # The head is re-seeded only on the first tick or together with an arm /
+        # torso re-sync (a reset event): a plain lag between the commanded and
+        # measured head joints during a fast head turn must not reset its origin.
+        if cfg.use_head and (force or synced):
+            target = self._head.target
+            head_thr = math.radians(cfg.resync_head_threshold_deg)
+            if force or (
+                target is not None and float(np.max(np.abs(target - snap.head_q))) > head_thr
+            ):
+                # Hold the measured head joints; the look-direction origin is
+                # re-latched on the next tracked head frame.
+                self._head = HeadRetargeter(
+                    yaw_sign=cfg.head_yaw_sign,
+                    pitch_sign=cfg.head_pitch_sign,
+                    yaw_gain=cfg.head_yaw_gain,
+                    pitch_gain=cfg.head_pitch_gain,
+                    yaw_limit=math.radians(cfg.head_yaw_limit_deg),
+                    pitch_min=math.radians(cfg.head_pitch_min_deg),
+                    pitch_max=math.radians(cfg.head_pitch_max_deg),
+                    smoothing=cfg.head_smoothing,
+                )
+                self._head.hold(snap.head_q)
+                synced.append("head")
+
+        if synced:
+            logger.info(
+                "rby1_isaac: targets re-synced to the measured robot pose (%s)%s.",
+                ", ".join(synced),
+                " after connect / ready pose" if force else " — robot moved while not clutched",
+            )
 
     def _update_arm(
         self, side: str, ctrl: ControllerState | None, get_snap: Callable[[], RobotSnapshot]
@@ -529,6 +596,15 @@ class Rby1XR(IsaacTeleopTeleoperator):
             for i, n in enumerate(HEAD_NAMES):
                 action[f"{n}{POS_SUFFIX}"] = float(head_q[i]) if head_q is not None else 0.0
         return action
+
+
+def _pose_drift(
+    target_T: np.ndarray, measured_T: np.ndarray, pos_thr: float, rot_thr: float  # noqa: N803
+) -> bool:
+    """True when measured and target differ by more than the thresholds."""
+    dpos = float(np.linalg.norm(measured_T[:3, 3] - target_T[:3, 3]))
+    dR = Rotation.from_matrix(measured_T[:3, :3]) * Rotation.from_matrix(target_T[:3, :3]).inv()
+    return dpos > pos_thr or float(dR.magnitude()) > rot_thr
 
 
 # ---------------------------------------------------------------------------

@@ -119,6 +119,20 @@ class Clutch:
         """Stop following; :attr:`last_commanded` is held until the next engage."""
         self._engaged = False
 
+    def hold_at(self, base_T_ee: np.ndarray) -> None:  # noqa: N803
+        """Re-seed the held pose (and home) to ``base_T_ee`` while disengaged.
+
+        Used to re-synchronise with the robot after it moved on its own (ready
+        pose motion after connect, record reset), so the next action does not
+        drag it back to a stale target.
+        """
+        T = np.asarray(base_T_ee, dtype=float)
+        self._last_commanded_pos = T[:3, 3].copy()
+        self._last_commanded_rot = Rotation.from_matrix(T[:3, :3])
+        self._home_pos = self._last_commanded_pos.copy()
+        self._home_rot = self._last_commanded_rot
+        self._engaged = False
+
 
 def _se3(pos: np.ndarray, rot: Rotation) -> np.ndarray:
     T = np.eye(4)

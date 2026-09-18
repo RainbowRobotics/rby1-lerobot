@@ -132,6 +132,16 @@ class Rby1XRConfig(IsaacTeleopConfig):
     torso_max_rot_delta_deg: float = 35.0
     torso_max_z_delta_m: float = 0.15
 
+    # ── Re-synchronisation with the robot ─────────────────────────────
+    # The targets are re-seeded from the measured robot pose on the first
+    # get_action() (the follower moves to its ready pose AFTER teleop.connect())
+    # and whenever a component that is NOT clutched is found further than these
+    # thresholds from its held target (record reset, manual move): the robot
+    # then stays where it is instead of being dragged back to a stale target.
+    resync_position_threshold_m: float = 0.03
+    resync_rotation_threshold_deg: float = 10.0
+    resync_head_threshold_deg: float = 5.0
+
     # ── Diagnostics ───────────────────────────────────────────────────
     # Log a one-line tracking / clutch status this often (seconds; 0 = off).
     status_log_period_s: float = 5.0
