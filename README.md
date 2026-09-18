@@ -200,7 +200,7 @@ The process prints the host IP addresses and waits for the headset:
 | Trigger | Gripper (fully pressed = closed) |
 | Right thumbstick / left thumbstick | Base linear velocity / yaw rate |
 | Right **B** | Stop: freeze every target, zero the base |
-| Right **A** | Resume after a stop; re-centre the head origin |
+| Right **A** | Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; also resumes after a stop and re-centres the head origin. The base is not moved |
 | Headset orientation | `head_0` (pan) / `head_1` (tilt) relative to the pose at the first tracked frame |
 | Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, while **both** arms are clutched (`torso_engage=both_arms`, default; `any_arm` / `always` available) |
 
@@ -286,6 +286,7 @@ lerobot-record \
 | `torso_source` | `"body"` | `"body"` (Isaac Teleop body tracking), `"head"` or `"none"` |
 | `torso_engage` | `"both_arms"` | When the torso follows: `both_arms` (both grips squeezed), `any_arm`, or `always` |
 | `torso_body_joint` | `"SPINE3"` | Body joint driving the torso (XR_BD 24-joint names) |
+| `ready_return_duration_s` | `4.0` | Duration of the Right-A return-to-start motion |
 | `resync_position_threshold_m`, `resync_rotation_threshold_deg` | `0.03`, `10` | Targets are re-seeded from the measured pose on the first action and whenever a component that is not clutched drifted past these (record reset, manual move) |
 | `status_log_period_s` | `5.0` | Log a one-line tracking / clutch status (controllers, head, body joints valid, why the torso holds); 0 = off |
 | `torso_max_rot_delta_deg`, `torso_max_z_delta_m` | `35`, `0.15` | Safety clamps on the torso delta since engage |

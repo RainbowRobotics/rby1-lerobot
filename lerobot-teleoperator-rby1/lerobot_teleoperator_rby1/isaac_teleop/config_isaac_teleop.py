@@ -132,6 +132,12 @@ class Rby1XRConfig(IsaacTeleopConfig):
     torso_max_rot_delta_deg: float = 35.0
     torso_max_z_delta_m: float = 0.15
 
+    # ── Right A: return to the start pose ─────────────────────────────
+    # The pose measured on the first action (the follower has just reached
+    # its ready pose) is remembered; Right A releases every clutch and moves
+    # arms, torso and head back to it over this many seconds (base excluded).
+    ready_return_duration_s: float = 4.0
+
     # ── Re-synchronisation with the robot ─────────────────────────────
     # The targets are re-seeded from the measured robot pose on the first
     # get_action() (the follower moves to its ready pose AFTER teleop.connect())

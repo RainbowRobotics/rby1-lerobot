@@ -113,7 +113,7 @@ def test_stop_and_resume(stubbed_pipeline):
     session = fakes.FakeSession()
     session.push(_frame(right=fakes.controller((0, 0, 0), squeeze=0.9, thumb=(0, 1.0))))
     readers: list = []
-    t = make_teleop(session, readers, torso_source="none", use_left_arm=False)
+    t = make_teleop(session, readers, torso_source="none", use_left_arm=False, ready_return_duration_s=0.1)
     t.connect()
     a = t.get_action()
     assert a["x.vel"] == pytest.approx(0.3)
@@ -127,8 +127,14 @@ def test_stop_and_resume(stubbed_pipeline):
     assert a["right_ee.x"] == pytest.approx(x0) and a["x.vel"] == 0.0
 
     session.push(_frame(right=fakes.controller((0.5, 0, 0), squeeze=0.9, primary=True)))
-    a = t.get_action()  # Right A: resume -> re-engage at the measured pose, no jump
+    a = t.get_action()  # Right A: resume + return-to-start motion (already there)
     assert not t.is_stopped and a["right_ee.x"] == pytest.approx(x0)
+    import time as _time
+
+    _time.sleep(0.15)  # let the (0.1 s) return motion finish
+    session.push(_frame(right=fakes.controller((0.5, 0, 0), squeeze=0.9)))
+    a = t.get_action()  # motion done -> re-engage at the measured pose, no jump
+    assert a["right_ee.x"] == pytest.approx(x0)
     session.push(_frame(right=fakes.controller((0.6, 0, 0), squeeze=0.9)))
     assert t.get_action()["right_ee.x"] == pytest.approx(x0 + 0.1)
 
@@ -295,3 +301,39 @@ def test_disengaged_components_follow_robot_after_reset(stubbed_pipeline):
     a = t.get_action()
     assert a["right_ee.x"] == pytest.approx(right_before)
     assert a["left_ee.x"] == pytest.approx(left_held)
+
+
+def test_right_a_returns_to_start_pose(stubbed_pipeline, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller((0, 0, 0), squeeze=0.9), head=fakes.head(quat=_head_quat(0))))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", ready_return_duration_s=2.0)
+    t.connect()
+    a0 = t.get_action()  # start pose recorded here (first action)
+    x_start, head_start = a0["right_ee.x"], a0["head_1.pos"]
+    # Move the right arm 30 cm and the head by yawing.
+    session.push(_frame(right=fakes.controller((0.3, 0, 0), squeeze=0.9), head=fakes.head(quat=_head_quat(30))))
+    a = t.get_action()
+    assert a["right_ee.x"] == pytest.approx(x_start + 0.3)
+    assert a["head_0.pos"] == pytest.approx(math.radians(30))
+    # Right A: the clutch is released and the targets interpolate back.
+    session.push(_frame(right=fakes.controller((0.3, 0, 0), squeeze=0.9, primary=True), head=fakes.head(quat=_head_quat(30))))
+    a = t.get_action()
+    assert a["right_ee.x"] == pytest.approx(x_start + 0.3)  # alpha = 0
+    clock[0] += 1.0  # halfway (smoothstep(0.5) = 0.5)
+    session.push(_frame(right=fakes.controller((0.9, 0, 0), squeeze=0.9), head=fakes.head(quat=_head_quat(30))))
+    a = t.get_action()
+    assert a["right_ee.x"] == pytest.approx(x_start + 0.15)  # squeeze is ignored while returning
+    assert a["head_0.pos"] == pytest.approx(math.radians(15))
+    clock[0] += 1.5
+    a = t.get_action()
+    assert a["right_ee.x"] == pytest.approx(x_start)
+    assert a["head_1.pos"] == pytest.approx(head_start) and a["head_0.pos"] == pytest.approx(0.0)
+    # After arrival a squeeze re-engages from the measured pose (no jump).
+    readers[0].right_ee[0, 3] = x_start
+    session.push(_frame(right=fakes.controller((0.9, 0, 0), squeeze=0.9)))
+    t.get_action()
+    session.push(_frame(right=fakes.controller((1.0, 0, 0), squeeze=0.9)))
+    assert t.get_action()["right_ee.x"] == pytest.approx(x_start + 0.1)

@@ -168,6 +168,27 @@ def scale_clamp_delta(
     return out
 
 
+def interpolate_pose(T0: np.ndarray, T1: np.ndarray, alpha: float) -> np.ndarray:  # noqa: N803
+    """SE3 interpolation (position lerp, rotation slerp) for ``alpha`` in [0, 1]."""
+    a = float(np.clip(alpha, 0.0, 1.0))
+    T0 = np.asarray(T0, dtype=float)
+    T1 = np.asarray(T1, dtype=float)
+    r0 = Rotation.from_matrix(T0[:3, :3])
+    r1 = Rotation.from_matrix(T1[:3, :3])
+    delta = r1 * r0.inv()
+    rot = Rotation.from_rotvec(delta.as_rotvec() * a) * r0
+    out = np.eye(4)
+    out[:3, :3] = rot.as_matrix()
+    out[:3, 3] = (1.0 - a) * T0[:3, 3] + a * T1[:3, 3]
+    return out
+
+
+def smoothstep(alpha: float) -> float:
+    """Ease-in / ease-out profile for ``alpha`` in [0, 1]."""
+    a = float(np.clip(alpha, 0.0, 1.0))
+    return a * a * (3.0 - 2.0 * a)
+
+
 # ---------------------------------------------------------------------------
 # Mobile base
 # ---------------------------------------------------------------------------

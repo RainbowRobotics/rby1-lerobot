@@ -20,7 +20,10 @@ Button mapping (Meta Quest naming)
     Trigger                      Gripper (1 = closed)
     Right thumbstick             Base linear velocity; left thumbstick: yaw
     Right B                      Stop: freeze every target, zero the base
-    Right A                      Resume after a stop; re-centre the head origin
+    Right A                      Release every clutch and return arms, torso and
+                                 head to the start pose (measured right after the
+                                 follower's ready-pose motion); also resumes after
+                                 a stop and re-centres the head origin
     Torso                        Follows the chest (body tracking) or the head
                                  while BOTH arms are clutched
 """
@@ -54,8 +57,10 @@ from .config_isaac_teleop import Rby1XRConfig
 from .retargeters import (
     HeadRetargeter,
     chest_pose_from_body,
+    interpolate_pose,
     scale_clamp_delta,
     se3_to_ee_action,
+    smoothstep,
     thumbsticks_to_base_vel,
 )
 from .robot_state import Rby1StateReader, RobotSnapshot
@@ -126,6 +131,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._last_status_log = 0.0
         self._torso_hold_reason = "not started"
         self._needs_initial_resync = True
+        # Start pose (first action) and the interpolated return motion (Right A).
+        self._start_snapshot: RobotSnapshot | None = None
+        self._return_motion: _ReturnMotion | None = None
 
         self._torso_joint = int(BodyJointIndex[config.torso_body_joint])
         self._torso_required = [int(BodyJointIndex[n]) for n in config.body_required_joints]
@@ -328,12 +336,11 @@ class Rby1XR(IsaacTeleopTeleoperator):
                     clutch.disengage()
         elif events["right_a"]:
             if self._stopped:
-                logger.info("Right A — resuming (squeeze to follow).")
+                logger.info("Right A — resuming.")
             self._stopped = False
-            if frame.head is not None and self.config.use_head:
-                self._head.latch(frame.head.pose, get_snap().head_q)
-                logger.info("Head origin re-centred.")
+            self._start_return_motion(snap)
 
+        self._advance_return_motion(frame, snap)
         self._update_arm("right", frame.right, get_snap)
         self._update_arm("left", frame.left, get_snap)
         self._update_torso(frame, get_snap)
@@ -359,10 +366,18 @@ class Rby1XR(IsaacTeleopTeleoperator):
         cfg = self.config
         force = self._needs_initial_resync
         self._needs_initial_resync = False
+        if force:
+            # The follower has just reached its ready pose: remember it as the
+            # start pose Right A returns to.
+            self._start_snapshot = snap
         # While any clutch is engaged the robot is being driven by us: the
         # torso carries the free arm along and the solvers lag behind the
-        # targets, so drift is expected and must not be "corrected".
-        if not force and any(c is not None and c.engaged for c in self._clutch.values()):
+        # targets, so drift is expected and must not be "corrected". The same
+        # holds while (and shortly after) a Right-A return motion drives it.
+        if not force and (
+            any(c is not None and c.engaged for c in self._clutch.values())
+            or (self._return_motion is not None and not self._return_motion.settled())
+        ):
             return
         pos_thr = cfg.resync_position_threshold_m
         rot_thr = math.radians(cfg.resync_rotation_threshold_deg)
@@ -394,16 +409,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             ):
                 # Hold the measured head joints; the look-direction origin is
                 # re-latched on the next tracked head frame.
-                self._head = HeadRetargeter(
-                    yaw_sign=cfg.head_yaw_sign,
-                    pitch_sign=cfg.head_pitch_sign,
-                    yaw_gain=cfg.head_yaw_gain,
-                    pitch_gain=cfg.head_pitch_gain,
-                    yaw_limit=math.radians(cfg.head_yaw_limit_deg),
-                    pitch_min=math.radians(cfg.head_pitch_min_deg),
-                    pitch_max=math.radians(cfg.head_pitch_max_deg),
-                    smoothing=cfg.head_smoothing,
-                )
+                self._head = self._make_head_retargeter()
                 self._head.hold(snap.head_q)
                 synced.append("head")
 
@@ -414,13 +420,85 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 " after connect / ready pose" if force else " — robot moved while not clutched",
             )
 
+    # ------------------------------------------------------------------
+    # Right A: return to the start pose
+    # ------------------------------------------------------------------
+
+    def _start_return_motion(self, snap: RobotSnapshot) -> None:
+        """Release every clutch and interpolate all targets back to the start pose."""
+        if self._start_snapshot is None:
+            logger.warning("Right A — no start pose recorded yet; nothing to return to.")
+            return
+        for clutch in self._clutch.values():
+            if clutch is not None:
+                clutch.disengage()
+        cfg = self.config
+        goal = self._start_snapshot
+        self._return_motion = _ReturnMotion(
+            t0=time.monotonic(),
+            duration=max(cfg.ready_return_duration_s, 0.1),
+            right=(self._clutch["right"].last_commanded, goal.right_ee) if cfg.use_right_arm else None,
+            left=(self._clutch["left"].last_commanded, goal.left_ee) if cfg.use_left_arm else None,
+            torso=(self._torso_target, goal.torso) if cfg.use_torso else None,
+            head=(self._head.target if self._head.target is not None else snap.head_q, goal.head_q)
+            if cfg.use_head
+            else None,
+        )
+        logger.info(
+            "Right A — returning arms / torso / head to the start pose over %.1fs "
+            "(clutches released; squeeze again afterwards to follow).",
+            self._return_motion.duration,
+        )
+
+    def _advance_return_motion(self, frame: XRFrame, snap: RobotSnapshot) -> None:
+        motion = self._return_motion
+        if motion is None or motion.finished:
+            return
+        a = smoothstep((time.monotonic() - motion.t0) / motion.duration)
+        if motion.right is not None:
+            self._clutch["right"].hold_at(interpolate_pose(*motion.right, a))
+        if motion.left is not None:
+            self._clutch["left"].hold_at(interpolate_pose(*motion.left, a))
+        if motion.torso is not None:
+            T = interpolate_pose(*motion.torso, a)
+            self._torso_target = T
+            self._clutch["torso"].hold_at(T)
+        if motion.head is not None:
+            q0, q1 = motion.head
+            self._head.hold((1.0 - a) * np.asarray(q0) + a * np.asarray(q1))
+        if a >= 1.0:
+            motion.finished = True
+            motion.t_done = time.monotonic()
+            if motion.head is not None:
+                # Fresh head origin at the start pose: the current view becomes centre.
+                self._head = self._make_head_retargeter()
+                self._head.hold(np.asarray(motion.head[1]))
+            logger.info("Start pose reached — squeeze to follow again.")
+
+    def _make_head_retargeter(self) -> HeadRetargeter:
+        cfg = self.config
+        return HeadRetargeter(
+            yaw_sign=cfg.head_yaw_sign,
+            pitch_sign=cfg.head_pitch_sign,
+            yaw_gain=cfg.head_yaw_gain,
+            pitch_gain=cfg.head_pitch_gain,
+            yaw_limit=math.radians(cfg.head_yaw_limit_deg),
+            pitch_min=math.radians(cfg.head_pitch_min_deg),
+            pitch_max=math.radians(cfg.head_pitch_max_deg),
+            smoothing=cfg.head_smoothing,
+        )
+
+    @property
+    def _returning(self) -> bool:
+        return self._return_motion is not None and not self._return_motion.finished
+
     def _update_arm(
         self, side: str, ctrl: ControllerState | None, get_snap: Callable[[], RobotSnapshot]
     ) -> None:
         clutch = self._clutch[side]
         if clutch is None:
             return
-        if self._stopped or ctrl is None:
+        if self._stopped or self._returning or ctrl is None:
             clutch.disengage()
             return
         enabled = ctrl.squeeze > self.config.clutch_threshold
@@ -475,6 +553,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         driver = None
         if self._stopped:
             self._torso_hold_reason = "stopped (Right B)"
+        elif self._returning:
+            self._torso_hold_reason = "returning to start pose (Right A)"
         elif not self._torso_engage_allowed():
             self._torso_hold_reason = f"arms not clutched (torso_engage={self.config.torso_engage})"
         else:
@@ -517,7 +597,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         )
 
     def _update_head(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot]) -> None:
-        if not self.config.use_head or self._stopped:
+        if not self.config.use_head or self._stopped or self._returning:
             return
         if frame.head is None:
             return
@@ -614,6 +694,27 @@ class Rby1XR(IsaacTeleopTeleoperator):
             for i, n in enumerate(HEAD_NAMES):
                 action[f"{n}{POS_SUFFIX}"] = float(head_q[i]) if head_q is not None else 0.0
         return action
+
+
+class _ReturnMotion:
+    """Interpolation state of a Right-A return-to-start motion."""
+
+    SETTLE_S = 2.0  # drift re-sync stays suppressed this long after arrival
+
+    def __init__(self, *, t0: float, duration: float, right, left, torso, head) -> None:
+        self.t0 = t0
+        self.duration = duration
+        self.right = right
+        self.left = left
+        self.torso = torso
+        self.head = head
+        self.finished = False
+        self.t_done: float | None = None
+
+    def settled(self) -> bool:
+        return self.finished and self.t_done is not None and (
+            time.monotonic() - self.t_done > self.SETTLE_S
+        )
 
 
 def _pose_drift(
