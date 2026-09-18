@@ -1,4 +1,4 @@
-"""Offline end-to-end test of Rby1XRTeleop with a scripted fake session."""
+"""Offline end-to-end test of Rby1XR with a scripted fake session."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from scipy.spatial.transform import Rotation
 
 from lerobot_teleoperator_rby1.isaac_teleop import teleop_rby1_xr as mod
 from lerobot_teleoperator_rby1.isaac_teleop.config_isaac_teleop import Rby1XRConfig
-from lerobot_teleoperator_rby1.isaac_teleop.teleop_rby1_xr import Rby1XRTeleop
+from lerobot_teleoperator_rby1.isaac_teleop.teleop_rby1_xr import Rby1XR
 from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import (
     OUT_BODY,
     OUT_CONTROLLER_LEFT,
@@ -52,7 +52,7 @@ def make_teleop(session, reader_holder, **cfg_overrides):
         reader_holder.append(fakes.FakeStateReader(address, model))
         return reader_holder[-1]
 
-    return Rby1XRTeleop(
+    return Rby1XR(
         cfg, session_factory=lambda pipeline: session, state_reader_factory=reader_factory
     )
 

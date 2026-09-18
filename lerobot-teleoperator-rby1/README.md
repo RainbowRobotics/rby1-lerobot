@@ -6,7 +6,7 @@ LeRobot teleoperator plugins for the Rainbow Robotics RB-Y1:
 |---|---|---|
 | `rby1_leader_arm` | `Rby1LeaderArm` | RB-Y1 leader (master) arm, joint-space actions |
 | `rby1_vr` | `Rby1VR` | Meta Quest app streaming controller JSON over UDP, EE-space actions |
-| `rby1_isaac` | `Rby1XRTeleop` | NVIDIA Isaac Teleop (CloudXR + headset browser client): controllers → arm EE poses, headset → head joints, body tracking → torso |
+| `rby1_isaac` | `Rby1XR` | NVIDIA Isaac Teleop (CloudXR + headset browser client): controllers → arm EE poses, headset → head joints, body tracking → torso |
 
 ```bash
 pip install -e lerobot-teleoperator-rby1            # leader arm / Quest UDP

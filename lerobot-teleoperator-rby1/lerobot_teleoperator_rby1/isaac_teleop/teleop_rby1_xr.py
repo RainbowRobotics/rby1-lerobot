@@ -77,8 +77,13 @@ _XR_CONNECT_REMINDER_S = 15.0
 _SKIP_IFACE_PREFIXES = ("lo", "docker", "br-", "veth", "virbr", "l4tbr")
 
 
-class Rby1XRTeleop(IsaacTeleopTeleoperator):
-    """XR-controller / headset / body-tracking teleoperator for the RB-Y1."""
+class Rby1XR(IsaacTeleopTeleoperator):
+    """XR-controller / headset / body-tracking teleoperator for the RB-Y1.
+
+    The class name must be ``Rby1XRConfig`` minus ``Config``: LeRobot's
+    ``make_teleoperator_from_config`` resolves third-party device classes by
+    that rule, importing them from the config's parent package.
+    """
 
     config_class = Rby1XRConfig
     name = "rby1_isaac"
@@ -521,3 +526,7 @@ def print_xr_connect_help() -> None:
         "=" * 76,
     ]
     print("\n".join(lines), flush=True)
+
+
+# Backward-compatible alias (pre-rename).
+Rby1XRTeleop = Rby1XR

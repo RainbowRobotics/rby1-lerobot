@@ -33,6 +33,7 @@ Accept the CloudXR EULA once beforehand: ``python -m isaacteleop.cloudxr --accep
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import json
 import os
@@ -68,41 +69,48 @@ def _log(msg: str) -> None:
     print(f"[preflight] {msg}", flush=True)
 
 
-def _open_session(with_body: bool):
-    """Launch CloudXR and open a TeleopSession with the rby1_isaac pipeline."""
+@contextlib.contextmanager
+def _session_ctx(with_body: bool):
+    """Launch CloudXR + TeleopSession; ALWAYS tear both down, even on error.
+
+    Exiting with a live OpenXR session (or a runtime killed by atexit before the
+    session is destroyed) ends in Monado IPC errors and a segfault on Orin, which
+    would mask the real failure of a stage.
+    """
     from isaacteleop.cloudxr import CloudXRLauncher
     from isaacteleop.teleop_session_manager import TeleopSession, TeleopSessionConfig
 
     from lerobot_teleoperator_rby1.isaac_teleop.base import default_cloudxr_env_file
-    from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import build_pipeline
+    from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import build_pipeline, verify_index_layout
 
     launcher = None
-    if os.environ.get("LEROBOT_CLOUDXR_SKIP_AUTOLAUNCH", "") != "1":
-        _log("launching CloudXR runtime …")
-        launcher = CloudXRLauncher(
-            install_dir=str(Path.home() / ".cloudxr"),
-            env_config=default_cloudxr_env_file(),
-            accept_eula=False,
-        )
+    session = None
     try:
-        from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import verify_index_layout
-
+        if os.environ.get("LEROBOT_CLOUDXR_SKIP_AUTOLAUNCH", "") != "1":
+            _log("launching CloudXR runtime …")
+            launcher = CloudXRLauncher(
+                install_dir=str(Path.home() / ".cloudxr"),
+                env_config=default_cloudxr_env_file(),
+                accept_eula=False,
+            )
         _log(f"index layout check: {verify_index_layout()}")
         pipeline, body_in_graph = build_pipeline(with_body=with_body)
         _log(f"pipeline built (body rebased in-graph: {body_in_graph})")
         session = TeleopSession(TeleopSessionConfig(app_name="rby1_isaac_preflight", pipeline=pipeline))
         session.__enter__()
-    except Exception:
-        # Stop the runtime we launched so the failure is not followed by
-        # shutdown noise from the WSS proxy / CloudXR service threads.
+        _log("TeleopSession entered")
+        yield session, _external_inputs(), body_in_graph
+    finally:
+        if session is not None:
+            try:
+                session.__exit__(None, None, None)
+            except Exception as e:  # noqa: BLE001
+                _log(f"session exit failed: {e!r}")
         if launcher is not None:
             try:
                 launcher.stop()
-            except Exception:  # noqa: BLE001
-                pass
-        raise
-    _log("TeleopSession entered")
-    return launcher, session, body_in_graph
+            except Exception as e:  # noqa: BLE001
+                _log(f"launcher stop failed: {e!r}")
 
 
 def _external_inputs():
@@ -139,11 +147,6 @@ def _heartbeat(stop: threading.Event, counter: list) -> None:
         time.sleep(0.05)
 
 
-def _close(session, launcher) -> None:
-    session.__exit__(None, None, None)
-    if launcher is not None:
-        launcher.stop()
-
 
 # ---------------------------------------------------------------------------
 # stages
@@ -151,19 +154,16 @@ def _close(session, launcher) -> None:
 
 
 def stage_S_session(args) -> dict:
-    launcher, session, body_in_graph = _open_session(with_body=True)
-    ext = _external_inputs()
-    stats = _step_n(session, 200, ext)
-    stats["body_in_graph"] = body_in_graph
-    _close(session, launcher)
+    with _session_ctx(with_body=True) as (session, ext, body_in_graph):
+        stats = _step_n(session, 200, ext)
+        stats["body_in_graph"] = body_in_graph
     return stats
 
 
 def stage_A_threads_before(args) -> dict:
     stop = threading.Event()
     beats = [0]
-    t = threading.Thread(target=_heartbeat, args=(stop, beats), daemon=True)
-    t.start()
+    threading.Thread(target=_heartbeat, args=(stop, beats), daemon=True).start()
     listener = None
     try:
         from pynput import keyboard  # type: ignore
@@ -172,86 +172,98 @@ def stage_A_threads_before(args) -> dict:
         listener.start()
     except Exception as e:  # noqa: BLE001
         _log(f"pynput listener not started ({e}); heartbeat thread only")
-    launcher, session, _ = _open_session(with_body=False)
-    ext = _external_inputs()
-    b0 = beats[0]
-    stats = _step_n(session, 100, ext)
-    time.sleep(1.0)
-    stats["heartbeat_alive"] = beats[0] > b0
-    stop.set()
-    if listener is not None:
-        listener.stop()
-    _close(session, launcher)
+    try:
+        with _session_ctx(with_body=False) as (session, ext, _):
+            b0 = beats[0]
+            stats = _step_n(session, 100, ext)
+            time.sleep(1.0)
+            stats["heartbeat_alive"] = beats[0] > b0
+    finally:
+        stop.set()
+        if listener is not None:
+            listener.stop()
     return stats
 
 
 def stage_B_thread_after(args) -> dict:
-    launcher, session, _ = _open_session(with_body=False)
-    ext = _external_inputs()
-    _step_n(session, 20, ext)
     stop = threading.Event()
     beats = [0]
-    _log("creating a Python thread AFTER the session started …")
-    t = threading.Thread(target=_heartbeat, args=(stop, beats), daemon=True)
-    t.start()
-    stats = _step_n(session, 100, ext)
-    time.sleep(0.5)
-    stats["thread_after_alive"] = beats[0] > 0
-    stop.set()
-    _close(session, launcher)
+    try:
+        with _session_ctx(with_body=False) as (session, ext, _):
+            _step_n(session, 20, ext)
+            _log("creating a Python thread AFTER the session started …")
+            threading.Thread(target=_heartbeat, args=(stop, beats), daemon=True).start()
+            stats = _step_n(session, 100, ext)
+            time.sleep(0.5)
+            stats["thread_after_alive"] = beats[0] > 0
+    finally:
+        stop.set()
     return stats
 
 
-def stage_C_camera_after(args) -> dict:
-    launcher, session, _ = _open_session(with_body=False)
-    ext = _external_inputs()
-    _step_n(session, 20, ext)
+def _open_camera(args):
+    """Return a connected lerobot camera, or None (with a reason) if none is usable."""
     if args.camera_serial:
         from lerobot.cameras.realsense import RealSenseCamera, RealSenseCameraConfig
 
-        cam = RealSenseCamera(RealSenseCameraConfig(serial_number_or_name=args.camera_serial, fps=30, width=640, height=480))
-    else:
-        from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
+        cam = RealSenseCamera(
+            RealSenseCameraConfig(serial_number_or_name=args.camera_serial, fps=30, width=640, height=480)
+        )
+        cam.connect()
+        return cam, None
+    from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
 
-        cam = OpenCVCamera(OpenCVCameraConfig(index_or_path=args.camera_index, fps=30, width=640, height=480))
-    cam.connect()
-    _log("camera connected; first async_read() starts its thread …")
-    frame = cam.async_read()
-    stats = _step_n(session, 100, ext)
-    stats["camera_frame_shape"] = list(getattr(frame, "shape", []))
-    cam.disconnect()
-    _close(session, launcher)
+    # Do not force a resolution: a webcam that cannot do 640x480 must not fail
+    # the *thread* test. Native resolution is fine here.
+    try:
+        cam = OpenCVCamera(OpenCVCameraConfig(index_or_path=args.camera_index))
+        cam.connect()
+        return cam, None
+    except Exception as e:  # noqa: BLE001
+        return None, f"OpenCV camera {args.camera_index} unusable ({e.__class__.__name__}: {e}); pass --camera-serial"
+
+
+def stage_C_camera_after(args) -> dict:
+    with _session_ctx(with_body=False) as (session, ext, _):
+        _step_n(session, 20, ext)
+        cam, reason = _open_camera(args)
+        if cam is None:
+            return {"skipped": reason}
+        try:
+            _log("camera connected; first async_read() starts its thread …")
+            frame = cam.async_read()
+            stats = _step_n(session, 100, ext)
+            stats["camera_frame_shape"] = list(getattr(frame, "shape", []))
+        finally:
+            cam.disconnect()
     return stats
 
 
 def stage_E_rby1_after(args) -> dict:
     if not args.robot:
         return {"skipped": "no --robot address"}
-    launcher, session, _ = _open_session(with_body=False)
-    ext = _external_inputs()
-    _step_n(session, 20, ext)
     import rby1_sdk as rby
 
-    robot = rby.create_robot(args.robot, args.robot_model)
-    if not robot.connect():
-        raise ConnectionError(f"cannot connect to {args.robot}")
-    for _ in range(100):
-        robot.get_state()
-    stats = _step_n(session, 100, ext)
-    robot.disconnect()
-    _close(session, launcher)
+    with _session_ctx(with_body=False) as (session, ext, _):
+        _step_n(session, 20, ext)
+        robot = rby.create_robot(args.robot, args.robot_model)
+        if not robot.connect():
+            raise ConnectionError(f"cannot connect to {args.robot}")
+        try:
+            for _ in range(100):
+                robot.get_state()
+            stats = _step_n(session, 100, ext)
+        finally:
+            robot.disconnect()
     return stats
 
 
 def stage_F_stop_then_thread(args) -> dict:
-    launcher, session, _ = _open_session(with_body=False)
-    ext = _external_inputs()
-    _step_n(session, 20, ext)
-    _close(session, launcher)
+    with _session_ctx(with_body=False) as (session, ext, _):
+        _step_n(session, 20, ext)
     stop = threading.Event()
     beats = [0]
-    t = threading.Thread(target=_heartbeat, args=(stop, beats), daemon=True)
-    t.start()
+    threading.Thread(target=_heartbeat, args=(stop, beats), daemon=True).start()
     time.sleep(0.5)
     stop.set()
     return {"thread_after_stop_alive": beats[0] > 0}
@@ -296,33 +308,32 @@ def stage_S_headset(args) -> dict:
     from lerobot_teleoperator_rby1.isaac_teleop.teleop_rby1_xr import print_xr_connect_help
     from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import BodyJointIndex, frame_from_outputs
 
-    launcher, session, body_in_graph = _open_session(with_body=True)
-    ext = _external_inputs()
-    print_xr_connect_help()
-    t0 = time.monotonic()
     seen = {"right": False, "left": False, "head": False, "body": False}
     samples = 0
-    while time.monotonic() - t0 < args.wait_headset:
-        out = session.step(external_inputs=ext)
-        f = frame_from_outputs(out, want_body=True)
-        seen["right"] |= f.right is not None
-        seen["left"] |= f.left is not None
-        seen["head"] |= f.head is not None
-        seen["body"] |= f.body is not None
-        if f.any_controller and samples < 50:
-            samples += 1
-            if samples % 10 == 1:
-                r = f.right
-                _log(
-                    f"right pos={None if r is None else r.position.round(3)} squeeze={None if r is None else round(r.squeeze, 2)} "
-                    f"head={None if f.head is None else f.head.position.round(3)} "
-                    f"spine3={None if f.body is None else f.body.positions[BodyJointIndex.SPINE3].round(3)} "
-                    f"body_valid={None if f.body is None else int(f.body.valid.sum())}"
-                )
-        elif samples >= 50:
-            break
-        time.sleep(0.01)
-    _close(session, launcher)
+    with _session_ctx(with_body=True) as (session, ext, body_in_graph):
+        print_xr_connect_help()
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < args.wait_headset:
+            out = session.step(external_inputs=ext)
+            f = frame_from_outputs(out, want_body=True)
+            seen["right"] |= f.right is not None
+            seen["left"] |= f.left is not None
+            seen["head"] |= f.head is not None
+            seen["body"] |= f.body is not None
+            if f.any_controller:
+                samples += 1
+                if samples % 10 == 1:
+                    r = f.right
+                    _log(
+                        f"right pos={None if r is None else r.position.round(3)} "
+                        f"squeeze={None if r is None else round(r.squeeze, 2)} "
+                        f"head={None if f.head is None else f.head.position.round(3)} "
+                        f"spine3={None if f.body is None else f.body.positions[BodyJointIndex.SPINE3].round(3)} "
+                        f"body_valid={None if f.body is None else int(f.body.valid.sum())}"
+                    )
+                if samples >= 50:
+                    break
+            time.sleep(0.01)
     return {"seen": seen, "samples": samples, "body_in_graph": body_in_graph}
 
 
