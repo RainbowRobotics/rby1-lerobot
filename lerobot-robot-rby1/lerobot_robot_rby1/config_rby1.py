@@ -32,17 +32,20 @@ from .constants import (
 # joints (arm_4, arm_5, arm_6). The torso and head poses are version-independent.
 # ---------------------------------------------------------------------------
 
-READY_TORSO = np.deg2rad([0.0, 0.0, 0.0, 20.0, 0.0, 0.0])
+# Crouched torso (same as the SDK Cartesian examples): the pitch joints sum to
+# zero so the chest stays upright, while the bend keeps the Cartesian torso
+# solver away from the straight-torso singularity.
+READY_TORSO = np.deg2rad([0.0, 45.0, -90.0, 45.0, 0.0, 0.0])
 READY_HEAD = np.deg2rad([0.0, 49.0])  # head_0, head_1
 
 # v1.2 (and earlier) arm ready pose.
-READY_RIGHT = np.deg2rad([15.0, -65.0, -15.0, -115.0, 75.0, -65.0, -5.0])
-READY_LEFT = np.deg2rad([15.0, 65.0, 15.0, -115.0, -75.0, -65.0, -5.0])
+READY_RIGHT = np.deg2rad([15.0, -10.0, -15.0, -115.0, 75.0, -65.0, -5.0])
+READY_LEFT = np.deg2rad([15.0, 10.0, 15.0, -115.0, -75.0, -65.0, -5.0])
 READY_POSE = np.concatenate([READY_TORSO, READY_RIGHT, READY_LEFT])  # (20,)
 
 # v1.3 arm ready pose: wrist joints (arm_4, arm_5, arm_6) are zeroed.
-READY_RIGHT_V13 = np.deg2rad([15.0, -65.0, -15.0, -115.0, 0.0, 0.0, 0.0])
-READY_LEFT_V13 = np.deg2rad([15.0, 65.0, 15.0, -115.0, 0.0, 0.0, 0.0])
+READY_RIGHT_V13 = np.deg2rad([15.0, -10.0, -15.0, -115.0, 0.0, 0.0, 0.0])
+READY_LEFT_V13 = np.deg2rad([15.0, 10.0, 15.0, -115.0, 0.0, 0.0, 0.0])
 READY_POSE_V13 = np.concatenate([READY_TORSO, READY_RIGHT_V13, READY_LEFT_V13])  # (20,)
 
 
@@ -226,11 +229,9 @@ class Rby1Config(RobotConfig):
     ee_whole_body: bool = False
 
     # Torso joint angles (degrees, torso_0..5) used as the ready pose in EE
-    # mode instead of READY_TORSO. The upright READY_TORSO ([0,0,0,20,0,0])
-    # leaves the three torso pitch joints nearly aligned, which the Cartesian
-    # torso solver can treat as a singularity; the SDK Cartesian examples
-    # start from a crouched torso instead (e.g. [0, 5.7, -11.5, 5.7, 0, 0] or
-    # [0, 45, -90, 45, 0, 0]). None keeps READY_TORSO.
+    # mode instead of READY_TORSO ([0, 45, -90, 45, 0, 0]). Keep the torso
+    # bent: a straight torso (pitch joints aligned) is a singularity for the
+    # Cartesian torso solver. None keeps READY_TORSO.
     ee_ready_torso_deg: List[float] | None = None
 
     # Expected action period (s); Cartesian command minimum_time is

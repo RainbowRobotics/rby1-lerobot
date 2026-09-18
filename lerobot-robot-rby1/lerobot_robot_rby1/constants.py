@@ -103,12 +103,11 @@ DEFAULT_NULL_LEFT_DEG  = [40.0,  30.0, -5.0, -135.0,  10.0, 20.0, -40.0]
 
 # Joint limits enforced by the Cartesian impedance solvers (radians). They are
 # hard constraints of the solver's optimal-control stage, so the range MUST
-# contain the pose the robot is in when EE control starts: the ready pose
-# (READY_TORSO = [0, 0, 0, 20 deg, 0, 0]) has torso_2 = 0. The SDK Cartesian
-# examples keep torso_2 <= -0.2 because they start from a crouched torso
-# ([0, 45, -90, 45] deg); with the upright ready pose that bound would exclude
-# the start configuration, so torso_2 is allowed up to +0.35 rad here.
-TORSO_2_UPPER = 0.35
+# contain the pose the robot is in when EE control starts. The ready pose is
+# the crouched SDK torso ([0, 45, -90, 45] deg, torso_2 = -1.57), so the SDK
+# bound torso_2 <= -0.2 (keeps the torso from straightening into the solver
+# singularity) is used as is.
+TORSO_2_UPPER = -0.2
 
 DEFAULT_WB_JOINT_LIMITS: JointLimits = {
     "right_arm_3": (-2.6, -0.5),
