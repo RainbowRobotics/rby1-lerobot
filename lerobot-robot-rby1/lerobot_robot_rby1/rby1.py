@@ -742,6 +742,7 @@ class Rby1(Robot):
                 f"EE reference reset (torso={reset.torso}, "
                 f"right={reset.right_arm}, left={reset.left_arm})."
             )
+            self._warn_joint_limit_violations()
 
         if cfg.ee_whole_body:
             body = cb.build_whole_body_command(rby, cfg, targets, reset)
@@ -804,6 +805,43 @@ class Rby1(Robot):
                 **kwargs,
             )
         )
+
+    def _warn_joint_limit_violations(self) -> None:
+        """Warn when the measured joints lie outside the solver joint limits.
+
+        ``add_joint_limit`` is a hard constraint of the Cartesian solver; a
+        start configuration outside it makes the solve infeasible (the
+        component then holds or is pulled into the bound), which shows up as
+        "the torso/arm does not follow". Checked on every reference reset.
+        """
+        cfg = self._config
+        try:
+            q = np.asarray(self._robot.get_state().position, dtype=np.float64)
+        except Exception:  # noqa: BLE001
+            return
+        names = TORSO_NAMES + RIGHT_ARM_NAMES + LEFT_ARM_NAMES
+        idx = np.concatenate(
+            [self._model.torso_idx, self._model.right_arm_idx, self._model.left_arm_idx]
+        )
+        q_by_name = {n: float(q[i]) for n, i in zip(names, idx)}
+        if cfg.ee_whole_body:
+            limit_sets = [("whole-body", cfg.wb_joint_limits)]
+        else:
+            limit_sets = [
+                ("torso", cfg.torso_joint_limits if cfg.use_torso else {}),
+                ("right_arm", cfg.right_arm_joint_limits if cfg.use_right_arm else {}),
+                ("left_arm", cfg.left_arm_joint_limits if cfg.use_left_arm else {}),
+            ]
+        for solver, limits in limit_sets:
+            for joint, (lo, hi) in limits.items():
+                val = q_by_name.get(joint)
+                if val is not None and not (lo <= val <= hi):
+                    logger.warning(
+                        f"[EE] {solver} solver joint limit violated at start: {joint}="
+                        f"{val:.3f} rad is outside [{lo:.3f}, {hi:.3f}] — the solver may "
+                        f"refuse to move this component. Adjust the ready pose or "
+                        f"`{solver.replace('-', '_')}_joint_limits`."
+                    )
 
     def _detect_ee_reset(self, targets: cb.CartesianTargets) -> cb.ResetFlags:
         """Flag components whose target jumped since the last command."""

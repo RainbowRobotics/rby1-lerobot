@@ -101,19 +101,27 @@ HEAD_Q_MAX = np.array([1.570796327, 1.570796327])
 DEFAULT_NULL_RIGHT_DEG = [40.0, -30.0, -5.0, -135.0, -10.0, 20.0,  40.0]
 DEFAULT_NULL_LEFT_DEG  = [40.0,  30.0, -5.0, -135.0,  10.0, 20.0, -40.0]
 
-# Joint limits enforced by the Cartesian impedance solvers (radians).
+# Joint limits enforced by the Cartesian impedance solvers (radians). They are
+# hard constraints of the solver's optimal-control stage, so the range MUST
+# contain the pose the robot is in when EE control starts: the ready pose
+# (READY_TORSO = [0, 0, 0, 20 deg, 0, 0]) has torso_2 = 0. The SDK Cartesian
+# examples keep torso_2 <= -0.2 because they start from a crouched torso
+# ([0, 45, -90, 45] deg); with the upright ready pose that bound would exclude
+# the start configuration, so torso_2 is allowed up to +0.35 rad here.
+TORSO_2_UPPER = 0.35
+
 DEFAULT_WB_JOINT_LIMITS: JointLimits = {
     "right_arm_3": (-2.6, -0.5),
     "right_arm_5": (0.2, 1.9),
     "left_arm_3":  (-2.6, -0.5),
     "left_arm_5":  (0.2, 1.9),
     "torso_1":     (-0.523598776, 1.3),
-    "torso_2":     (-2.617993878, -0.2),
+    "torso_2":     (-2.617993878, TORSO_2_UPPER),
 }
 
 DEFAULT_TORSO_JOINT_LIMITS: JointLimits = {
     "torso_1": (-0.523598776, 1.6),
-    "torso_2": (-2.617993878, -0.2),
+    "torso_2": (-2.617993878, TORSO_2_UPPER),
 }
 
 DEFAULT_RIGHT_ARM_JOINT_LIMITS: JointLimits = {"right_arm_3": (-2.6, -0.5)}
