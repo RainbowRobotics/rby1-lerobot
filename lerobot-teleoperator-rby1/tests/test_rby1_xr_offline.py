@@ -271,21 +271,27 @@ def test_first_action_resyncs_to_ready_pose_reached_after_connect(stubbed_pipeli
 
 def test_disengaged_components_follow_robot_after_reset(stubbed_pipeline):
     session = fakes.FakeSession()
-    session.push(_frame(right=fakes.controller(squeeze=0.9)))
+    session.push(_frame(right=fakes.controller()))
     readers: list = []
     t = make_teleop(session, readers, torso_source="none", use_head=False)
     t.connect()
-    t.get_action()  # right engaged, left held
+    t.get_action()  # nothing clutched
     r = readers[0]
     left_before = t.get_action()["left_ee.x"]
-    # A record reset moved the LEFT arm (not clutched) by 20 cm: target follows.
+    # A record reset moved the LEFT arm by 20 cm while nothing is clutched: target follows.
     r.left_ee[0, 3] += 0.2
     a = t.get_action()
     assert a["left_ee.x"] == pytest.approx(left_before + 0.2)
     # A small sag (below threshold) does not move the held target.
     r.left_ee[0, 3] += 0.01
     assert t.get_action()["left_ee.x"] == pytest.approx(left_before + 0.2)
-    # The clutched RIGHT arm is never re-synced by robot motion.
-    right_before = a["right_ee.x"]
+    # While the RIGHT arm is clutched nothing is re-synced: the torso carries
+    # the free arm along and that must not overwrite its held target.
+    session.push(_frame(right=fakes.controller(squeeze=0.9)))
+    a = t.get_action()
+    right_before, left_held = a["right_ee.x"], a["left_ee.x"]
     r.right_ee[0, 3] += 0.5
-    assert t.get_action()["right_ee.x"] == pytest.approx(right_before)
+    r.left_ee[0, 3] += 0.5
+    a = t.get_action()
+    assert a["right_ee.x"] == pytest.approx(right_before)
+    assert a["left_ee.x"] == pytest.approx(left_held)

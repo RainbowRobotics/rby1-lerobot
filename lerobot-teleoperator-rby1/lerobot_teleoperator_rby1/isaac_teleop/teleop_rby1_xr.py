@@ -352,13 +352,18 @@ class Rby1XR(IsaacTeleopTeleoperator):
 
         On the first tick this is unconditional: the follower reaches its ready
         pose only after ``teleop.connect()`` latched the targets, so commanding
-        those would drag the robot straight back. Afterwards it triggers per
-        component when it is not clutched and the measured pose drifted past
-        the ``resync_*`` thresholds (record reset, manual move).
+        those would drag the robot straight back. Afterwards it triggers only
+        while nothing is clutched, per component whose measured pose drifted
+        past the ``resync_*`` thresholds (record reset, manual move).
         """
         cfg = self.config
         force = self._needs_initial_resync
         self._needs_initial_resync = False
+        # While any clutch is engaged the robot is being driven by us: the
+        # torso carries the free arm along and the solvers lag behind the
+        # targets, so drift is expected and must not be "corrected".
+        if not force and any(c is not None and c.engaged for c in self._clutch.values()):
+            return
         pos_thr = cfg.resync_position_threshold_m
         rot_thr = math.radians(cfg.resync_rotation_threshold_deg)
         synced: list[str] = []
