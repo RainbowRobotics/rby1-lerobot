@@ -225,3 +225,22 @@ def test_config_validation():
     with pytest.raises(ValueError):
         Rby1XRConfig(torso_body_joint="CHEST")
     assert Rby1XRConfig(torso_body_joint="SPINE2").torso_body_joint == "SPINE2"
+
+
+@pytest.mark.parametrize("policy,squeeze_left,expect_follow", [("both_arms", 0.0, False), ("any_arm", 0.0, True), ("always", 0.0, True)])
+def test_torso_engage_policy(stubbed_pipeline, policy, squeeze_left, expect_follow):
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=squeeze_left), head=fakes.head(quat=_head_quat(0))))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="head", torso_engage=policy, use_head=False)
+    t.connect()
+    t.get_action()  # latch
+    z0 = readers[0].torso[2, 3]
+    session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=squeeze_left), head=fakes.head(pos=(0, 0, -0.1), quat=_head_quat(0))))
+    a = t.get_action()
+    if expect_follow:
+        assert a["torso_ee.z"] == pytest.approx(z0 - 0.1)
+        assert t._torso_hold_reason == "following"
+    else:
+        assert a["torso_ee.z"] == pytest.approx(z0)
+        assert "arms not clutched" in t._torso_hold_reason

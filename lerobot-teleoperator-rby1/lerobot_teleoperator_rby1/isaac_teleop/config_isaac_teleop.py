@@ -29,6 +29,7 @@ DEFAULT_BASE_T_ANCHOR: list[list[float]] = [
 SESSION_START_CHOICES = ("connect", "first_action")
 LATCH_ORIENTATION_CHOICES = ("measured", "commanded")
 TORSO_SOURCE_CHOICES = ("body", "head", "none")
+TORSO_ENGAGE_CHOICES = ("both_arms", "any_arm", "always")
 
 
 @dataclass(kw_only=True)
@@ -114,6 +115,10 @@ class Rby1XRConfig(IsaacTeleopConfig):
     # "body": Isaac Teleop FullBodySource (Quest 3 IOBT / Pico trackers),
     # "head": headset pose, "none": torso target frozen at its start pose.
     torso_source: str = "body"
+    # When the torso follows its driver: only while BOTH enabled arms are
+    # clutched (default, the operator has to "hold on" with both hands), while
+    # ANY arm is clutched, or ALWAYS (from the first valid driver frame on).
+    torso_engage: str = "both_arms"
     # Body joint driving the torso (name from BodyJointIndex, XR_BD layout).
     torso_body_joint: str = "SPINE3"
     # Joints that must be valid for a body frame to drive the torso.
@@ -126,6 +131,10 @@ class Rby1XRConfig(IsaacTeleopConfig):
     # Safety clamps on the delta from the torso pose latched at engage.
     torso_max_rot_delta_deg: float = 35.0
     torso_max_z_delta_m: float = 0.15
+
+    # ── Diagnostics ───────────────────────────────────────────────────
+    # Log a one-line tracking / clutch status this often (seconds; 0 = off).
+    status_log_period_s: float = 5.0
 
     def __post_init__(self) -> None:
         parent_post_init = getattr(super(), "__post_init__", None)
@@ -143,6 +152,10 @@ class Rby1XRConfig(IsaacTeleopConfig):
         if self.torso_source not in TORSO_SOURCE_CHOICES:
             raise ValueError(
                 f"torso_source must be one of {TORSO_SOURCE_CHOICES}, got {self.torso_source!r}"
+            )
+        if self.torso_engage not in TORSO_ENGAGE_CHOICES:
+            raise ValueError(
+                f"torso_engage must be one of {TORSO_ENGAGE_CHOICES}, got {self.torso_engage!r}"
             )
         if self.robot_model.strip().lower() not in ("a", "m", "ub"):
             raise ValueError(f'robot_model must be "a", "m" or "ub", got {self.robot_model!r}')

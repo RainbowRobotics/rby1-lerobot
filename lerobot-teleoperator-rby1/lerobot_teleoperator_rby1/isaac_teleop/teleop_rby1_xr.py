@@ -123,6 +123,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._stopped = False
         self._tracking = False
         self._warned_no_body = False
+        self._last_status_log = 0.0
+        self._torso_hold_reason = "not started"
 
         self._torso_joint = int(BodyJointIndex[config.torso_body_joint])
         self._torso_required = [int(BodyJointIndex[n]) for n in config.body_required_joints]
@@ -331,6 +333,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._update_head(frame, get_snap)
         self._update_grippers(frame)
         self._update_base(frame)
+        self._log_status(frame)
         return self._build_action()
 
     # ------------------------------------------------------------------
@@ -363,10 +366,17 @@ class Rby1XR(IsaacTeleopTeleoperator):
             clutch.disengage()
             logger.debug("%s arm clutch released — holding.", side)
 
-    def _arms_engaged(self) -> bool:
-        """True when every enabled arm is clutched (False if no arm is enabled)."""
+    def _torso_engage_allowed(self) -> bool:
+        """Apply ``torso_engage``: both / any enabled arm clutched, or always."""
+        policy = self.config.torso_engage
+        if policy == "always":
+            return True
         arms = [c for k, c in self._clutch.items() if k != "torso" and c is not None]
-        return bool(arms) and all(c.engaged for c in arms)
+        if not arms:
+            return False
+        if policy == "any_arm":
+            return any(c.engaged for c in arms)
+        return all(c.engaged for c in arms)
 
     def _torso_driver_pose(self, frame: XRFrame) -> np.ndarray | None:
         src = self.config.torso_source
@@ -389,11 +399,32 @@ class Rby1XR(IsaacTeleopTeleoperator):
         if clutch is None:
             return
         driver = None
-        if not self._stopped and self._arms_engaged():
+        if self._stopped:
+            self._torso_hold_reason = "stopped (Right B)"
+        elif not self._torso_engage_allowed():
+            self._torso_hold_reason = f"arms not clutched (torso_engage={self.config.torso_engage})"
+        else:
             driver = self._torso_driver_pose(frame)
+            if driver is None:
+                src = self.config.torso_source
+                if src == "body":
+                    if frame.body is None:
+                        self._torso_hold_reason = "no body-tracking frame"
+                    else:
+                        bad = [
+                            BodyJointIndex(i).name
+                            for i in [*self._torso_required, self._torso_joint]
+                            if not bool(frame.body.valid[i])
+                        ]
+                        self._torso_hold_reason = f"body joints invalid: {bad}"
+                elif src == "head":
+                    self._torso_hold_reason = "no head pose"
+                else:
+                    self._torso_hold_reason = "torso_source=none"
         if driver is None:
             clutch.disengage()
             return
+        self._torso_hold_reason = "following"
         pos = driver[:3, 3]
         quat = Rotation.from_matrix(driver[:3, :3]).as_quat()
         if not clutch.engaged:
@@ -440,6 +471,40 @@ class Rby1XR(IsaacTeleopTeleoperator):
             deadzone=cfg.thumbstick_deadzone,
             max_linear=cfg.base_max_linear,
             max_angular=cfg.base_max_angular,
+        )
+
+    def _log_status(self, frame: XRFrame) -> None:
+        """Periodic one-line status: what is tracked, what is clutched, why the torso holds."""
+        period = self.config.status_log_period_s
+        if period <= 0.0:
+            return
+        now = time.monotonic()
+        if now - self._last_status_log < period:
+            return
+        self._last_status_log = now
+
+        def ctrl(c: ControllerState | None) -> str:
+            return "-" if c is None else f"sq={c.squeeze:.2f} tr={c.trigger:.2f}"
+
+        def eng(side: str) -> str:
+            c = self._clutch.get(side)
+            return "n/a" if c is None else ("ENGAGED" if c.engaged else "hold")
+
+        body = "-"
+        if frame.body is not None:
+            body = f"valid {int(frame.body.valid.sum())}/24"
+        elif self.config.torso_source == "body":
+            body = "none"
+        logger.info(
+            "xr status | right: %s [%s] | left: %s [%s] | head: %s | body: %s | torso: %s%s",
+            ctrl(frame.right),
+            eng("right"),
+            ctrl(frame.left),
+            eng("left"),
+            "ok" if frame.head is not None else "-",
+            body,
+            self._torso_hold_reason if self._clutch.get("torso") is not None else "disabled",
+            " | STOPPED" if self._stopped else "",
         )
 
     def _build_action(self) -> dict[str, Any]:

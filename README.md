@@ -202,7 +202,7 @@ The process prints the host IP addresses and waits for the headset:
 | Right **B** | Stop: freeze every target, zero the base |
 | Right **A** | Resume after a stop; re-centre the head origin |
 | Headset orientation | `head_0` (pan) / `head_1` (tilt) relative to the pose at the first tracked frame |
-| Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, only while **both** arms are clutched |
+| Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, while **both** arms are clutched (`torso_engage=both_arms`, default; `any_arm` / `always` available) |
 
 ## Record Data and upload to HF
 
@@ -284,7 +284,9 @@ lerobot-record \
 | `head_yaw_limit_deg`, `head_pitch_min_deg`, `head_pitch_max_deg` | `80`, `-45`, `80` | Head joint clamps |
 | `head_smoothing` | `0.3` | EMA weight of the new head sample (1.0 = no filtering) |
 | `torso_source` | `"body"` | `"body"` (Isaac Teleop body tracking), `"head"` or `"none"` |
+| `torso_engage` | `"both_arms"` | When the torso follows: `both_arms` (both grips squeezed), `any_arm`, or `always` |
 | `torso_body_joint` | `"SPINE3"` | Body joint driving the torso (XR_BD 24-joint names) |
+| `status_log_period_s` | `5.0` | Log a one-line tracking / clutch status (controllers, head, body joints valid, why the torso holds); 0 = off |
 | `torso_max_rot_delta_deg`, `torso_max_z_delta_m` | `35`, `0.15` | Safety clamps on the torso delta since engage |
 
 ### Observation / Action Keys

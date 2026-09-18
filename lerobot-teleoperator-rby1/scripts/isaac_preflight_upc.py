@@ -311,36 +311,49 @@ def stage_G_record_dryrun(args) -> dict:
 
 
 def stage_S_headset(args) -> dict:
+    """Wait for the headset and print, once per second, what each source delivers.
+
+    Use this to check IOBT / body tracking: ``body`` must become present and the
+    PELVIS / SPINE3 / NECK joints valid, and SPINE3 must move when you bend.
+    """
+    from lerobot_teleoperator_rby1.isaac_teleop.config_isaac_teleop import DEFAULT_BASE_T_ANCHOR
     from lerobot_teleoperator_rby1.isaac_teleop.teleop_rby1_xr import print_xr_connect_help
     from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import BodyJointIndex, frame_from_outputs
 
-    seen = {"right": False, "left": False, "head": False, "body": False}
-    samples = 0
+    required = [BodyJointIndex.PELVIS, BodyJointIndex.SPINE3, BodyJointIndex.NECK]
+    seen = {"right": False, "left": False, "head": False, "body": False, "body_required_valid": False}
+    steps = 0
+    body_valid_max = 0
     with _session_ctx(with_body=True) as (session, ext, body_in_graph):
+        body_transform = None if body_in_graph else __import__("numpy").asarray(DEFAULT_BASE_T_ANCHOR, dtype=float)
         print_xr_connect_help()
         t0 = time.monotonic()
+        last_print = 0.0
         while time.monotonic() - t0 < args.wait_headset:
             out = session.step(external_inputs=ext)
-            f = frame_from_outputs(out, want_body=True)
+            steps += 1
+            f = frame_from_outputs(out, want_body=True, body_transform=body_transform)
             seen["right"] |= f.right is not None
             seen["left"] |= f.left is not None
             seen["head"] |= f.head is not None
             seen["body"] |= f.body is not None
-            if f.any_controller:
-                samples += 1
-                if samples % 10 == 1:
-                    r = f.right
-                    _log(
-                        f"right pos={None if r is None else r.position.round(3)} "
-                        f"squeeze={None if r is None else round(r.squeeze, 2)} "
-                        f"head={None if f.head is None else f.head.position.round(3)} "
-                        f"spine3={None if f.body is None else f.body.positions[BodyJointIndex.SPINE3].round(3)} "
-                        f"body_valid={None if f.body is None else int(f.body.valid.sum())}"
-                    )
-                if samples >= 50:
-                    break
+            if f.body is not None:
+                body_valid_max = max(body_valid_max, int(f.body.valid.sum()))
+                seen["body_required_valid"] |= all(bool(f.body.valid[i]) for i in required)
+            now = time.monotonic()
+            if now - last_print >= 1.0:
+                last_print = now
+                raw_body = out.get("full_body")
+                raw_state = "absent" if raw_body is None else ("is_none" if getattr(raw_body, "is_none", False) else "present")
+                r, h, b = f.right, f.head, f.body
+                _log(
+                    f"t={now - t0:5.1f}s right={'-' if r is None else f'pos={r.position.round(2)} sq={r.squeeze:.2f}'} "
+                    f"left={'-' if f.left is None else f'sq={f.left.squeeze:.2f}'} "
+                    f"head={'-' if h is None else h.position.round(2)} "
+                    f"body[raw={raw_state}]={'-' if b is None else f'valid={int(b.valid.sum())}/24 req_ok={all(bool(b.valid[i]) for i in required)} spine3={b.positions[BodyJointIndex.SPINE3].round(2)}'}"
+                )
             time.sleep(0.01)
-    return {"seen": seen, "samples": samples, "body_in_graph": body_in_graph}
+    return {"seen": seen, "steps": steps, "body_valid_max": body_valid_max, "body_in_graph": body_in_graph}
 
 
 # ---------------------------------------------------------------------------
