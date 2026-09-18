@@ -426,19 +426,33 @@ def _first_error_summary(text: str) -> str:
 
 
 def run_stage_subprocess(name: str, argv: list[str]) -> tuple[str, dict | str]:
-    cmd = [sys.executable, __file__, "--stage", name, *argv]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    """Run one stage in a child process, streaming its output live to the terminal
+    (indented) while also saving it to ``~/preflight_logs/<stage>.log``."""
+    cmd = [sys.executable, "-u", __file__, "--stage", name, *argv]
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"{name}.log"
-    log_path.write_text(f"$ {' '.join(cmd)}\n\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}")
+    lines: list[str] = []
+    with open(log_path, "w") as log_file:
+        log_file.write(f"$ {' '.join(cmd)}\n\n")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            lines.append(line)
+            log_file.write(line + "\n")
+            if not line.startswith("RESULT "):
+                print(f"     | {line}", flush=True)
+        proc.wait()
+    combined = "\n".join(lines)
     if proc.returncode == 0:
-        for line in reversed(proc.stdout.splitlines()):
+        for line in reversed(lines):
             if line.startswith("RESULT "):
                 return "PASS", json.loads(line[len("RESULT "):])
         return "PASS", {}
     kind = "ABORT(SIGABRT)" if proc.returncode == -6 else f"FAIL(rc={proc.returncode})"
-    combined = proc.stdout + proc.stderr
-    tail = "\n".join(combined.splitlines()[-15:])
+    tail = "\n".join(lines[-15:])
     detail = f"full log: {log_path}\n{_first_error_summary(combined)}\n--- tail ---\n{tail}"
     return kind, detail
 
