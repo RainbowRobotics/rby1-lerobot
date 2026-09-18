@@ -318,8 +318,9 @@ def test_right_a_returns_to_start_pose(stubbed_pipeline, monkeypatch):
     a = t.get_action()
     assert a["right_ee.x"] == pytest.approx(x_start + 0.3)
     assert a["head_0.pos"] == pytest.approx(math.radians(30))
-    # Right A: the clutch is released and the targets interpolate back.
-    session.push(_frame(right=fakes.controller((0.3, 0, 0), squeeze=0.9, primary=True), head=fakes.head(quat=_head_quat(30))))
+    # Right A: the clutch is released and the targets interpolate back. (The
+    # operator faces forward again here so the yaw reference stays unchanged.)
+    session.push(_frame(right=fakes.controller((0.3, 0, 0), squeeze=0.9, primary=True), head=fakes.head(quat=_head_quat(0))))
     a = t.get_action()
     assert a["right_ee.x"] == pytest.approx(x_start + 0.3)  # alpha = 0
     clock[0] += 1.0  # halfway (smoothstep(0.5) = 0.5)
@@ -337,3 +338,29 @@ def test_right_a_returns_to_start_pose(stubbed_pipeline, monkeypatch):
     t.get_action()
     session.push(_frame(right=fakes.controller((1.0, 0, 0), squeeze=0.9)))
     assert t.get_action()["right_ee.x"] == pytest.approx(x_start + 0.1)
+
+
+def test_right_a_rereferences_operator_yaw(stubbed_pipeline, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    session = fakes.FakeSession()
+    # Operator initially faces robot +X (head looks along anchor -Z -> robot +X).
+    session.push(_frame(right=fakes.controller((0, 0, 0)), head=fakes.head(quat=_head_quat(0))))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", use_head=False, ready_return_duration_s=0.5)
+    t.connect()
+    t.get_action()
+    x0, y0 = readers[0].right_ee[0, 3], readers[0].right_ee[1, 3]
+    # The operator turns 90 deg to the left (now facing robot +Y) and presses A.
+    session.push(_frame(right=fakes.controller((0, 0, 0), primary=True), head=fakes.head(quat=_head_quat(90))))
+    t.get_action()
+    assert t._yaw_correction == pytest.approx(-math.pi / 2)
+    clock[0] += 1.0  # return motion done
+    t.get_action()
+    # Squeeze, then push the controller "forward" for the operator = raw robot +Y.
+    session.push(_frame(right=fakes.controller((0, 0, 0), squeeze=0.9), head=fakes.head(quat=_head_quat(90))))
+    t.get_action()
+    session.push(_frame(right=fakes.controller((0, 0.2, 0), squeeze=0.9), head=fakes.head(quat=_head_quat(90))))
+    a = t.get_action()
+    assert a["right_ee.x"] == pytest.approx(x0 + 0.2)  # forward for the operator -> robot +X
+    assert a["right_ee.y"] == pytest.approx(y0)

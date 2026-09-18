@@ -22,8 +22,17 @@ Button mapping (Meta Quest naming)
     Right B                      Stop: freeze every target, zero the base
     Right A                      Release every clutch and return arms, torso and
                                  head to the start pose (measured right after the
-                                 follower's ready-pose motion); also resumes after
-                                 a stop and re-centres the head origin
+                                 follower's ready-pose motion); re-reference the
+                                 operator frame (current facing direction = robot
+                                 +X); also resumes after a stop
+
+Operator frame
+--------------
+OpenXR reports poses in a reference space whose forward is wherever the
+headset looked when the session started. All poses are therefore rotated
+about the robot z axis by ``-yaw(head)`` taken at the first tracked head
+frame and again on every Right A, so "push the controller forward" always
+means robot +X for the operator as they currently stand.
     Torso                        Follows the chest (body tracking) or the head
                                  while BOTH arms are clutched
 """
@@ -57,6 +66,7 @@ from .config_isaac_teleop import Rby1XRConfig
 from .retargeters import (
     HeadRetargeter,
     chest_pose_from_body,
+    head_yaw_pitch,
     interpolate_pose,
     scale_clamp_delta,
     se3_to_ee_action,
@@ -72,6 +82,7 @@ from .xr_frame import (
     build_external_inputs,
     build_pipeline,
     frame_from_outputs,
+    rotate_frame_about_z,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,6 +145,11 @@ class Rby1XR(IsaacTeleopTeleoperator):
         # Start pose (first action) and the interpolated return motion (Right A).
         self._start_snapshot: RobotSnapshot | None = None
         self._return_motion: _ReturnMotion | None = None
+        # Operator-frame yaw correction (rad about robot z) applied to every
+        # incoming pose; taken from the raw head yaw at reference time.
+        self._yaw_correction = 0.0
+        self._needs_reference = True
+        self._last_raw_frame: XRFrame | None = None
 
         self._torso_joint = int(BodyJointIndex[config.torso_body_joint])
         self._torso_required = [int(BodyJointIndex[n]) for n in config.body_required_joints]
@@ -255,13 +271,27 @@ class Rby1XR(IsaacTeleopTeleoperator):
         outputs = self._step(
             execution_events=self._running_events(), external_inputs=self._external_inputs
         )
-        frame = frame_from_outputs(
+        raw = frame_from_outputs(
             outputs,
             want_body=self.config.torso_source == "body",
             body_transform=self._body_transform,
         )
-        self._tracking = frame.any_controller
-        return frame
+        self._last_raw_frame = raw
+        self._tracking = raw.any_controller
+        return rotate_frame_about_z(raw, self._yaw_correction)
+
+    def _set_reference_from_head(self, raw: XRFrame) -> bool:
+        """Make the operator's current facing direction robot +X. Returns True if taken."""
+        if raw.head is None:
+            return False
+        yaw, _ = head_yaw_pitch(raw.head.pose)
+        self._yaw_correction = -yaw
+        self._needs_reference = False
+        logger.info(
+            "Operator frame re-referenced: head yaw %.1f deg in the XR anchor frame is now robot +X.",
+            math.degrees(yaw),
+        )
+        return True
 
     def _wait_for_tracking(self) -> None:
         """Block until a controller is tracked (user-paced; Ctrl-C aborts)."""
@@ -302,6 +332,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         # The follower connects (and moves to its ready pose) after this, so
         # the targets are re-seeded again on the first get_action().
         self._needs_initial_resync = True
+        self._needs_reference = True
         logger.info("rby1_isaac: targets latched to the current robot pose (squeeze to follow).")
 
     # ------------------------------------------------------------------
@@ -316,6 +347,12 @@ class Rby1XR(IsaacTeleopTeleoperator):
 
         frame = self._read_frame()
         events = self._edges.update(frame)
+        raw = self._last_raw_frame
+
+        # Operator frame: reference on the first tracked head frame and on Right A.
+        if raw is not None and (events["right_a"] or self._needs_reference):
+            if self._set_reference_from_head(raw):
+                frame = rotate_frame_about_z(raw, self._yaw_correction)
 
         # One robot read per tick: engage edges latch from it and disengaged
         # components are re-synchronised to it when the robot moved on its own.

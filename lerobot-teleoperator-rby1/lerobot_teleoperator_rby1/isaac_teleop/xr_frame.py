@@ -292,6 +292,49 @@ def frame_from_outputs(
     )
 
 
+def rotate_frame_about_z(frame: XRFrame, yaw: float) -> XRFrame:
+    """Rotate every pose of ``frame`` by ``yaw`` (rad) about the robot z axis.
+
+    Used to re-reference the operator's facing direction: after the rotation,
+    the direction the headset looked at when the reference was taken is robot
+    +X. Positions are rotated about the anchor origin, which is irrelevant for
+    the (delta-based) clutches.
+    """
+    if abs(yaw) < 1e-12:
+        return frame
+    rz = Rotation.from_euler("z", yaw)
+    R = rz.as_matrix()
+
+    def ctrl(c: ControllerState | None) -> ControllerState | None:
+        if c is None:
+            return None
+        return ControllerState(
+            R @ c.position,
+            (rz * Rotation.from_quat(c.orientation)).as_quat(),
+            c.squeeze,
+            c.trigger,
+            c.thumbstick,
+            c.primary,
+            c.secondary,
+        )
+
+    head = None
+    if frame.head is not None:
+        head = HeadState(
+            R @ frame.head.position,
+            (rz * Rotation.from_quat(frame.head.orientation)).as_quat(),
+            frame.head.is_tracked,
+        )
+    body = None
+    if frame.body is not None:
+        quat = frame.body.orientations.copy()
+        valid = frame.body.valid
+        if valid.any():
+            quat[valid] = (rz * Rotation.from_quat(quat[valid])).as_quat()
+        body = BodyState(frame.body.positions @ R.T, quat, valid)
+    return XRFrame(right=ctrl(frame.right), left=ctrl(frame.left), head=head, body=body)
+
+
 class ButtonEdge:
     """Rising-edge detector for the A/B (X/Y) buttons of both controllers."""
 

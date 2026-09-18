@@ -200,7 +200,7 @@ The process prints the host IP addresses and waits for the headset:
 | Trigger | Gripper (fully pressed = closed) |
 | Right thumbstick / left thumbstick | Base linear velocity / yaw rate |
 | Right **B** | Stop: freeze every target, zero the base |
-| Right **A** | Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; also resumes after a stop and re-centres the head origin. The base is not moved |
+| Right **A** | Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; re-reference the operator frame so the direction you are facing becomes robot +X; also resumes after a stop and re-centres the head origin. The base is not moved |
 | Headset orientation | `head_0` (pan) / `head_1` (tilt) relative to the pose at the first tracked frame |
 | Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, while **both** arms are clutched (`torso_engage=both_arms`, default; `any_arm` / `always` available) |
 

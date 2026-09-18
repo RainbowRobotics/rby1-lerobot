@@ -101,3 +101,21 @@ def test_body_python_transform_skips_invalid_zero_quaternions():
     assert f.body is not None
     assert f.body.valid[BodyJointIndex.SPINE3] and not f.body.valid[BodyJointIndex.PELVIS]
     np.testing.assert_allclose(f.body.joint_pose(BodyJointIndex.SPINE3)[:3, :3], T[:3, :3], atol=1e-6)
+
+
+def test_rotate_frame_about_z():
+    from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import rotate_frame_about_z
+
+    pos = np.zeros((24, 3), np.float32)
+    pos[BodyJointIndex.SPINE3] = [1, 0, 0]
+    f = frame_from_outputs(
+        {OUT_CONTROLLER_RIGHT: fakes.controller((1, 0, 0), squeeze=0.7), OUT_HEAD: fakes.head((0, 1, 0)), OUT_BODY: fakes.body(positions=pos)},
+        want_body=True,
+    )
+    g = rotate_frame_about_z(f, np.pi / 2)
+    np.testing.assert_allclose(g.right.position, [0, 1, 0], atol=1e-6)
+    assert g.right.squeeze == 0.7
+    np.testing.assert_allclose(g.head.position, [-1, 0, 0], atol=1e-6)
+    np.testing.assert_allclose(g.body.positions[BodyJointIndex.SPINE3], [0, 1, 0], atol=1e-6)
+    np.testing.assert_allclose(g.right.pose[:3, :3], Rotation.from_euler("z", 90, degrees=True).as_matrix(), atol=1e-6)
+    assert rotate_frame_about_z(f, 0.0) is f
