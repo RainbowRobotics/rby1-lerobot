@@ -173,6 +173,23 @@ def _is_none(group: Any) -> bool:
     return group is None or bool(getattr(group, "is_none", False))
 
 
+_QUAT_MIN_NORM = 1e-6
+
+
+def _pose_ok(pos: np.ndarray, quat: np.ndarray) -> bool:
+    """Finite position and a usable (non-zero) quaternion.
+
+    Untracked samples arrive as all-zero poses (e.g. the head before the
+    headset is tracked on layouts without an is_valid flag); feeding a zero
+    quaternion to scipy raises, so they are treated as absent instead.
+    """
+    return bool(
+        np.all(np.isfinite(pos))
+        and np.all(np.isfinite(quat))
+        and float(np.linalg.norm(quat)) > _QUAT_MIN_NORM
+    )
+
+
 def _parse_controller(group: Any) -> ControllerState | None:
     """Read one controller group; None when absent, invalid or partially populated.
 
@@ -200,7 +217,7 @@ def _parse_controller(group: Any) -> ControllerState | None:
         secondary = float(group[ControllerInputIndex.SECONDARY_CLICK]) > 0.5
     except (IndexError, KeyError, TypeError, ValueError):
         return None
-    if not (np.all(np.isfinite(pos)) and np.all(np.isfinite(quat))):
+    if not _pose_ok(pos, quat):
         return None
     return ControllerState(pos, quat, squeeze, trigger, thumb, primary, secondary)
 
@@ -224,7 +241,7 @@ def _parse_head(group: Any) -> HeadState | None:
         tracked = bool(group[HeadInputIndex.IS_TRACKED])
     except (IndexError, KeyError, TypeError, ValueError):
         tracked = True
-    if not (np.all(np.isfinite(pos)) and np.all(np.isfinite(quat))):
+    if not _pose_ok(pos, quat):
         return None
     return HeadState(pos, quat, tracked)
 
@@ -242,12 +259,17 @@ def _parse_body(group: Any, transform: np.ndarray | None) -> BodyState | None:
         valid = np.asarray(group[FullBodyInputIndex.JOINT_VALID]).reshape(NUM_BODY_JOINTS) != 0
     except (IndexError, KeyError, TypeError, ValueError):
         return None
-    if transform is not None:
+    # Invalid joints carry zero quaternions: never treat them as valid.
+    finite = np.isfinite(pos).all(axis=1) & np.isfinite(quat).all(axis=1)
+    valid = valid & finite & (np.linalg.norm(quat, axis=1) > _QUAT_MIN_NORM)
+    if transform is not None and valid.any():
         # Same left-multiplied rebase the in-graph transform applies:
-        # base_T_joint = base_T_anchor @ anchor_T_joint.
+        # base_T_joint = base_T_anchor @ anchor_T_joint. Only valid joints are
+        # rotated (zero quaternions would raise in scipy).
         R_ba = transform[:3, :3]
         pos = pos @ R_ba.T + transform[:3, 3]
-        quat = (Rotation.from_matrix(R_ba) * Rotation.from_quat(quat)).as_quat()
+        quat = quat.copy()
+        quat[valid] = (Rotation.from_matrix(R_ba) * Rotation.from_quat(quat[valid])).as_quat()
     return BodyState(pos, quat, valid)
 
 

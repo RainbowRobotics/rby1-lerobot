@@ -79,3 +79,25 @@ def test_head_without_valid_or_tracked_fields_is_accepted():
     )
     f = frame_from_outputs({OUT_HEAD: three_field}, want_body=False)
     assert f.head is not None and f.head.is_tracked
+
+
+def test_zero_quaternion_samples_are_treated_as_absent():
+    zero = np.zeros(4, np.float32)
+    outputs = {
+        OUT_CONTROLLER_RIGHT: fakes.controller(quat=zero, squeeze=1.0),
+        OUT_HEAD: fakes.head(quat=zero),
+    }
+    f = frame_from_outputs(outputs, want_body=False)
+    assert f.right is None and f.head is None
+
+
+def test_body_python_transform_skips_invalid_zero_quaternions():
+    T = np.eye(4)
+    T[:3, :3] = np.array([[0, 0, -1], [-1, 0, 0], [0, 1, 0]], float)
+    quat = np.zeros((24, 4), np.float32)  # everything untracked …
+    quat[BodyJointIndex.SPINE3] = [0, 0, 0, 1]  # … except the chest
+    valid = np.ones(24, np.uint8)  # the headset claims all valid
+    f = frame_from_outputs({OUT_BODY: fakes.body(orientations=quat, valid=valid)}, want_body=True, body_transform=T)
+    assert f.body is not None
+    assert f.body.valid[BodyJointIndex.SPINE3] and not f.body.valid[BodyJointIndex.PELVIS]
+    np.testing.assert_allclose(f.body.joint_pose(BodyJointIndex.SPINE3)[:3, :3], T[:3, :3], atol=1e-6)

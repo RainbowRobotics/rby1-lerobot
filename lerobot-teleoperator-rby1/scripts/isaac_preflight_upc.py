@@ -206,11 +206,17 @@ def _open_camera(args):
     if args.camera_serial:
         from lerobot.cameras.realsense import RealSenseCamera, RealSenseCameraConfig
 
-        cam = RealSenseCamera(
-            RealSenseCameraConfig(serial_number_or_name=args.camera_serial, fps=30, width=640, height=480)
-        )
-        cam.connect()
-        return cam, None
+        try:
+            cam = RealSenseCamera(
+                RealSenseCameraConfig(serial_number_or_name=args.camera_serial, fps=30, width=640, height=480)
+            )
+            cam.connect()
+            return cam, None
+        except Exception as e:  # noqa: BLE001
+            return None, (
+                f"RealSense {args.camera_serial} unusable ({e.__class__.__name__}: {e}); "
+                "check `lerobot-find-cameras realsense`"
+            )
     from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
 
     # Do not force a resolution: a webcam that cannot do 640x480 must not fail
