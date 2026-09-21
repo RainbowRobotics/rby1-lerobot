@@ -1,3 +1,4 @@
+import pytest
 from lerobot.teleoperators.config import TeleoperatorConfig
 
 import lerobot_teleoperator_rb
@@ -22,9 +23,9 @@ def test_rb_vr_config_defaults():
     assert config.controller_hand == "right"
     assert config.grip_threshold == 0.5
     assert config.tracking_timeout_s == 0.25
-    assert config.ik_iterations == 3
+    assert config.ik_iterations == 5
+    assert config.orientation_scale == 1.0
     assert config.require_initialization_button is True
-    assert config.hold_last_target is True
 
 
 def test_rb_vr_config_custom_values():
@@ -39,7 +40,7 @@ def test_rb_vr_config_custom_values():
         use_gripper=True,
         tracking_timeout_s=0.5,
         ik_iterations=8,
-        max_joint_delta_rad=0.05,
+        orientation_scale=0.5,
     )
 
     assert config.local_ip == "192.168.0.10"
@@ -50,5 +51,43 @@ def test_rb_vr_config_custom_values():
     assert config.grip_threshold == 0.7
     assert config.use_gripper is True
     assert config.tracking_timeout_s == 0.5
+    assert config.orientation_scale == 0.5
     assert config.ik_iterations == 8
-    assert config.max_joint_delta_rad == 0.05
+
+
+def test_rb_vr_config_orientation_scale_accepts_zero():
+    """0.0 is the "freeze the orientation" value, not an invalid one.
+
+    This is the test that catches anyone reaching for
+    _validate_finite_positive, which rejects 0.0.
+    """
+    config = RbVrConfig(
+        id="frozen_orientation",
+        send_handshake=False,
+        orientation_scale=0.0,
+    )
+
+    assert config.orientation_scale == 0.0
+
+
+def test_rb_vr_config_orientation_scale_accepts_one():
+    config = RbVrConfig(
+        id="one_to_one_orientation",
+        send_handshake=False,
+        orientation_scale=1.0,
+    )
+
+    assert config.orientation_scale == 1.0
+
+
+@pytest.mark.parametrize(
+    "value",
+    [-0.1, 1.1, float("nan"), float("inf")],
+)
+def test_rb_vr_config_rejects_invalid_orientation_scale(value):
+    with pytest.raises(ValueError, match="orientation_scale"):
+        RbVrConfig(
+            id="bad_orientation",
+            send_handshake=False,
+            orientation_scale=value,
+        )

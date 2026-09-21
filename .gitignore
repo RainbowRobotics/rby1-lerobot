@@ -23,3 +23,6 @@ env/
 htmlcov/
 build/
 dist/
+
+# Upstream LeRobot checkout (nested git repo, ~259MB)
+/lerobot/

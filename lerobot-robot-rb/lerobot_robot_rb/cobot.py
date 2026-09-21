@@ -788,7 +788,6 @@ class Cobot:
     def set_ff_gain_off(
         self,
     ):
-        """Set feed forward gain off."""
 
         return self.SendCOMMAND(
             f"set_ff_gain(0)",

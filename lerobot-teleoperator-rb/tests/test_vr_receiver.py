@@ -3,13 +3,13 @@ import socket
 import time
 
 import numpy as np
+import pytest
 
 from lerobot_teleoperator_rb.frame_transforms import (
-    quest_pose_to_rb_frame,
+    quest_pose_to_rb,
 )
 from lerobot_teleoperator_rb.vr_receiver import (
     VRReceiver,
-    parse_vr_payload,
 )
 
 
@@ -41,6 +41,15 @@ def make_payload(
     }
 
 
+def free_udp_port():
+    with socket.socket(
+        socket.AF_INET,
+        socket.SOCK_DGRAM,
+    ) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 def send_payload(port, payload):
     with socket.socket(
         socket.AF_INET,
@@ -52,172 +61,185 @@ def send_payload(port, payload):
         )
 
 
-def wait_for_packet_count(receiver, count, timeout_s=1.0):
+def wait_for_packet_count(receiver, count, timeout_s=2.0):
     deadline = time.monotonic() + timeout_s
 
     while time.monotonic() < deadline:
-        if receiver.packet_count >= count:
+        if receiver.get_state().packet_count >= count:
             return
-        time.sleep(0.01)
+
+        time.sleep(0.005)
 
     raise AssertionError(
-        f"Expected {count} packets, got {receiver.packet_count}."
+        "Expected "
+        f"{count} packets, got "
+        f"{receiver.get_state().packet_count}."
     )
 
 
-def test_parse_vr_payload():
-    payload = make_payload()
-
-    snapshot = parse_vr_payload(
-        payload,
-        received_at=10.0,
-        sender=("127.0.0.1", 5000),
+@pytest.fixture
+def receiver():
+    instance = VRReceiver(
+        local_ip="127.0.0.1",
+        local_port=free_udp_port(),
+        meta_quest_ip=None,
+        send_handshake=False,
+        tracking_timeout_s=0.25,
     )
+    instance.start()
 
-    expected_pose = quest_pose_to_rb_frame(
+    try:
+        yield instance
+    finally:
+        instance.stop()
+
+
+def test_packet_is_parsed_into_the_rb_frame(receiver):
+    send_payload(
+        receiver.local_port,
+        make_payload(),
+    )
+    wait_for_packet_count(receiver, 1)
+
+    state = receiver.get_state()
+
+    expected_pose = quest_pose_to_rb(
         [0.4, -0.2, 1.2],
         [0.0, 0.0, 0.0, 1.0],
     )
 
-    assert snapshot.received_at == 10.0
-    assert snapshot.source_timestamp == 123.4
-    assert snapshot.head_tracked
-    assert snapshot.right.tracked
-    assert not snapshot.left.tracked
+    assert state.head.tracked
+    assert state.right.tracked
+    assert not state.left.tracked
     assert np.allclose(
-        snapshot.right.pose_rb,
+        state.right.pose_rb,
         expected_pose,
     )
-    assert snapshot.right.trigger == 0.25
-    assert snapshot.right.grip == 0.75
+    assert state.right.buttons.trigger == 0.25
+    assert state.right.buttons.grip == 0.75
+    assert state.source_ip == "127.0.0.1"
 
 
-def test_analog_values_are_clamped():
-    payload = make_payload(
-        trigger=2.0,
-        grip=-1.0,
+def test_analog_values_are_clamped(receiver):
+    send_payload(
+        receiver.local_port,
+        make_payload(trigger=2.0, grip=-1.0),
     )
+    wait_for_packet_count(receiver, 1)
 
-    snapshot = parse_vr_payload(payload)
+    state = receiver.get_state()
 
-    assert snapshot.right.trigger == 1.0
-    assert snapshot.right.grip == 0.0
+    assert state.right.buttons.trigger == 1.0
+    assert state.right.buttons.grip == 0.0
 
 
-def test_receiver_keeps_latest_state():
-    receiver = VRReceiver(
-        local_ip="127.0.0.1",
-        local_port=0,
-        send_handshake=False,
+def test_receiver_keeps_latest_state(receiver):
+    send_payload(
+        receiver.local_port,
+        make_payload(trigger=0.1),
     )
-    receiver.start()
+    wait_for_packet_count(receiver, 1)
 
-    try:
-        assert receiver.bound_port is not None
-
-        send_payload(
-            receiver.bound_port,
-            make_payload(trigger=0.1),
-        )
-        send_payload(
-            receiver.bound_port,
-            make_payload(trigger=0.9),
-        )
-
-        wait_for_packet_count(receiver, 2)
-
-        state = receiver.get_state()
-
-        assert state is not None
-        assert state.right.trigger == 0.9
-        assert receiver.packet_count == 2
-    finally:
-        receiver.stop()
-
-
-def test_button_events_are_rising_edge_only():
-    receiver = VRReceiver(
-        local_ip="127.0.0.1",
-        local_port=0,
-        send_handshake=False,
+    send_payload(
+        receiver.local_port,
+        make_payload(trigger=0.9),
     )
-    receiver.start()
+    wait_for_packet_count(receiver, 2)
 
-    try:
-        port = receiver.bound_port
-        assert port is not None
+    state = receiver.get_state()
 
-        # Initial unpressed state.
-        send_payload(
-            port,
-            make_payload(primary=False),
-        )
-        wait_for_packet_count(receiver, 1)
+    assert state.right.buttons.trigger == 0.9
+    assert state.packet_count == 2
 
-        assert not receiver.consume_button_events()[
-            "right_primary"
-        ]
 
-        # Rising edge.
-        send_payload(
-            port,
-            make_payload(primary=True),
-        )
-        wait_for_packet_count(receiver, 2)
+def test_button_events_are_rising_edge_only(receiver):
+    port = receiver.local_port
 
-        assert receiver.consume_button_events()[
-            "right_primary"
-        ]
+    # Initial unpressed state.
+    send_payload(port, make_payload(primary=False))
+    wait_for_packet_count(receiver, 1)
 
-        # Still held: no second event.
-        send_payload(
-            port,
-            make_payload(primary=True),
-        )
-        wait_for_packet_count(receiver, 3)
+    assert not receiver.consume_button_events().right_primary
 
-        assert not receiver.consume_button_events()[
-            "right_primary"
-        ]
+    # Rising edge.
+    send_payload(port, make_payload(primary=True))
+    wait_for_packet_count(receiver, 2)
 
-        # Release and press again.
-        send_payload(
-            port,
-            make_payload(primary=False),
-        )
-        wait_for_packet_count(receiver, 4)
+    assert receiver.consume_button_events().right_primary
 
-        send_payload(
-            port,
-            make_payload(primary=True),
-        )
-        wait_for_packet_count(receiver, 5)
+    # Still held: no second event.
+    send_payload(port, make_payload(primary=True))
+    wait_for_packet_count(receiver, 3)
 
-        assert receiver.consume_button_events()[
-            "right_primary"
-        ]
-    finally:
-        receiver.stop()
+    assert not receiver.consume_button_events().right_primary
+
+    # Release and press again.
+    send_payload(port, make_payload(primary=False))
+    wait_for_packet_count(receiver, 4)
+
+    send_payload(port, make_payload(primary=True))
+    wait_for_packet_count(receiver, 5)
+
+    assert receiver.consume_button_events().right_primary
+
+
+def test_grip_has_no_rising_edge_event(receiver):
+    """Grip is a level, not an event.
+
+    RbVr therefore has to derive the grip rising edge itself; see
+    RbVr._update_grip_state.
+    """
+    port = receiver.local_port
+
+    send_payload(port, make_payload(grip=0.0))
+    wait_for_packet_count(receiver, 1)
+    receiver.consume_button_events()
+
+    send_payload(port, make_payload(grip=1.0))
+    wait_for_packet_count(receiver, 2)
+
+    events = receiver.consume_button_events()
+
+    assert not hasattr(events, "right_grip")
+    assert receiver.get_state().right.buttons.grip == 1.0
 
 
 def test_receiver_stale_detection():
-    receiver = VRReceiver(
+    instance = VRReceiver(
         local_ip="127.0.0.1",
-        local_port=0,
+        local_port=free_udp_port(),
+        meta_quest_ip=None,
         send_handshake=False,
+        tracking_timeout_s=0.05,
     )
-    receiver.start()
+    instance.start()
 
     try:
-        port = receiver.bound_port
-        assert port is not None
+        send_payload(
+            instance.local_port,
+            make_payload(),
+        )
+        assert instance.wait_for_first_packet(timeout_s=2.0)
 
-        send_payload(port, make_payload())
-        assert receiver.wait_for_first_packet(timeout_s=1.0)
+        assert not instance.is_stale()
 
-        assert not receiver.is_stale(0.5)
-
-        time.sleep(0.06)
-        assert receiver.is_stale(0.05)
+        time.sleep(0.1)
+        assert instance.is_stale()
     finally:
-        receiver.stop()
+        instance.stop()
+
+
+def test_state_before_any_packet_is_stale_and_untracked():
+    instance = VRReceiver(
+        local_ip="127.0.0.1",
+        local_port=free_udp_port(),
+        meta_quest_ip=None,
+        send_handshake=False,
+    )
+
+    state = instance.get_state()
+
+    assert instance.is_stale()
+    assert not state.right.tracked
+    assert not state.head.tracked
+    assert state.packet_count == 0

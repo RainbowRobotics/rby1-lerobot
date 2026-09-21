@@ -273,7 +273,7 @@ class RemotePolicyConfig:
     rename_map: dict[str, str] = field(default_factory=dict)
 
 
-def _compare_observation_states(obs1_state: torch.Tensor, obs2_state: torch.Tensor, atol: float) -> bool:
+def _compare_observation_states(obs1_state: torch.Tensor, obs2_state: torch.Tensor, atol: float=0.0000001) -> bool:
     """Check if two observation states are similar, under a tolerance threshold"""
     return bool(torch.linalg.norm(obs1_state - obs2_state) < atol)
 
