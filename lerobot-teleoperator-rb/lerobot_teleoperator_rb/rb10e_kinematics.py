@@ -222,7 +222,23 @@ class RB10E:
         self,
         q: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Update FK and geometric Jacobian for one joint vector."""
+        """Update FK and geometric Jacobian for one joint vector.
+
+        Frame convention
+        ----------------
+        Every joint axis lies on its frame's **Y** column, not Z -- see the
+        angular rows of the Jacobian below, which are all ``T_i[0:3, 1]``.
+        The tool transform is identity (no TCP or gripper offset is
+        modelled), so this convention reaches ``get_fk()`` unchanged:
+
+            ``fk[:3, 1]``    flange spin axis; invariant under joint 5
+            ``-fk[:3, 1]``   gripper approach direction, i.e. wrist -> flange
+                             (a fixed 259.3 mm along that axis)
+
+        Do NOT assume the usual "Z points out of the flange" convention.
+        Reading ``fk[:3, 2]`` as the approach axis gives an orientation
+        rotated 90 degrees from the intended one.
+        """
 
         q = self._validate_joint_vector(
             q

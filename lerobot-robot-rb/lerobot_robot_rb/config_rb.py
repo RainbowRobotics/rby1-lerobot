@@ -40,13 +40,46 @@ from .models import MODEL_SPECS
 
 
 def _default_cameras() -> dict[str, CameraConfig]:
+    """Cameras recorded into the dataset, keyed by name.
+
+    The dict key becomes the dataset feature name, i.e. ``front`` is stored
+    as ``observation.images.front``. Renaming a camera makes new recordings
+    incompatible with existing datasets, so treat these names as frozen.
+
+    ``width``/``height`` are the **output** dimensions, after ``rotation``.
+    RealSenseCamera swaps them back before asking the sensor when the
+    rotation is +/-90 degrees, so a portrait entry MUST be paired with
+    ``ROTATE_90``:
+
+        480x640 + ROTATE_90     -> sensor is asked for 640x480   (valid)
+        480x640 + NO_ROTATION   -> sensor is asked for 480x640   (D405 has
+                                   no such mode; the pipeline fails to open)
+
+    Serial numbers are the librealsense ones. They are NOT the serials that
+    ``lsusb`` or sysfs report for the same devices. Confirm with the
+    pyrealsense2 enumeration in RUN.md before changing them.
+    """
+
     return {
-        "front": RealSenseCameraConfig(
-            serial_number_or_name="260322275300",
+        # Fixed workspace view, camera mounted on its side.
+        # "front": RealSenseCameraConfig(
+        #     serial_number_or_name="315122271025",
+        #     fps=30,
+        #     width=480,
+        #     height=640,
+        #     rotation=Cv2Rotation.ROTATE_90,
+        # ),
+        # Gripper-mounted close-up view.
+        #
+        # Landscape and unrotated. If this camera is physically mounted on
+        # its side, switch to width=480, height=640 and ROTATE_90 to match
+        # "front" -- do not change only one of the two.
+        "wrist": RealSenseCameraConfig(
+            serial_number_or_name="262622274852",
             fps=30,
-            width=480,
-            height=640,
-            rotation=Cv2Rotation.ROTATE_90,
+            width=640,
+            height=480,
+            rotation=Cv2Rotation.NO_ROTATION,
         ),
     }
 
@@ -95,7 +128,7 @@ class RbCobotConfig(RobotConfig):
     #
     # lerobot-teleoperate should also be executed with:
     #     --fps=35
-    control_rate_hz: float = 35.0
+    control_rate_hz: float = 30.0
 
     # Original move_servo_j parameters:
     #
@@ -129,7 +162,11 @@ class RbCobotConfig(RobotConfig):
     gripper_ids: list[int] = field(default_factory=lambda: [0])
     gripper_invert: bool = False
 
-    # Optional LeRobot cameras. Empty by default.
+    # LeRobot cameras, keyed by name. Defaults to the two RealSense D405s in
+    # _default_cameras(). Pass --robot.cameras='{}' to record without any.
+    #
+    # Camera names share one flat namespace with joint_0..joint_5 and
+    # gripper_0 in observation_features, so do not reuse those names.
     cameras: dict[str, CameraConfig] = field(default_factory=_default_cameras)
 
     @property
@@ -158,7 +195,7 @@ class RbCobotConfig(RobotConfig):
         except ipaddress.AddressValueError as exc:
             raise ValueError(
                 f"RbCobotConfig.ip must be a valid IPv4 address, got {self.ip!r}."
-            ) from exc
+            ) 
 
         for name, value in (
             ("command_port", self.command_port),

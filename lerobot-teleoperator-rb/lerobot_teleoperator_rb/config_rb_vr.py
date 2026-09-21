@@ -7,6 +7,7 @@ implementation:
 - Controller selection and buttons
 - User reach scaling
 - RB10E target translation
+- End-effector orientation scaling
 - IK iteration count
 - Optional gripper output
 
@@ -34,10 +35,18 @@ class RbVrConfig(TeleoperatorConfig):
     Control sequence
     ----------------
     1. Receive valid controller and headset tracking.
-    2. Press the primary button to initialize user scale.
-    3. Hold Grip to enable robot following.
-    4. Release Grip to stop ServoJ transmission.
+    2. Press the primary button to arm control and move the arm to the
+       fixed home pose (constants.VR_HOME_POSE_DEG) over five seconds.
+       Grip is ignored until the arm arrives.
+    3. Press Grip to anchor, then move the hand: the arm follows the
+       controller's translation 1:1, and applies ``orientation_scale`` of
+       the controller's rotation to the end-effector orientation.
+    4. Release Grip to stop ServoJ transmission and drop the anchor. The
+       next press re-anchors, so the arm never jumps.
     5. Press the secondary button to disarm control completely.
+
+    Because the anchor is taken on the Grip rising edge, an operator who
+    holds Grip through the homing ramp must release and press again.
     """
 
     # ------------------------------------------------------------------
@@ -81,25 +90,57 @@ class RbVrConfig(TeleoperatorConfig):
     require_initialization_button: bool = True
 
     # ------------------------------------------------------------------
-    # User reach and Cartesian target
+    # End-effector orientation
     # ------------------------------------------------------------------
 
-    # Pressing A computes:
+    # Fraction of the controller's rotation since the clutch anchor that is
+    # applied to the end-effector orientation, about the same axis.
     #
-    #     user_scale =
-    #         reference_reach_mm
-    #         / measured_controller_reach_mm
+    #   0.0  the orientation is frozen at the anchor for the whole stroke.
+    #        Bit-for-bit the behaviour of every build before this knob.
+    #   0.3  a 90 deg wrist flick asks for 27 deg of tool rotation.
+    #   1.0  1:1, matching the position mapping.
+    #
+    # Turn this down first if a stroke stops tracking. A wrist flick is
+    # cheap for the operator and expensive for the arm, and at this home
+    # pose the binding joint is the ELBOW, not the wrist: j2 sits 12.11 deg
+    # from its +-154 deg IK limit and a 30 deg tool rotation about base Y
+    # spends 6.8 deg of that. IKLM clips at the limit, so the arm saturates
+    # instead of following. The wrist has more room -- j4 == 277.47 deg is
+    # 82.5 deg from the j4 == 360 deg singularity (it is singular at 0, 180
+    # and 360), and base Z rotation is what spends it, -30 deg taking j4 to
+    # within 33.9 deg. Scaling buys fine orientation control and keeps both
+    # margins; the default stays 1:1 because the operator asked for
+    # orientation to match the 1:1 position mapping.
+    #
+    # Position stays 1:1 and has no knob -- see the DEPRECATED section.
+    orientation_scale: float = 1.0
+
+    # ------------------------------------------------------------------
+    # DEPRECATED: user reach and absolute Cartesian target
+    # ------------------------------------------------------------------
+    #
+    # Every field in this section belonged to the old ABSOLUTE mapping, in
+    # which the controller's position in the torso frame was scaled and
+    # offset into an RB10E workspace target.
+    #
+    # RbVr now uses an anchored 1:1 position delta and reads NONE of them.
+    # There is deliberately no scale knob: the controller-to-end-effector
+    # mapping is 1:1 because nothing can make it otherwise.
+    #
+    # They are kept, with their validators, only so that existing shell
+    # commands and saved YAML configs carrying e.g.
+    # --teleop.target_z_offset_mm do not fail with a TypeError. Remove them
+    # once no caller passes them.
+
     auto_user_scale: bool = True
 
     reference_reach_mm: float = 1300.0
 
-    # Used when auto_user_scale=False.
     default_user_scale: float = 1300.0 / 700.0
 
-    # Additional multiplier applied after user calibration.
     position_scale: float = 1.0
 
-    # Added to the scaled RB10E target Z translation.
     target_x_offset_mm: float = 600.0
     target_y_offset_mm: float = 400.0
     target_z_offset_mm: float = 900.0
@@ -108,7 +149,9 @@ class RbVrConfig(TeleoperatorConfig):
     # Inverse kinematics
     # ------------------------------------------------------------------
 
-    # Original RB10E VR implementation uses three IKLM iterations per tick.
+    # Number of IKLM iterations per control tick. The original RB10E VR
+    # implementation used three; five converges a 100 mm step to well under
+    # a millimetre from a warm seed.
     ik_iterations: int = 5
 
     # ------------------------------------------------------------------
@@ -189,6 +232,17 @@ class RbVrConfig(TeleoperatorConfig):
             raise ValueError(
                 "grip_threshold must be finite and in [0, 1], "
                 f"got {self.grip_threshold}."
+            )
+
+        # NOT _validate_finite_positive: 0.0 is the meaningful "freeze the
+        # orientation" value, and that validator rejects it.
+        if (
+            not math.isfinite(self.orientation_scale)
+            or not 0.0 <= self.orientation_scale <= 1.0
+        ):
+            raise ValueError(
+                "orientation_scale must be finite and in [0, 1], "
+                f"got {self.orientation_scale}."
             )
 
         self._validate_finite_positive(
