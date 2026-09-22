@@ -23,8 +23,7 @@ Available modules (import directly)::
     from lerobot_async_inference.robot_client import ...
 """
 
-from lerobot.utils.import_utils import require_package
-
-require_package("grpcio", extra="async", import_name="grpc")
+# Backend modules import their own dependencies. The EE ZMQ client does not
+# use gRPC and must remain importable without the unrelated gRPC runtime.
 
 __all__: list[str] = []
