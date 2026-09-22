@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<!-- Kinematic chain copied from rbpodo_description/robots/rb10_1300e.urdf. -->
+<robot name="rb10_1300e">
+  <link name="link0"/><link name="link1"/><link name="link2"/><link name="link3"/>
+  <link name="link4"/><link name="link5"/><link name="link6"/><link name="tcp"/>
+  <joint name="base" type="revolute">
+    <origin rpy="0 0 0" xyz="0 0 0"/><parent link="link0"/><child link="link1"/>
+    <axis xyz="0 0 1"/><limit effort="10" lower="-3.14" upper="3.14" velocity="3.14"/>
+  </joint>
+  <joint name="shoulder" type="revolute">
+    <origin rpy="0 0 0" xyz="0 0 0.197"/><parent link="link1"/><child link="link2"/>
+    <axis xyz="0 1 0"/><limit effort="10" lower="-3.14" upper="3.14" velocity="3.14"/>
+  </joint>
+  <joint name="elbow" type="revolute">
+    <origin rpy="0 0 0" xyz="0 -0.1875 0.6127"/><parent link="link2"/><child link="link3"/>
+    <axis xyz="0 1 0"/><limit effort="10" lower="-3.14" upper="3.14" velocity="3.14"/>
+  </joint>
+  <joint name="wrist1" type="revolute">
+    <origin rpy="0 0 0" xyz="0 0.1484 0.57015"/><parent link="link3"/><child link="link4"/>
+    <axis xyz="0 1 0"/><limit effort="10" lower="-3.14" upper="3.14" velocity="3.14"/>
+  </joint>
+  <joint name="wrist2" type="revolute">
+    <origin rpy="0 0 0" xyz="0 -0.11715 0"/><parent link="link4"/><child link="link5"/>
+    <axis xyz="0 0 1"/><limit effort="10" lower="-3.14" upper="3.14" velocity="3.14"/>
+  </joint>
+  <joint name="wrist3" type="revolute">
+    <origin rpy="0 0 0" xyz="0 0 0.11715"/><parent link="link5"/><child link="link6"/>
+    <axis xyz="0 1 0"/><limit effort="10" lower="-3.14" upper="3.14" velocity="3.14"/>
+  </joint>
+  <joint name="tcp_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0 -0.1153 0"/><parent link="link6"/><child link="tcp"/>
+  </joint>
+</robot>

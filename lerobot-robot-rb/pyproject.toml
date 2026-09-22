@@ -31,3 +31,6 @@ gripper-rby1 = ["rby1-sdk"]
 where = ["."]
 include = ["lerobot_robot_rb*"]
 exclude = ["*.egg-info"]
+
+[tool.setuptools.package-data]
+lerobot_robot_rb = ["urdf/*.urdf"]
