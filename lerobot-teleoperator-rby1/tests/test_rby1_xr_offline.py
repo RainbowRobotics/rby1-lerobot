@@ -465,3 +465,60 @@ def test_posture_hint_keys_and_recording(stubbed_pipeline, monkeypatch):
     clock[0] += 5.0
     a = t.get_action()
     assert "right_arm_0.null" not in a
+
+
+def _shoulders_body(right_xy, left_xy, z=1.5):
+    pos = np.zeros((24, 3), np.float32)
+    pos[BodyJointIndex.RIGHT_SHOULDER] = [right_xy[0], right_xy[1], z]
+    pos[BodyJointIndex.LEFT_SHOULDER] = [left_xy[0], left_xy[1], z]
+    return fakes.body(positions=pos)
+
+
+def test_reference_prefers_shoulder_line_over_head(stubbed_pipeline):
+    session = fakes.FakeSession()
+    # Shoulders: right at (0,-0.2), left at (0,+0.2) -> facing +X, even though the head looks 60 deg left.
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(60)), body=_shoulders_body((0, -0.2), (0, 0.2))))
+    readers: list = []
+    # Body tracking is only in the pipeline when something needs it (torso / hint / absolute mode).
+    t = make_teleop(session, readers, torso_source="none", use_torso=False, use_head=False, arm_posture_hint=True)
+    t.connect()
+    t.get_action()
+    assert t._yaw_correction == pytest.approx(0.0, abs=1e-6)
+    # Operator turns 90 deg left (shoulders now along -x .. +x): facing +Y.
+    session.push(_frame(right=fakes.controller(primary=True), body=_shoulders_body((0.2, 0), (-0.2, 0))))
+    t.get_action()
+    assert t._yaw_correction == pytest.approx(-math.pi / 2, abs=1e-6)
+
+
+def test_right_a_latches_orientation_against_start_pose(stubbed_pipeline, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    body = _body_with_arm("right", [0, -0.3, 1.5], [0, -0.3, 1.2], [0, -0.3, 0.9])
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller((0.3, -0.3, 1.5)), body=body))
+    readers: list = []
+    t = make_teleop(
+        session, readers, arm_mode="ee_absolute", torso_source="none", use_torso=False,
+        use_left_arm=False, use_head=False, engage_ramp_s=0.5, ee_max_linear_vel=100.0, ee_max_angular_vel=100.0,
+        shoulder_smoothing=1.0, arm_length_source="config", human_arm_length_m=0.6, ready_return_duration_s=0.5,
+    )
+    t.connect()
+    t.get_action()  # start pose recorded, offset latched (controller identity -> start orientation)
+    start_R = readers[0].right_ee[:3, :3].copy()
+    # The robot is now somewhere else (arm moved), the operator presses A while the
+    # controller is rotated 30 deg about z: after the return, squeezing with the
+    # controller in that same orientation must reproduce the START orientation.
+    readers[0].right_ee[:3, :3] = Rotation.from_euler("x", 45, degrees=True).as_matrix()
+    q30 = Rotation.from_euler("z", 30, degrees=True).as_quat()
+    session.push(_frame(right=fakes.controller((0.3, -0.3, 1.5), quat=q30, primary=True), body=body))
+    t.get_action()
+    clock[0] += 1.0
+    session.push(_frame(right=fakes.controller((0.3, -0.3, 1.5), quat=q30), body=body))
+    t.get_action()  # return motion finished
+    readers[0].right_ee[:3, :3] = start_R  # robot is back at the start orientation
+    session.push(_frame(right=fakes.controller((0.3, -0.3, 1.5), quat=q30, squeeze=0.9), body=body))
+    t.get_action()  # engage (ramp from start)
+    clock[0] += 1.0
+    a = t.get_action()
+    R_cmd = Rotation.from_rotvec([a["right_ee.wx"], a["right_ee.wy"], a["right_ee.wz"]]).as_matrix()
+    np.testing.assert_allclose(R_cmd, start_R, atol=1e-6)

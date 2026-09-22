@@ -65,6 +65,10 @@ class AbsoluteEeMapper:
         """Make the current controller orientation map onto the measured EE orientation."""
         self._R_offset = np.asarray(R_ctrl, dtype=float)[:3, :3].T @ np.asarray(R_ee_measured, dtype=float)[:3, :3]
 
+    def reset_shoulder(self) -> None:
+        """Forget the smoothed shoulder (e.g. after the operator frame was re-referenced)."""
+        self._shoulder = None
+
     def reset_rate_limit(self, T: np.ndarray | None) -> None:  # noqa: N803
         self._last_T = None if T is None else np.asarray(T, dtype=float).copy()
 

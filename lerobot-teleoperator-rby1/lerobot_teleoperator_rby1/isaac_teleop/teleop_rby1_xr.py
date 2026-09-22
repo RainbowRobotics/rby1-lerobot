@@ -341,17 +341,46 @@ class Rby1XR(IsaacTeleopTeleoperator):
         return rotate_frame_about_z(raw, self._yaw_correction)
 
     def _set_reference_from_head(self, raw: XRFrame) -> bool:
-        """Make the operator's current facing direction robot +X. Returns True if taken."""
-        if raw.head is None:
-            return False
-        yaw, _ = head_yaw_pitch(raw.head.pose)
+        """Make the operator's current facing direction robot +X. Returns True if taken.
+
+        The facing direction is taken from the body-tracking shoulder line
+        when both shoulders are valid (robust to where the operator looks),
+        otherwise from the head gaze.
+        """
+        yaw: float | None = None
+        source = ""
+        if raw.body is not None:
+            ls, rs = int(BodyJointIndex.LEFT_SHOULDER), int(BodyJointIndex.RIGHT_SHOULDER)
+            if bool(raw.body.valid[ls]) and bool(raw.body.valid[rs]):
+                across = raw.body.positions[ls] - raw.body.positions[rs]  # right -> left
+                fwd = np.cross(across, np.array([0.0, 0.0, 1.0]))
+                if np.linalg.norm(fwd[:2]) > 1e-3:
+                    yaw = math.atan2(fwd[1], fwd[0])
+                    source = "shoulder line"
+        if yaw is None:
+            if raw.head is None:
+                return False
+            yaw, _ = head_yaw_pitch(raw.head.pose)
+            source = "head gaze"
+        old = self._yaw_correction
         self._yaw_correction = -yaw
         self._needs_reference = False
         logger.info(
-            "Operator frame re-referenced: head yaw %.1f deg in the XR anchor frame is now robot +X.",
+            "Operator frame re-referenced from the %s: yaw %.1f deg in the XR anchor frame is now robot +X.",
+            source,
             math.degrees(yaw),
         )
+        if abs(_wrap_angle(self._yaw_correction - old)) > 1e-6 or self._needs_offset_latch:
+            self._on_reference_changed()
         return True
+
+    def _on_reference_changed(self) -> None:
+        """Everything derived from the operator frame must start over."""
+        for mapper in self._abs.values():
+            mapper.reset_shoulder()
+        for retargeter in self._posture.values():
+            retargeter.reset()
+        self._needs_offset_latch = True
 
     def _wait_for_tracking(self) -> None:
         """Block until a controller is tracked (user-paced; Ctrl-C aborts)."""
@@ -649,16 +678,23 @@ class Rby1XR(IsaacTeleopTeleoperator):
         return out[0], out[1], out[2]
 
     def _latch_orientation_offsets(self, frame: XRFrame, snap: RobotSnapshot) -> None:
+        """Controller orientation now ↦ the START pose gripper orientation.
+
+        Right A returns the arms to the start pose, so the offset must map the
+        controller onto that pose (not onto wherever the arm happens to be
+        when A is pressed); on the first action the two coincide.
+        """
+        ref = self._start_snapshot if self._start_snapshot is not None else snap
         latched = []
-        for side, ctrl, measured in (("right", frame.right, snap.right_ee), ("left", frame.left, snap.left_ee)):
+        for side, ctrl, target in (("right", frame.right, ref.right_ee), ("left", frame.left, ref.left_ee)):
             mapper = self._abs.get(side)
             if mapper is None or ctrl is None:
                 continue
-            mapper.latch_orientation_offset(ctrl.pose[:3, :3], measured[:3, :3])
+            mapper.latch_orientation_offset(ctrl.pose[:3, :3], target[:3, :3])
             latched.append(side)
         if latched:
             self._needs_offset_latch = False
-            logger.info("Absolute EE orientation offset latched for %s (controller ↦ measured EE).", latched)
+            logger.info("Absolute EE orientation offset latched for %s (controller ↦ start-pose EE).", latched)
 
     def _update_arm_absolute(self, side: str, frame: XRFrame, snap: RobotSnapshot, t: float, dt: float) -> None:
         clutch = self._clutch[side]
@@ -943,6 +979,10 @@ class _ReturnMotion:
         return self.finished and self.t_done is not None and (
             time.monotonic() - self.t_done > self.SETTLE_S
         )
+
+
+def _wrap_angle(a: float) -> float:
+    return float((a + math.pi) % (2.0 * math.pi) - math.pi)
 
 
 def _pose_drift(
