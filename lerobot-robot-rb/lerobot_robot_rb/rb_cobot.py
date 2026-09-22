@@ -49,6 +49,9 @@ from .models import DOF, GRIPPER_NAME, JOINT_NAMES, MODEL_SPECS
 logger = logging.getLogger(__name__)
 
 
+_INFERENCE_URDF_JOINT_LIMIT_RAD = 3.14
+
+
 # The standard LeRobot CLI connects the Robot before the Teleoperator.
 # The VR Teleoperator uses this reference to:
 #
@@ -241,6 +244,10 @@ class RbCobot(Robot):
         # it after A-button initialisation and Grip activation.
         self._servo_enabled = False
 
+        # Safe-start actuator preparation is performed once per connection,
+        # on the first explicit ServoJ gate enable.
+        self._inference_prepared = False
+
         # Last requested LeRobot joint action, radians.
         self._last_action_rad: np.ndarray | None = None
 
@@ -375,10 +382,11 @@ class RbCobot(Robot):
             self._cobot = cobot
             self._robot = cobot
 
-            cobot.set_ff_gain_off()
-            time.sleep(0.5)
-            cobot.set_joint_space_impedance()
-            time.sleep(0.5)
+            if not cfg.inference_safe_start:
+                cobot.set_ff_gain_off()
+                time.sleep(0.5)
+                cobot.set_joint_space_impedance()
+                time.sleep(0.5)
 
             if cfg.set_speed_bar_on_connect:
                 cobot.SetBaseSpeed(cfg.speed_bar)
@@ -391,13 +399,17 @@ class RbCobot(Robot):
                 cfg,
                 cobot,
             )
-            if self._gripper is not None:
+            if (
+                self._gripper is not None
+                and not cfg.inference_safe_start
+            ):
                 self._gripper.connect()
 
             for camera in self.cameras.values():
                 camera.connect()
 
-            self._servo_enabled = True
+            self._servo_enabled = not cfg.inference_safe_start
+            self._inference_prepared = False
             self._last_action_rad = None
             self._is_connected = True
 
@@ -472,6 +484,7 @@ class RbCobot(Robot):
         self._cobot = None
         self._robot = None
         self._servo_enabled = False
+        self._inference_prepared = False
         self._last_action_rad = None
         self._is_connected = False
 
@@ -519,6 +532,24 @@ class RbCobot(Robot):
     # Servo command gate
     # ------------------------------------------------------------------
 
+    def _prepare_inference_actuators(self) -> None:
+        if (
+            not self._config.inference_safe_start
+            or self._inference_prepared
+        ):
+            return
+
+        if self._gripper is not None:
+            self._gripper.connect()
+
+        cobot = self.low_level_cobot
+        cobot.set_ff_gain_off()
+        time.sleep(0.5)
+        cobot.set_joint_space_impedance()
+        time.sleep(0.5)
+
+        self._inference_prepared = True
+
     def set_servo_enabled(self, enabled: bool) -> None:
         """Enable or disable transmission of arm ServoJ commands.
 
@@ -534,6 +565,9 @@ class RbCobot(Robot):
             raise DeviceNotConnectedError(
                 f"{self} is not connected."
             )
+
+        if enabled:
+            self._prepare_inference_actuators()
 
         if self._servo_enabled == enabled:
             return
@@ -665,6 +699,9 @@ class RbCobot(Robot):
         # Dataset convention: 1.0 = open.
         # Gripper hardware convention: 0.0 = open.
         if self._gripper is not None:
+            # get_position() is always the driver's cached last-command
+            # binary state, not a hardware measurement. Before inference-safe
+            # preparation, that cache holds the hypothetical open default.
             observation[GRIPPER_NAME] = (
                 1.0 - self._gripper.get_position()
             )
@@ -714,7 +751,49 @@ class RbCobot(Robot):
                 f"{joint_rad.tolist()}."
             )
 
+        if self._config.inference_safe_start:
+            model_limits_rad = np.deg2rad(
+                np.asarray(
+                    self._spec.joint_limits_deg,
+                    dtype=np.float64,
+                )
+            )
+            lower = np.maximum(
+                model_limits_rad[:, 0],
+                -_INFERENCE_URDF_JOINT_LIMIT_RAD,
+            )
+            upper = np.minimum(
+                model_limits_rad[:, 1],
+                _INFERENCE_URDF_JOINT_LIMIT_RAD,
+            )
+            outside = (joint_rad < lower) | (joint_rad > upper)
+            if np.any(outside):
+                invalid = [
+                    JOINT_NAMES[index]
+                    for index in np.flatnonzero(outside)
+                ]
+                raise ValueError(
+                    "RB inference joint action exceeds the safety "
+                    f"envelope for: {', '.join(invalid)}."
+                )
+
         return joint_rad
+
+    def _validated_gripper_target(
+        self,
+        action: dict[str, Any],
+    ) -> float | None:
+        if self._gripper is None or GRIPPER_NAME not in action:
+            return None
+
+        dataset_target = float(action[GRIPPER_NAME])
+        if not np.isfinite(dataset_target):
+            raise ValueError(
+                "RB gripper action must be finite, "
+                f"got {dataset_target}."
+            )
+
+        return float(np.clip(dataset_target, 0.0, 1.0))
 
     def send_action(
         self,
@@ -731,6 +810,9 @@ class RbCobot(Robot):
                 f"{self} is not connected."
             )
 
+        dataset_gripper_target = self._validated_gripper_target(
+            action
+        )
         joint_rad = self._joint_action_to_array(action)
         self._last_action_rad = joint_rad.copy()
 
@@ -755,22 +837,25 @@ class RbCobot(Robot):
                     "RB control box rejected the ServoJ command."
                 )
 
-        if self._gripper is not None and GRIPPER_NAME in action:
+        gripper_gate_open = (
+            self._servo_enabled
+            or not self._config.inference_safe_start
+        )
+        if (
+            self._gripper is not None
+            and dataset_gripper_target is not None
+            and gripper_gate_open
+        ):
             # Dataset convention:
             #   1.0 = open
             #
             # Hardware driver convention:
             #   0.0 = open
-            dataset_target = float(
-                np.clip(
-                    float(action[GRIPPER_NAME]),
-                    0.0,
-                    1.0,
-                )
-            )
-            hardware_target = 1.0 - dataset_target
+            hardware_target = 1.0 - dataset_gripper_target
 
             self._gripper.set_position(hardware_target)
-            sent[GRIPPER_NAME] = dataset_target
+
+        if dataset_gripper_target is not None:
+            sent[GRIPPER_NAME] = dataset_gripper_target
 
         return sent

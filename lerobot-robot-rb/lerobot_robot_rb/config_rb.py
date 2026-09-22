@@ -150,6 +150,12 @@ class RbCobotConfig(RobotConfig):
     set_speed_bar_on_connect: bool = False
     speed_bar: float = 0.3
 
+    # Defer all actuator preparation until the caller explicitly enables
+    # ServoJ transmission. This is intended for policy inference, where
+    # connecting must remain observation-only until an external safety gate
+    # is opened.
+    inference_safe_start: bool = False
+
     # Optional gripper.
     #
     # "none":
@@ -245,6 +251,12 @@ class RbCobotConfig(RobotConfig):
             raise ValueError(
                 "RbCobotConfig.speed_bar must be in (0, 1], "
                 f"got {self.speed_bar}."
+            )
+
+        if not isinstance(self.inference_safe_start, bool):
+            raise TypeError(
+                "RbCobotConfig.inference_safe_start must be a bool, "
+                f"got {type(self.inference_safe_start).__name__}."
             )
 
         if self.gripper_type not in ("none", "rby1_dynamixel"):
