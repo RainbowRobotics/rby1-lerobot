@@ -163,7 +163,7 @@ def test_torso_follows_body_only_when_both_arms_clutched(stubbed_pipeline):
     session = fakes.FakeSession()
     session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.9), body=body0))
     readers: list = []
-    t = make_teleop(session, readers, torso_source="body", torso_max_z_delta_m=0.15)
+    t = make_teleop(session, readers, torso_source="body", torso_max_z_delta_m=0.15, torso_max_rot_delta_deg=35.0, torso_use_xy=False)
     t.connect()
     a = t.get_action()  # both arms engage; torso engages on the same tick
     z0 = readers[0].torso[2, 3]
