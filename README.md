@@ -289,7 +289,7 @@ lerobot-record \
 | `ready_return_duration_s` | `4.0` | Duration of the Right-A return-to-start motion |
 | `resync_position_threshold_m`, `resync_rotation_threshold_deg` | `0.03`, `10` | Targets are re-seeded from the measured pose on the first action and whenever a component that is not clutched drifted past these (record reset, manual move) |
 | `status_log_period_s` | `5.0` | Log a one-line tracking / clutch status (controllers, head, body joints valid, why the torso holds); 0 = off |
-| `torso_max_rot_delta_deg`, `torso_max_z_delta_m` | `35`, `0.15` | Safety clamps on the torso delta since engage |
+| `torso_max_rot_delta_deg`, `torso_max_z_delta_m`, `torso_use_xy` | `90`, `0.15`, `True` | Safety clamps on the torso delta since engage (rotation, height); `torso_use_xy` also passes the x/y translation of the chest through |
 
 ### Observation / Action Keys
 

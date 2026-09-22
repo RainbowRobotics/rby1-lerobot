@@ -127,9 +127,9 @@ class Rby1XRConfig(IsaacTeleopConfig):
     )
     torso_rot_scale: float = 1.0
     torso_z_scale: float = 1.0
-    torso_use_xy: bool = False
+    torso_use_xy: bool = True
     # Safety clamps on the delta from the torso pose latched at engage.
-    torso_max_rot_delta_deg: float = 35.0
+    torso_max_rot_delta_deg: float = 90.0
     torso_max_z_delta_m: float = 0.15
 
     # ── Right A: return to the start pose ─────────────────────────────
