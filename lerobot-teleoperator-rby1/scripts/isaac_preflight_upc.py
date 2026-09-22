@@ -317,10 +317,17 @@ def stage_S_headset(args) -> dict:
     PELVIS / SPINE3 / NECK joints valid, and SPINE3 must move when you bend.
     """
     from lerobot_teleoperator_rby1.isaac_teleop.config_isaac_teleop import DEFAULT_BASE_T_ANCHOR
+    from lerobot_teleoperator_rby1.isaac_teleop.arm_retargeter import ArmPostureRetargeter
     from lerobot_teleoperator_rby1.isaac_teleop.teleop_rby1_xr import print_xr_connect_help
     from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import BodyJointIndex, frame_from_outputs
 
     required = [BodyJointIndex.PELVIS, BodyJointIndex.SPINE3, BodyJointIndex.NECK]
+    posture = {side: ArmPostureRetargeter(side, smoothing=1.0, max_vel=100.0) for side in ("right", "left")}
+    arm_idx = {
+        "right": (BodyJointIndex.RIGHT_SHOULDER, BodyJointIndex.RIGHT_ELBOW, BodyJointIndex.RIGHT_WRIST),
+        "left": (BodyJointIndex.LEFT_SHOULDER, BodyJointIndex.LEFT_ELBOW, BodyJointIndex.LEFT_WRIST),
+    }
+    eye3 = __import__("numpy").eye(3)
     seen = {"right": False, "left": False, "head": False, "body": False, "body_required_valid": False}
     steps = 0
     body_valid_max = 0
@@ -341,6 +348,15 @@ def stage_S_headset(args) -> dict:
                 body_valid_max = max(body_valid_max, int(f.body.valid.sum()))
                 seen["body_required_valid"] |= all(bool(f.body.valid[i]) for i in required)
             now = time.monotonic()
+            hints = {}
+            if f.body is not None:
+                for side, (si, ei, wi) in arm_idx.items():
+                    pts = [f.body.positions[int(i)] if bool(f.body.valid[int(i)]) else None for i in (si, ei, wi)]
+                    ctrl = f.right if side == "right" else f.left
+                    if ctrl is not None:
+                        pts[2] = ctrl.position  # controller grip = wrist point (as in the teleop)
+                    h = posture[side].update(pts[0], pts[1], pts[2], eye3, now, 0.02)
+                    hints[side] = None if h is None else __import__("numpy").rad2deg(h).round(0).astype(int).tolist()
             if now - last_print >= 1.0:
                 last_print = now
                 raw_body = out.get("full_body")
@@ -358,7 +374,8 @@ def stage_S_headset(args) -> dict:
                 _log(
                     f"t={now - t0:5.1f}s right=[{_c(r)}] left=[{_c(f.left)}] "
                     f"head={'-' if h is None else h.position.round(2)} "
-                    f"body[raw={raw_state}]={'-' if b is None else f'valid={int(b.valid.sum())}/24 req_ok={all(bool(b.valid[i]) for i in required)} spine3={b.positions[BodyJointIndex.SPINE3].round(2)}'}"
+                    f"body[raw={raw_state}]={'-' if b is None else f'valid={int(b.valid.sum())}/24 req_ok={all(bool(b.valid[i]) for i in required)} spine3={b.positions[BodyJointIndex.SPINE3].round(2)}'} "
+                    f"hint(deg) R={hints.get('right')} L={hints.get('left')}"
                 )
             time.sleep(0.01)
     return {"seen": seen, "steps": steps, "body_valid_max": body_valid_max, "body_in_graph": body_in_graph}

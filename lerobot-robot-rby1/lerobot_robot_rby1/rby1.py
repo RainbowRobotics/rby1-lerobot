@@ -56,6 +56,8 @@ from .constants import (
     ARM_DOF,
     BASE_VEL_NAMES,
     HEAD_NAMES,
+    NULL_SUFFIX,
+    POSTURE_HINT_JOINTS,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
     POS_SUFFIX,
@@ -138,6 +140,7 @@ class Rby1(Robot):
         self._last_ee_targets: cb.CartesianTargets | None = None
         self._null_right: np.ndarray = np.deg2rad(config.null_right_arm_deg)
         self._null_left: np.ndarray = np.deg2rad(config.null_left_arm_deg)
+        self._warned_hint_wb = False
         # EE mode: dynamics model + FK state for end-effector observations.
         self._dyn_robot: Any = None
         self._fk_state: Any = None
@@ -196,6 +199,11 @@ class Rby1(Robot):
             features = {f"{name}{POS_SUFFIX}": float for name in names}
         # The head is joint-space in both modes.
         features.update(self._head_ft)
+        if self._config.action_mode == "ee" and self._config.record_posture_hint:
+            for side, enabled in (("right", self._config.use_right_arm), ("left", self._config.use_left_arm)):
+                if enabled:
+                    for i in range(POSTURE_HINT_JOINTS):
+                        features[f"{side}_arm_{i}{NULL_SUFFIX}"] = float
         return features
 
     @property
@@ -877,8 +885,10 @@ class Rby1(Robot):
         if cfg.ee_whole_body:
             body = cb.build_whole_body_command(rby, cfg, targets, reset)
         else:
+            null_right, w_right = self._nullspace_with_hint(action, "right", self._null_right)
+            null_left, w_left = self._nullspace_with_hint(action, "left", self._null_left)
             body = cb.build_per_component_command(
-                rby, cfg, targets, reset, self._null_right, self._null_left
+                rby, cfg, targets, reset, null_right, null_left, w_right, w_left
             )
         cbc = rby.ComponentBasedCommandBuilder().set_body_command(body)
         self._add_head_command(
@@ -895,6 +905,28 @@ class Rby1(Robot):
             rby.RobotCommandBuilder().set_command(cbc)
         )
         self._last_ee_targets = targets
+
+    def _nullspace_with_hint(
+        self, action: dict[str, Any], side: str, default: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        """Nullspace target / weight for one arm, overridden by `<side>_arm_<i>.null` keys.
+
+        Returns ``(target, None)`` (config weights) when the action carries no
+        complete hint; otherwise the hinted joints replace the default target
+        and get ``posture_hint_weight`` while the others keep ``nullspace_weight``.
+        """
+        keys = [f"{side}_arm_{i}{NULL_SUFFIX}" for i in range(POSTURE_HINT_JOINTS)]
+        if not all(k in action for k in keys):
+            return default, None
+        target = np.asarray(default, dtype=np.float64).copy()
+        weight = np.asarray(self._config.nullspace_weight, dtype=np.float64).copy()
+        for i, k in enumerate(keys):
+            target[i] = float(action[k])
+            weight[i] = self._config.posture_hint_weight
+        if not self._warned_hint_wb and self._config.ee_whole_body:
+            logger.warning("Posture hint keys received but ee_whole_body=True has no nullspace target; ignored.")
+            self._warned_hint_wb = True
+        return target, weight
 
     def _head_target_from_action(self, action: dict[str, Any]) -> np.ndarray | None:
         """Return the (2,) head joint target from the action, or None.

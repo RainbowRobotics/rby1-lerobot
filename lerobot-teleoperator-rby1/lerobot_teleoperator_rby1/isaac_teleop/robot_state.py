@@ -29,14 +29,17 @@ class RobotSnapshot:
     right_ee: np.ndarray
     left_ee: np.ndarray
     head_q: np.ndarray
+    right_q: np.ndarray | None = None  # (7,) rad
+    left_q: np.ndarray | None = None
 
 
 class Rby1StateReader:
     """Read-only ``rby1_sdk`` link: joint state + FK of torso / both hands."""
 
-    def __init__(self, address: str, model: str) -> None:
+    def __init__(self, address: str, model: str, version: str = "auto") -> None:
         self.address = address
         self.model_name = model
+        self.version = version  # "auto" is resolved in connect() (robot probe)
         self._robot: Any = None
         self._model: Any = None
         self._dyn: Any = None
@@ -58,7 +61,19 @@ class Rby1StateReader:
         self._model = robot.model()
         self._dyn = robot.get_dynamics()
         self._state = self._dyn.make_state(FK_LINKS, self._model.robot_joint_names)
-        logger.info("Read-only RB-Y1 state link open at %s", self.address)
+        if self.version == "auto":
+            self.version = self._probe_version()
+        logger.info("Read-only RB-Y1 state link open at %s (version %s)", self.address, self.version)
+
+    def _probe_version(self) -> str:
+        try:
+            from lerobot_robot_rby1.model_probe import resolve_model_version
+
+            _, version = resolve_model_version(self.model_name, "auto", self.address)
+            return version or "1.3"
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not probe the robot version (%s); assuming 1.3.", e)
+            return "1.3"
 
     def read(self) -> RobotSnapshot:
         if self._robot is None:
@@ -77,7 +92,9 @@ class Rby1StateReader:
             self._dyn.compute_transformation(self._state, _IDX_BASE, _IDX_LEFT_ARM_6), dtype=float
         )
         head_q = np.asarray(q[self._model.head_idx], dtype=np.float64).copy()
-        return RobotSnapshot(torso, right, left, head_q)
+        right_q = np.asarray(q[self._model.right_arm_idx], dtype=np.float64).copy()
+        left_q = np.asarray(q[self._model.left_arm_idx], dtype=np.float64).copy()
+        return RobotSnapshot(torso, right, left, head_q, right_q, left_q)
 
     def close(self) -> None:
         if self._robot is not None:

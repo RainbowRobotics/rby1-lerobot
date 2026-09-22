@@ -30,6 +30,10 @@ SESSION_START_CHOICES = ("connect", "first_action")
 LATCH_ORIENTATION_CHOICES = ("measured", "commanded")
 TORSO_SOURCE_CHOICES = ("body", "head", "none")
 TORSO_ENGAGE_CHOICES = ("both_arms", "any_arm", "always")
+ARM_MODE_CHOICES = ("ee_clutch", "ee_absolute")
+ARM_LENGTH_SOURCE_CHOICES = ("body", "config")
+HINT_WRIST_SOURCE_CHOICES = ("controller", "body")
+ROBOT_VERSION_CHOICES = ("auto", "1.2", "1.3")
 
 
 @dataclass(kw_only=True)
@@ -80,8 +84,46 @@ class Rby1XRConfig(IsaacTeleopConfig):
     use_mobile_base: bool = True
     use_head: bool = True
 
+    # ── Arm mapping mode ──────────────────────────────────────────────
+    # "ee_clutch":   squeeze latches a clutch; the arm follows the controller
+    #                DELTA from that moment (re-anchorable, no calibration).
+    # "ee_absolute": the hand position RELATIVE TO THE OPERATOR'S SHOULDER
+    #                (IOBT body tracking) is scaled by the robot/human reach
+    #                ratio onto the robot shoulder; the orientation is the
+    #                controller orientation times an offset latched on Right A.
+    #                Squeeze is a dead-man switch (follow while held, hold
+    #                when released); (re-)engaging ramps to the absolute
+    #                target over `engage_ramp_s`. Needs body tracking.
+    arm_mode: str = "ee_clutch"
+    engage_ramp_s: float = 2.0
+    ee_position_scale: float = 1.0          # extra multiplier on the reach ratio
+    ee_reach_max_ratio: float = 0.98        # clamp |hand - shoulder| to this × robot reach
+    arm_length_source: str = "body"         # "body" (IOBT |S-E|+|E-W|) | "config"
+    human_arm_length_m: float = 0.62        # used when arm_length_source="config"
+    shoulder_smoothing: float = 0.2         # EMA on the IOBT shoulder position
+    ee_max_linear_vel: float = 1.0          # m/s rate limit of the absolute target
+    ee_max_angular_vel: float = 3.0         # rad/s
+    ee_orientation_latch_on_a: bool = True  # Right A: controller orientation ↦ measured EE
+    ee_orientation_offset_rpy_deg: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    abs_hold_s: float = 1.0                 # keep following this long without body joints
+    # Robot version selects the reach constants ("auto" = probe the robot).
+    robot_version: str = "auto"
+
+    # ── IOBT arm posture → nullspace hint (both arm modes) ────────────
+    # Shoulder / elbow / hand positions are retargeted to arm_0..arm_3 and sent
+    # as `<side>_arm_<i>.null` keys; the follower uses them as the Cartesian
+    # solver's nullspace target (soft, EE has priority). Not recorded unless
+    # record_posture_hint (then the dataset action gains 8 dims).
+    arm_posture_hint: bool = False
+    record_posture_hint: bool = False
+    posture_hint_smoothing: float = 0.3
+    posture_hint_max_vel: float = 2.0       # rad/s per joint
+    posture_hint_hold_s: float = 1.0
+    hint_wrist_source: str = "controller"   # "controller" (grip position) | "body" (IOBT wrist)
+
     # ── Clutch ────────────────────────────────────────────────────────
-    # Squeeze value above which an arm follows its controller.
+    # Squeeze value above which an arm follows its controller (dead-man
+    # switch in ee_absolute mode).
     clutch_threshold: float = 0.5
     # "measured": on engage, latch both home position AND orientation from the
     # measured EE pose (7-DOF arms track orientation, so no offset builds up).
@@ -173,6 +215,18 @@ class Rby1XRConfig(IsaacTeleopConfig):
             raise ValueError(
                 f"torso_engage must be one of {TORSO_ENGAGE_CHOICES}, got {self.torso_engage!r}"
             )
+        for name, value, choices in (
+            ("arm_mode", self.arm_mode, ARM_MODE_CHOICES),
+            ("arm_length_source", self.arm_length_source, ARM_LENGTH_SOURCE_CHOICES),
+            ("hint_wrist_source", self.hint_wrist_source, HINT_WRIST_SOURCE_CHOICES),
+            ("robot_version", self.robot_version, ROBOT_VERSION_CHOICES),
+        ):
+            if value not in choices:
+                raise ValueError(f"{name} must be one of {choices}, got {value!r}")
+        if self.record_posture_hint and not self.arm_posture_hint:
+            raise ValueError("record_posture_hint requires arm_posture_hint=True")
+        if len(self.ee_orientation_offset_rpy_deg) != 3:
+            raise ValueError("ee_orientation_offset_rpy_deg must have 3 values")
         if self.robot_model.strip().lower() not in ("a", "m", "ub"):
             raise ValueError(f'robot_model must be "a", "m" or "ub", got {self.robot_model!r}')
         if not (0.0 < self.head_smoothing <= 1.0):
@@ -185,3 +239,8 @@ class Rby1XRConfig(IsaacTeleopConfig):
                 raise ValueError(
                     f"Unknown body joint {name!r}; expected one of {sorted(valid_joints)}"
                 )
+
+    @property
+    def needs_body(self) -> bool:
+        """Whether the FullBodySource must be in the pipeline."""
+        return self.torso_source == "body" or self.arm_mode == "ee_absolute" or self.arm_posture_hint

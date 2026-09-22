@@ -364,3 +364,104 @@ def test_right_a_rereferences_operator_yaw(stubbed_pipeline, monkeypatch):
     a = t.get_action()
     assert a["right_ee.x"] == pytest.approx(x0 + 0.2)  # forward for the operator -> robot +X
     assert a["right_ee.y"] == pytest.approx(y0)
+
+
+def _body_with_arm(side, shoulder, elbow, wrist):
+    pos = np.zeros((24, 3), np.float32)
+    idx = {
+        "right": (BodyJointIndex.RIGHT_SHOULDER, BodyJointIndex.RIGHT_ELBOW, BodyJointIndex.RIGHT_WRIST),
+        "left": (BodyJointIndex.LEFT_SHOULDER, BodyJointIndex.LEFT_ELBOW, BodyJointIndex.LEFT_WRIST),
+    }[side]
+    for i, p in zip(idx, (shoulder, elbow, wrist)):
+        pos[int(i)] = p
+    return fakes.body(positions=pos)
+
+
+def test_absolute_mode_deadman_ramp_track_hold(stubbed_pipeline, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    # Human: shoulder at (0,-0.3,1.5), arm straight down (elbow / wrist below), reach 0.6.
+    body = _body_with_arm("right", [0, -0.3, 1.5], [0, -0.3, 1.2], [0, -0.3, 0.9])
+    hand0 = (0.0, -0.3, 0.9)
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(hand0), body=body))
+    readers: list = []
+    t = make_teleop(
+        session, readers, arm_mode="ee_absolute", torso_source="none", use_torso=False,
+        use_left_arm=False, use_head=False, engage_ramp_s=1.0, ee_max_linear_vel=100.0,
+        shoulder_smoothing=1.0, arm_length_source="config", human_arm_length_m=0.6,
+    )
+    t.connect()
+    a = t.get_action()  # first action: start pose + orientation offset latched
+    x0 = readers[0].right_ee[0, 3]
+    assert a["right_ee.x"] == pytest.approx(x0)  # dead-man not held -> hold
+    reach = mod.robot_reach("1.3")
+    # Hand 0.3 m in front of the human shoulder -> robot: shoulder + 0.3 * (reach / 0.6) along x.
+    hand = (0.3, -0.3, 1.5)
+    goal_x = readers[0].torso[0, 3] + 0.0 + 0.3 * reach / 0.6
+    session.push(_frame(right=fakes.controller(hand, squeeze=0.9), body=body))
+    a = t.get_action()  # engage edge: ramp starts at the current target
+    assert a["right_ee.x"] == pytest.approx(x0)
+    clock[0] += 0.5
+    a = t.get_action()  # halfway (smoothstep(0.5) = 0.5)
+    assert a["right_ee.x"] == pytest.approx(x0 + 0.5 * (goal_x - x0))
+    clock[0] += 0.6
+    a = t.get_action()  # ramp done -> tracking the absolute target
+    assert a["right_ee.x"] == pytest.approx(goal_x)
+    assert t._abs_state["right"] == "track"
+    # Move the hand: target follows absolutely (no clutch delta).
+    hand2 = (0.15, -0.3, 1.5)
+    clock[0] += 0.02
+    session.push(_frame(right=fakes.controller(hand2, squeeze=0.9), body=body))
+    a = t.get_action()
+    assert a["right_ee.x"] == pytest.approx(readers[0].torso[0, 3] + 0.15 * reach / 0.6)
+    # Release: hold, hand keeps moving.
+    session.push(_frame(right=fakes.controller((0.5, -0.3, 1.5), squeeze=0.0), body=body))
+    held = t.get_action()["right_ee.x"]
+    assert held == pytest.approx(readers[0].torso[0, 3] + 0.15 * reach / 0.6)
+    assert t._abs_state["right"] == "hold"
+
+
+def test_absolute_mode_holds_without_body(stubbed_pipeline, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller((0.3, -0.3, 1.5), squeeze=0.9)))
+    readers: list = []
+    t = make_teleop(session, readers, arm_mode="ee_absolute", torso_source="none", use_torso=False, use_left_arm=False, use_head=False)
+    t.connect()
+    a = t.get_action()
+    assert a["right_ee.x"] == pytest.approx(readers[0].right_ee[0, 3])
+    assert "hold" in t._abs_state["right"]
+
+
+def test_posture_hint_keys_and_recording(stubbed_pipeline, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    q_true = np.array([0.3, -0.4, 0.2, -1.2])
+    S, E, W = mod.forward_points(q_true, "right") if hasattr(mod, "forward_points") else (None, None, None)
+    from lerobot_teleoperator_rby1.isaac_teleop.arm_retargeter import forward_points
+
+    S, E, W = forward_points(q_true, "right")
+    T = np.eye(4)  # torso at the base origin -> body points are directly in the torso frame
+    body = _body_with_arm("right", S, E, W)
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(W), body=body))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", use_torso=False, use_left_arm=False, use_head=False,
+                    arm_posture_hint=True, posture_hint_smoothing=1.0)
+    t.connect()
+    readers[0].torso = T
+    a = t.get_action()
+    for i in range(4):
+        assert a[f"right_arm_{i}.null"] == pytest.approx(q_true[i], abs=1e-5)
+    assert "right_arm_0.null" not in t.action_features  # not recorded by default
+    # Recording flag exposes the keys as features.
+    t2 = make_teleop(fakes.FakeSession(), [], torso_source="none", use_torso=False, use_left_arm=False, use_head=False,
+                     arm_posture_hint=True, record_posture_hint=True)
+    assert "right_arm_3.null" in t2.action_features and "left_arm_0.null" not in t2.action_features
+    # No body -> no hint keys (unless recorded).
+    session.push(_frame(right=fakes.controller(W)))
+    clock[0] += 5.0
+    a = t.get_action()
+    assert "right_arm_0.null" not in a

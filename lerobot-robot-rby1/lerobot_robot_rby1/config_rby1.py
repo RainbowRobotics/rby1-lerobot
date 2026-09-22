@@ -301,6 +301,16 @@ class Rby1Config(RobotConfig):
     arm_target_gains_wb:   Tuple[float, float, float, float] = ARM_TARGET_GAINS_WB
     arm_target_gains_pc:   Tuple[float, float, float, float] = ARM_TARGET_GAINS_PC
 
+    # ── IOBT posture hint (from the rby1_isaac teleoperator) ──────────
+    # When the action carries `<side>_arm_<i>.null` keys (i = 0..3), those
+    # joints of the per-component nullspace target are replaced per tick and
+    # weighted with posture_hint_weight (the remaining joints keep
+    # nullspace_weight). Soft cost: the EE pose always has priority.
+    posture_hint_weight: float = 4.0
+    # Expose the hint keys in action_features so lerobot-record stores them
+    # (adds 8 action dims; datasets with/without differ). EE mode only.
+    record_posture_hint: bool = False
+
     # ── Nullspace targets (per-component arm solvers) ─────────────────
     null_right_arm_deg: List[float] = field(
         default_factory=lambda: list(DEFAULT_NULL_RIGHT_DEG)

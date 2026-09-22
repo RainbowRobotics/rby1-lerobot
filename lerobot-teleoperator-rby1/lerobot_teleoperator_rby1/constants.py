@@ -31,6 +31,9 @@ HEAD_NAMES: list[str] = ["head_0", "head_1"]  # pan (yaw), tilt (pitch)
 # matching `lerobot_robot_rby1.constants.POS_SUFFIX`. lerobot-rollout filters
 # the robot features by this suffix, so bare names would be dropped.
 POS_SUFFIX = ".pos"
+# Nullspace-hint keys emitted by the Isaac Teleop device (`<joint>.null`, rad);
+# consumed by the follower's Cartesian solver, recorded only on request.
+NULL_SUFFIX = ".null"
 
 # Mobile-base velocity action keys (body frame), matching the follower robot
 # and the LeRobot LeKiwi convention: linear x / y (m/s) and yaw rate (rad/s).

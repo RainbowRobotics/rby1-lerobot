@@ -67,3 +67,24 @@ def test_build_head_command_clips_to_urdf_limits():
     (pos,), _ = rby.builders[0].calls["set_position"]
     np.testing.assert_allclose(pos, [HEAD_Q_MAX[0], HEAD_Q_MIN[1]])
     assert rby.builders[0].calls["set_minimum_time"][0] == (0.1,)
+
+
+def test_nullspace_hint_overrides_joints_and_weights():
+    r = _robot(action_mode="ee")
+    default = np.deg2rad([40.0, -30.0, -5.0, -135.0, -10.0, 20.0, 40.0])
+    target, weight = r._nullspace_with_hint({}, "right", default)
+    assert weight is None and np.allclose(target, default)
+    action = {f"right_arm_{i}.null": 0.1 * (i + 1) for i in range(4)}
+    target, weight = r._nullspace_with_hint(action, "right", default)
+    np.testing.assert_allclose(target[:4], [0.1, 0.2, 0.3, 0.4])
+    np.testing.assert_allclose(target[4:], default[4:])
+    assert list(weight[:4]) == [r._config.posture_hint_weight] * 4
+    np.testing.assert_allclose(weight[4:], r._config.nullspace_weight[4:])
+    # Partial hints are ignored.
+    assert r._nullspace_with_hint({"right_arm_0.null": 0.0}, "right", default)[1] is None
+
+
+def test_record_posture_hint_adds_action_features():
+    r = _robot(action_mode="ee", record_posture_hint=True, use_left_arm=False)
+    assert "right_arm_3.null" in r.action_features and "left_arm_0.null" not in r.action_features
+    assert "right_arm_0.null" not in _robot(action_mode="ee").action_features

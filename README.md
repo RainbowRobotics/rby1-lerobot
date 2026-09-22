@@ -183,6 +183,13 @@ lerobot-teleoperate \
   --teleop.robot_address=192.168.30.1:50051
 ```
 
+Absolute (non-clutch) arm mapping with the elbow following your own:
+
+```bash
+lerobot-teleoperate ... --teleop.type=rby1_isaac \
+  --teleop.arm_mode=ee_absolute --teleop.arm_posture_hint=true
+```
+
 `lerobot-record` takes the same `--robot.*` / `--teleop.*` arguments plus the
 `--dataset.*` ones from the sections below. The teleoperator's `use_torso`,
 `use_right_arm`, `use_left_arm`, `use_gripper`, `use_mobile_base` and `use_head`
@@ -196,13 +203,14 @@ The process prints the host IP addresses and waits for the headset:
 
 | Input | Effect |
 |-------|--------|
-| Squeeze (grip) > `clutch_threshold` | That arm follows its controller (clutch engaged); release to hold |
+| Squeeze (grip) > `clutch_threshold` | `arm_mode=ee_clutch` (default): that arm follows the controller *delta* from the moment of the squeeze (clutch); release to hold. `arm_mode=ee_absolute`: dead-man switch — while held, the hand position **relative to your shoulder** (body tracking) is mapped onto the robot shoulder (scaled by the reach ratio) and the controller orientation (times the offset latched on Right A) becomes the gripper orientation; (re-)engaging ramps to the target over `engage_ramp_s` |
 | Trigger | Gripper (fully pressed = closed) |
 | Right thumbstick / left thumbstick | Base linear velocity / yaw rate |
 | Right **B** | Stop: freeze every target, zero the base |
 | Right **A** | Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; re-reference the operator frame so the direction you are facing becomes robot +X; also resumes after a stop and re-centres the head origin. The base is not moved |
 | Headset orientation | `head_0` (pan) / `head_1` (tilt) relative to the pose at the first tracked frame |
 | Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, while **both** arms are clutched (`torso_engage=both_arms`, default; `any_arm` / `always` available) |
+| Body tracking shoulder / elbow (`arm_posture_hint=true`) | The arm posture (shoulder + elbow angles) is retargeted to `arm_0..arm_3` and sent as a **nullspace hint** to the Cartesian solver: the elbow follows yours while the EE pose keeps priority. Not recorded unless `record_posture_hint` (both sides) |
 
 ## Record Data and upload to HF
 
@@ -247,6 +255,8 @@ lerobot-record \
 | `use_left_arm` | `True` | Include left arm in observation / action |
 | `use_torso` | `False` | Include torso joints |
 | `use_head` | `False` | Include the head pan / tilt joints (`head_0.pos`, `head_1.pos`) in observation and action, in either action mode |
+| `posture_hint_weight` | `4.0` | Nullspace weight of joints carrying an IOBT posture hint (`<side>_arm_<i>.null` action keys from `rby1_isaac`); EE mode, per-component solvers |
+| `record_posture_hint` | `False` | Expose the hint keys in `action_features` so `lerobot-record` stores them (adds 8 action dims) |
 | `use_gripper` | `True` | Enable RB-Y1 grippers |
 | `use_mobile_base` | `False` | Enable base control (Model M/A) |
 | `use_velocity` | `False` | Add `.vel` channels to observations |
@@ -277,6 +287,13 @@ lerobot-record \
 | `cloudxr_env_file` | `None` | KEY=value profile for CloudXR; default is the packaged `default.env` (Quest3 profile) |
 | `session_start` | `"connect"` | `"first_action"` opens the XR session on the first `get_action()` (Jetson Orin mitigation) |
 | `tracking_wait_timeout_s` | `0.0` | Give up waiting for the headset after this many seconds (0 = forever) |
+| `arm_mode` | `"ee_clutch"` | `ee_clutch` (delta from the squeeze moment) or `ee_absolute` (hand relative to the IOBT shoulder, scaled onto the robot shoulder; squeeze = dead-man) |
+| `engage_ramp_s`, `ee_max_linear_vel`, `ee_max_angular_vel` | `2.0`, `1.0`, `3.0` | `ee_absolute`: ramp to the target on engage; rate limits (m/s, rad/s) |
+| `ee_position_scale`, `ee_reach_max_ratio` | `1.0`, `0.98` | `ee_absolute`: extra multiplier on the robot/human reach ratio; clamp of the hand-to-shoulder distance |
+| `arm_length_source`, `human_arm_length_m` | `"body"`, `0.62` | `ee_absolute`: human reach from body tracking (`|S-E|+|E-W|`) or from the config |
+| `ee_orientation_latch_on_a`, `ee_orientation_offset_rpy_deg` | `True`, `[0,0,0]` | `ee_absolute`: controller → gripper orientation offset, latched on Right A (and on the first action) or fixed |
+| `arm_posture_hint`, `record_posture_hint` | `False`, `False` | IOBT shoulder / elbow → nullspace hint (`<side>_arm_<i>.null`, i = 0..3); record them (adds 8 action dims; set `--robot.record_posture_hint=true` too) |
+| `posture_hint_smoothing`, `posture_hint_max_vel`, `posture_hint_hold_s`, `hint_wrist_source` | `0.3`, `2.0`, `1.0`, `"controller"` | Hint filtering; wrist point from the controller (default) or the IOBT wrist |
 | `clutch_threshold` | `0.5` | Squeeze value above which an arm follows |
 | `latch_orientation` | `"measured"` | Home orientation on engage: measured EE pose (`"commanded"` = upstream SO-101 behaviour) |
 | `thumbstick_deadzone`, `base_max_linear`, `base_max_angular` | `0.15`, `0.3`, `0.6` | Thumbstick → base velocity mapping |

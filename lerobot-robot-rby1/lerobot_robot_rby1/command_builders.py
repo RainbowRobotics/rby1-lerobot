@@ -148,10 +148,19 @@ def build_per_component_command(
     reset: ResetFlags,
     null_right: np.ndarray,
     null_left: np.ndarray,
+    weight_right: np.ndarray | None = None,
+    weight_left: np.ndarray | None = None,
 ) -> Any:
-    """Separate torso / right-arm / left-arm solvers (more stable than WB)."""
+    """Separate torso / right-arm / left-arm solvers (more stable than WB).
+
+    ``weight_right`` / ``weight_left`` override the nullspace weight vector
+    (defaults to ``cfg.nullspace_weight``), e.g. to emphasise joints carrying
+    an IOBT posture hint.
+    """
     dt = cfg.ee_dt
     body = rby.BodyComponentBasedCommandBuilder()
+    w_right = np.asarray(cfg.nullspace_weight if weight_right is None else weight_right, dtype=float)
+    w_left = np.asarray(cfg.nullspace_weight if weight_left is None else weight_left, dtype=float)
 
     if cfg.use_torso:
         torso_builder = (
@@ -181,7 +190,7 @@ def build_per_component_command(
             .set_joint_torque_limit(cfg.right_arm_torque_limit)
             .set_nullspace_joint_target(
                 null_right,
-                np.asarray(cfg.nullspace_weight),
+                w_right,
                 cfg.nullspace_stiffness,
                 cfg.nullspace_damping_ratio,
             )
@@ -206,7 +215,7 @@ def build_per_component_command(
             .set_joint_torque_limit(cfg.left_arm_torque_limit)
             .set_nullspace_joint_target(
                 null_left,
-                np.asarray(cfg.nullspace_weight),
+                w_left,
                 cfg.nullspace_stiffness,
                 cfg.nullspace_damping_ratio,
             )

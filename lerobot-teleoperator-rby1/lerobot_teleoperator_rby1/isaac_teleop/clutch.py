@@ -119,6 +119,16 @@ class Clutch:
         """Stop following; :attr:`last_commanded` is held until the next engage."""
         self._engaged = False
 
+    def set_commanded(self, base_T_ee: np.ndarray) -> None:  # noqa: N803
+        """Overwrite the commanded pose without touching the engaged flag.
+
+        Used by the absolute (non-clutch) arm mode, which computes the target
+        itself and only uses this object as the per-arm target holder.
+        """
+        T = np.asarray(base_T_ee, dtype=float)
+        self._last_commanded_pos = T[:3, 3].copy()
+        self._last_commanded_rot = Rotation.from_matrix(T[:3, :3])
+
     def hold_at(self, base_T_ee: np.ndarray) -> None:  # noqa: N803
         """Re-seed the held pose (and home) to ``base_T_ee`` while disengaged.
 

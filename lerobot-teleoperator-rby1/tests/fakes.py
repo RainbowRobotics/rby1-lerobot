@@ -136,17 +136,20 @@ def se3(pos=(0.0, 0.0, 0.0), rot=None) -> np.ndarray:
 
 
 class FakeSnapshot:
-    def __init__(self, torso, right_ee, left_ee, head_q):
+    def __init__(self, torso, right_ee, left_ee, head_q, right_q=None, left_q=None):
         self.torso = torso
         self.right_ee = right_ee
         self.left_ee = left_ee
         self.head_q = head_q
+        self.right_q = np.zeros(7) if right_q is None else right_q
+        self.left_q = np.zeros(7) if left_q is None else left_q
 
 
 class FakeStateReader:
-    def __init__(self, address: str, model: str):
+    def __init__(self, address: str, model: str, version: str = "auto"):
         self.address = address
         self.model = model
+        self.version = "1.3" if version == "auto" else version
         self.connected = False
         self.reads = 0
         self.torso = se3((0.0, 0.0, 1.0))
