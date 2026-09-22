@@ -9,15 +9,16 @@ hardware-tested RB10E VR teleoperation code:
 - State packet: 580 bytes
 - Joint command: ``move_servo_j(...)``
 
-The original command syntax and state-packet layout are preserved. The
-background data receiver uses a thread rather than multiprocessing so the
-latest state and socket lifecycle remain owned by the same Python process.
+The original command syntax and state-packet layout are preserved. State
+packets are received in a background process and delivered through a bounded,
+latest-only queue.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import logging
+import multiprocessing as mp
 import queue
 import socket
 import struct
@@ -25,8 +26,7 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Sequence
-import multiprocessing as mp
+from typing import Any, Sequence
 
 
 logger = logging.getLogger(__name__)
@@ -141,6 +141,18 @@ class systemSTAT:
 # PEP 8 alias for new code. Keep systemSTAT for compatibility with the
 # original scripts.
 SystemStat = systemSTAT
+
+
+@dataclass(frozen=True)
+class _ReceivedState:
+    state: systemSTAT
+    received_monotonic_s: float
+
+
+@dataclass(frozen=True)
+class _ProducerError:
+    exception_type: str
+    message: str
 
 
 @dataclass
@@ -365,13 +377,15 @@ class Cobot:
 
         self._command_lock = threading.Lock()
         self._state_lock = threading.Lock()
-        self._stop_event = threading.Event()
+        self._stop_event = mp.Event()
 
-        self._data_thread: threading.Thread | None = None
+        self._data_process: mp.Process | None = None
         self._data_error: Exception | None = None
+        self._latest_received_state: _ReceivedState | None = None
 
         # Compatibility field. New code should use GetLatestState().
         self.reqdata_queue = mp.Queue(maxsize=1)
+        self._data_error_queue = mp.Queue(maxsize=1)
 
         logger.info("RB TCP client version %s", self.__RB_VERSION__)
 
@@ -402,6 +416,7 @@ class Cobot:
 
     @property
     def data_error(self) -> Exception | None:
+        self._sync_data_error()
         return self._data_error
 
     def ConnectToCB(self) -> bool:
@@ -460,15 +475,23 @@ class Cobot:
 
         self._stop_event.clear()
         self._data_error = None
+        self._latest_received_state = None
+        self._discard_queued_item(self.reqdata_queue)
+        self._discard_queued_item(self._data_error_queue)
 
-        reqdata_process = mp.Process(target=self._read_data_loop, args=(self.reqdata_queue,), daemon=True)
-        reqdata_process.start()
-        # self._data_thread = threading.Thread(
-        #     target=self._read_data_loop,
-        #     name="rb-cobot-data",
-        #     daemon=True,
-        # )
-        # self._data_thread.start()
+        process = mp.Process(
+            target=Cobot._receive_data,
+            args=(self.DATASock, self._stop_event, self._data_request_period_s,
+                  self.reqdata_queue, self._data_error_queue, self._socket_timeout_s),
+            name="rb-cobot-data",
+            daemon=True,
+        )
+        try:
+            process.start()
+        except Exception:
+            self.DisConnectToCB()
+            raise
+        self._data_process = process
 
         logger.info(
             "RB command/data ports connected: %s:%d, %s:%d",
@@ -498,14 +521,14 @@ class Cobot:
             except OSError:
                 pass
 
-        thread = self._data_thread
-        if (
-            thread is not None
-            and thread is not threading.current_thread()
-        ):
-            thread.join(timeout=1.0)
+        process = self._data_process
+        if process is not None:
+            process.join(timeout=self._socket_timeout_s + 0.25)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=1.0)
 
-        self._data_thread = None
+        self._data_process = None
         self.CMDSock = None
         self.DATASock = None
 
@@ -542,44 +565,165 @@ class Cobot:
 
         return b"".join(chunks)
 
-    def _read_data_loop(self, queue:mp.Queue) -> None:
-        sock = self.DATASock
+    @staticmethod
+    def _discard_queued_item(target_queue: Any) -> None:
+        try:
+            target_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+    @staticmethod
+    def _put_latest(target_queue: Any, item: Any) -> None:
+        try:
+            target_queue.put_nowait(item)
+            return
+        except queue.Full:
+            pass
+
+        try:
+            target_queue.get_nowait()
+        except queue.Empty:
+            # A multiprocessing feeder may not have made the full slot
+            # readable yet. Drop this sample; the next producer cycle can
+            # replace it without ever blocking the socket reader.
+            return
+
+        try:
+            target_queue.put_nowait(item)
+        except queue.Full:
+            pass
+
+    def _read_data_loop(
+        self,
+        state_queue: Any,
+        error_queue: Any,
+    ) -> None:
+        self._receive_data(
+            self.DATASock, self._stop_event, self._data_request_period_s,
+            state_queue, error_queue, self._socket_timeout_s,
+        )
+
+    @staticmethod
+    def _receive_data(sock, stop_event, period_s, state_queue, error_queue, socket_timeout_s=1.0) -> None:
+        # Pass only multiprocessing-safe state: the full Cobot owns thread
+        # locks and cannot be serialized by spawn/forkserver.
 
         if sock is None:
+            Cobot._put_latest(
+                error_queue,
+                _ProducerError(
+                    "ConnectionError",
+                    "RB data socket is not connected.",
+                ),
+            )
             return
 
         request = b"reqdata"
         deadline = time.perf_counter()
 
         try:
-            while not self._stop_event.is_set():
+            # Socket reduction preserves the fd, not Python's timeout state.
+            # Reapply it in a spawned child before the first read.
+            if hasattr(sock, "settimeout"):
+                sock.settimeout(socket_timeout_s)
+            while not stop_event.is_set():
                 sock.sendall(request)
 
-                packet = self._recv_exact(
+                packet = Cobot._recv_exact(
                     sock,
                     _STATE_PACKET_BYTES,
                 )
                 state = _decode_state_packet(packet)
                 if state is not None:
-                    # self._publish_state(state)
-                    queue.put(state)
+                    Cobot._put_latest(
+                        state_queue,
+                        _ReceivedState(state, time.monotonic()),
+                    )
 
-                deadline += self._data_request_period_s
+                deadline += period_s
                 remaining = deadline - time.perf_counter()
 
                 if remaining > 0.0:
-                    self._stop_event.wait(remaining)
+                    stop_event.wait(remaining)
                 else:
                     # Avoid burst requests after scheduling delays.
                     deadline = time.perf_counter()
 
         except (OSError, ConnectionError, ValueError) as exc:
-            if not self._stop_event.is_set():
-                self._data_error = exc
+            if not stop_event.is_set():
+                Cobot._put_latest(
+                    error_queue,
+                    _ProducerError(
+                        type(exc).__name__,
+                        str(exc),
+                    ),
+                )
                 logger.exception(
                     "RB data receiver stopped: %s",
                     exc,
                 )
+
+    def _sync_data_error(self) -> None:
+        if self._data_error is not None:
+            return
+
+        try:
+            producer_error = self._data_error_queue.get_nowait()
+        except queue.Empty:
+            return
+
+        self._data_error = RuntimeError(
+            "RB data receiver failed with "
+            f"{producer_error.exception_type}: "
+            f"{producer_error.message}"
+        )
+
+    def _raise_if_data_receiver_failed(self) -> None:
+        self._sync_data_error()
+        if self._data_error is not None:
+            raise RuntimeError(
+                "RB data receiver failed."
+            ) from self._data_error
+
+        process = self._data_process
+        if (
+            process is not None
+            and not process.is_alive()
+            and not self._stop_event.is_set()
+        ):
+            self._data_error = RuntimeError(
+                "RB data receiver stopped unexpectedly "
+                f"(exit code {process.exitcode})."
+            )
+            raise RuntimeError(
+                "RB data receiver failed."
+            ) from self._data_error
+
+    def _get_received_state(
+        self,
+        deadline: float,
+    ) -> _ReceivedState | None:
+        while True:
+            self._raise_if_data_receiver_failed()
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                return None
+
+            try:
+                received = self.reqdata_queue.get(
+                    timeout=min(remaining, 0.02)
+                )
+            except queue.Empty:
+                continue
+
+            # The queue has capacity one, so one non-blocking replacement is
+            # sufficient to avoid an unbounded drain under a busy producer.
+            try:
+                received = self.reqdata_queue.get_nowait()
+            except queue.Empty:
+                pass
+            return received
 
     def wait_for_first_state(
         self,
@@ -588,48 +732,95 @@ class Cobot:
         if timeout_s <= 0.0:
             raise ValueError("timeout_s must be positive.")
 
-        start_time = time.perf_counter()
+        with self._state_lock:
+            received = self._get_received_state(
+                time.monotonic() + timeout_s
+            )
+            if received is None:
+                self._raise_if_data_receiver_failed()
+                return False
 
-        ready = True
-
-        while True:
-            if not self.reqdata_queue.empty():
-                break
-            if time.perf_counter() - start_time < timeout_s:
-                ready = True
-                break
-            time.sleep(0.02)
-
-        if self._data_error is not None:
-            raise RuntimeError(
-                "RB data receiver failed."
-            ) from self._data_error
-
-        return ready
+            self._latest_received_state = received
+            self.systemstat_global = received.state
+            return True
 
     def GetLatestState(
         self,
         timeout_s: float | None = 1.0,
     ) -> systemSTAT:
-        """Return the most recently decoded control-box state."""
+        """Return a state no older than the finite wait timeout.
+
+        ``None`` uses the configured socket timeout rather than waiting
+        indefinitely.
+        """
 
         if not self.is_connected:
             raise ConnectionError(
                 "RB control box is not connected."
             )
 
-        if timeout_s is not None:
-            if timeout_s <= 0.0:
-                raise ValueError(
-                    "timeout_s must be positive or None."
+        if timeout_s is None:
+            timeout_s = self._socket_timeout_s
+        elif timeout_s <= 0.0:
+            raise ValueError(
+                "timeout_s must be positive or None."
+            )
+
+        deadline = time.monotonic() + timeout_s
+
+        with self._state_lock:
+            self._raise_if_data_receiver_failed()
+
+            received = self._latest_received_state
+            try:
+                queued = self.reqdata_queue.get_nowait()
+            except queue.Empty:
+                queued = None
+
+            if queued is not None:
+                received = queued
+
+            if (
+                received is not None
+                and time.monotonic()
+                - received.received_monotonic_s
+                <= timeout_s
+            ):
+                self._latest_received_state = received
+                self.systemstat_global = received.state
+                return received.state
+
+            stale_received = received
+            received = self._get_received_state(deadline)
+            if received is None:
+                self._raise_if_data_receiver_failed()
+                if stale_received is not None:
+                    age_s = (
+                        time.monotonic()
+                        - stale_received.received_monotonic_s
+                    )
+                    self._latest_received_state = stale_received
+                    raise TimeoutError(
+                        "Latest RB state is stale "
+                        f"(age {age_s:.3f}s, "
+                        f"limit {timeout_s:.3f}s)."
+                    )
+                raise TimeoutError(
+                    "No fresh RB state arrived within "
+                    f"{timeout_s:.3f}s."
                 )
 
-        if self._data_error is not None:
-            raise RuntimeError(
-                "RB data receiver failed."
-            ) from self._data_error
+            age_s = time.monotonic() - received.received_monotonic_s
+            if age_s > timeout_s:
+                self._latest_received_state = received
+                raise TimeoutError(
+                    "Latest RB state is stale "
+                    f"(age {age_s:.3f}s, limit {timeout_s:.3f}s)."
+                )
 
-        return self.reqdata_queue.get()
+            self._latest_received_state = received
+            self.systemstat_global = received.state
+            return received.state
 
     # ------------------------------------------------------------------
     # State helpers
