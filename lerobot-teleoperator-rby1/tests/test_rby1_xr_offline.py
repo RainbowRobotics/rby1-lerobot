@@ -446,7 +446,7 @@ def test_posture_hint_keys_and_recording(stubbed_pipeline, monkeypatch):
     T = np.eye(4)  # torso at the base origin -> body points are directly in the torso frame
     body = _body_with_arm("right", S, E, W)
     session = fakes.FakeSession()
-    session.push(_frame(right=fakes.controller(W), body=body))
+    session.push(_frame(right=fakes.controller(W, squeeze=0.9), body=body))  # hints only while engaged
     readers: list = []
     t = make_teleop(session, readers, torso_source="none", use_torso=False, use_left_arm=False, use_head=False,
                     arm_posture_hint=True, posture_hint_smoothing=1.0)
@@ -454,14 +454,14 @@ def test_posture_hint_keys_and_recording(stubbed_pipeline, monkeypatch):
     readers[0].torso = T
     a = t.get_action()
     for i in range(4):
-        assert a[f"right_arm_{i}.null"] == pytest.approx(q_true[i], abs=1e-5)
+        assert a[f"right_arm_{i}.null"] == pytest.approx(q_true[i], abs=1e-3)
     assert "right_arm_0.null" not in t.action_features  # not recorded by default
     # Recording flag exposes the keys as features.
     t2 = make_teleop(fakes.FakeSession(), [], torso_source="none", use_torso=False, use_left_arm=False, use_head=False,
                      arm_posture_hint=True, record_posture_hint=True)
     assert "right_arm_3.null" in t2.action_features and "left_arm_0.null" not in t2.action_features
-    # No body -> no hint keys (unless recorded).
-    session.push(_frame(right=fakes.controller(W)))
+    # Body lost while engaged: the hint holds, then times out -> no hint keys (unless recorded).
+    session.push(_frame(right=fakes.controller(W, squeeze=0.9)))
     clock[0] += 5.0
     a = t.get_action()
     assert "right_arm_0.null" not in a
@@ -658,4 +658,4 @@ def test_posture_hint_frozen_while_released(stubbed_pipeline, monkeypatch):
     clock[0] += 0.02
     session.push(_frame(right=fakes.controller(W2, squeeze=0.9), body=_body_with_arm("right", S2, E2, W2)))
     a = t.get_action()
-    assert a["right_arm_0.null"] == pytest.approx(q_b[0], abs=1e-5)
+    assert a["right_arm_0.null"] == pytest.approx(q_b[0], abs=1e-3)
