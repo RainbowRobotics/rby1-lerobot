@@ -4,9 +4,10 @@ The LeRobot robot adapter is always ``rb10`` because both physical variants
 share the RB ServoJ driver.  ``kinematics_model`` selects the model used by
 the policy adapter for FK/IK.
 
-Safety defaults are deliberately conservative: the client starts paused and
-in dry-run mode, and it never moves to a ready pose.  Press ``f`` to start
-inference, ``s`` to pause and invalidate in-flight work, or ``q`` to quit.
+The client defaults to dry-run mode.  In real mode it first moves to the
+dataset ready pose (a profiled joint move), then waits paused.  Press ``f``
+to start inference, ``s`` to stop inference and return to the ready pose
+(or to abort a ready move in progress), or ``q`` to quit.
 """
 
 import logging
@@ -25,6 +26,7 @@ from typing import Any, Protocol
 
 import draccus
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 try:
     # The controller/state-machine module remains importable in hardware-free
@@ -37,6 +39,20 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by minimal test envs
 
 LOGGER = logging.getLogger(__name__)
 JOINT_KEYS = tuple(f"joint_{index}" for index in range(6))
+
+# Ready pose = mean of the first-frame joint state over all 197 episodes of
+# rainbowrobotics/rb10_iros_double_trim (revision f7e8b828, joint_0..5, rad).
+# Per-joint spread across episodes is 1.7-4.9 deg (std), so the mean is a
+# representative recorded start pose, not an arbitrary preset.  Degrees:
+# [-174.79, -2.42, 143.55, 40.28, 275.53, 179.77].
+DEFAULT_READY_POSE_RAD: tuple[float, ...] = (
+    -3.0506391525268555,
+    -0.04220624640583992,
+    2.505460500717163,
+    0.7030301690101624,
+    4.8088812828063965,
+    3.1375038623809814,
+)
 
 # Mandatory server contract checked by the describe RPC before readiness.
 # Each action/state is a Cartesian pose (XYZ + extrinsic XYZ Euler angles,
@@ -57,9 +73,17 @@ SERVER_DESCRIPTOR: dict[str, Any] = {
 
 
 class RobotLike(Protocol):
+    def get_joint_positions(self, *, measured: bool = True) -> np.ndarray: ...
+
+    def get_reference_joint_positions(self) -> np.ndarray: ...
+
     def get_observation(self) -> dict[str, Any]: ...
 
     def send_action(self, action: dict[str, float]) -> dict[str, Any]: ...
+
+    def send_cartesian_action(
+        self, pose_m_rad: np.ndarray, gripper: float | None = None
+    ) -> dict[str, Any]: ...
 
     def enable_servo_commands(self) -> None: ...
 
@@ -67,6 +91,8 @@ class RobotLike(Protocol):
 
 
 class AdapterLike(Protocol):
+    kinematics: Any
+
     def validate_robot(self, robot: RobotLike) -> None: ...
 
     def build_observation(self, raw: dict[str, Any], task: str) -> dict[str, Any]: ...
@@ -77,6 +103,8 @@ class AdapterLike(Protocol):
         current_q6: np.ndarray,
         *,
         max_joint_delta: float,
+        previous_q: np.ndarray | None = None,
+        max_tracking_error: float | None = None,
     ) -> dict[str, float]: ...
 
 
@@ -102,9 +130,34 @@ class EEClientConfig:
     control_rate_hz: float = 30.0
     max_joint_velocity_rad_s: float = 0.5
     max_joint_delta_cap_rad: float = 0.05
+    max_joint_tracking_error_rad: float = 0.05
     timeout_ms: int = 1000
     reconnect_delay_s: float = 0.25
     dry_run: bool = True
+    action_log_interval_s: float = 1.0
+    # "joint": client IK + ServoJ (default).  "cartesian": bounded TCP
+    # waypoints sent as ServoL; the control box solves IK with its own TCP
+    # setting, so joint-envelope checks apply only to measured joints.
+    servo_mode: str = "joint"
+    max_tcp_speed_m_s: float = 0.15
+    max_tcp_angular_speed_rad_s: float = 0.5
+    # |previous TCP command - offset-corrected measured TCP| bounds.
+    max_tcp_tracking_error_m: float = 0.03
+    max_tcp_tracking_error_rad: float = 0.15
+    # Profiled joint move to the recorded start pose at startup and after
+    # ``s``.  Skipped in dry-run (no actuation) or when disabled.
+    move_to_ready_on_start: bool = True
+    move_to_ready_on_stop: bool = True
+    ready_pose_rad: list[float] = field(default_factory=lambda: list(DEFAULT_READY_POSE_RAD))
+    ready_move_duration_s: float = 5.0
+    ready_settle_s: float = 0.5
+    # Blind joint-space move: cap its peak joint speed well below the
+    # inference speed limit so servo lag plus impedance sag stays inside the
+    # tracking bound on long moves (a 44 deg move at 5 s tripped it).
+    ready_max_joint_speed_rad_s: float = 0.15
+    # The recorded start pose has the gripper open in every episode; open it
+    # as the ready move begins (startup and after ``s``).
+    ready_gripper_open: bool = True
 
     def __post_init__(self) -> None:
         if self.kinematics_model not in {"rb10", "rb10e"}:
@@ -131,13 +184,29 @@ class EEClientConfig:
             "control_rate_hz",
             "max_joint_velocity_rad_s",
             "max_joint_delta_cap_rad",
+            "max_joint_tracking_error_rad",
             "reconnect_delay_s",
+            "ready_move_duration_s",
+            "ready_max_joint_speed_rad_s",
+            "max_tcp_speed_m_s",
+            "max_tcp_angular_speed_rad_s",
+            "max_tcp_tracking_error_m",
+            "max_tcp_tracking_error_rad",
         ):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"{name} must be finite and > 0, got {value}")
+        if not math.isfinite(self.ready_settle_s) or self.ready_settle_s < 0.0:
+            raise ValueError("ready_settle_s must be finite and >= 0")
+        if self.servo_mode not in {"joint", "cartesian"}:
+            raise ValueError("servo_mode must be 'joint' or 'cartesian'")
+        ready = np.asarray(self.ready_pose_rad, dtype=np.float64)
+        if ready.shape != (6,) or not np.all(np.isfinite(ready)):
+            raise ValueError("ready_pose_rad must be six finite joint angles in radians")
         if not isinstance(self.timeout_ms, int) or not 0 < self.timeout_ms <= 1000:
             raise ValueError("timeout_ms must be an integer in [1, 1000]")
+        if not math.isfinite(self.action_log_interval_s) or self.action_log_interval_s < 0:
+            raise ValueError("action_log_interval_s must be finite and >= 0 (0 disables logging)")
         robot_rate = float(getattr(self.robot, "control_rate_hz", self.control_rate_hz))
         if not math.isfinite(robot_rate) or not math.isclose(
             robot_rate, self.control_rate_hz, rel_tol=0.0, abs_tol=1e-9
@@ -170,6 +239,27 @@ class _ActionChunk:
     observed_at: float
     received_at: float
     actions: np.ndarray
+
+
+@dataclass
+class _ReadyMove:
+    """A profiled joint trajectory streamed through the ServoJ gate.
+
+    The trajectory is anchored to the controller reference (``jnt_ref``) and
+    continues from the previous command, exactly like inference commands.
+    ``offset`` is ``jnt_ang - jnt_ref`` at the start: the controller's steady
+    tracking bias, which measured joints are corrected by before comparison.
+    """
+
+    reason: str
+    start_q: np.ndarray
+    target_q: np.ndarray
+    last_q: np.ndarray
+    offset: np.ndarray
+    started_at: float
+    last_tick_at: float
+    duration: float
+    arrived_at: float | None = None
 
 
 class _LatestObservation:
@@ -264,9 +354,19 @@ class AsyncEEController:
         self._network_ready = False
         self._quit = False
         self._last_command_q: np.ndarray | None = None
+        # Controller steady-state bias (jnt_ang - jnt_ref) captured at
+        # activation.  Measured joints are corrected by it before tracking
+        # comparisons, so a constant impedance/gravity offset is not counted
+        # as tracking error and does not shrink the IK search box one-sidedly.
+        self._tracking_offset: np.ndarray | None = None
+        # Cartesian mode: last commanded TCP pose [x, y, z, rx, ry, rz].
+        self._last_command_pose: np.ndarray | None = None
         self._action_chunk: _ActionChunk | None = None
         self._disable_requested = True
         self._last_pause_reason = "startup"
+        self._last_action_log_at = -math.inf
+        self._ready_move: _ReadyMove | None = None
+        self._chunk_wait_logged_generation = -1
 
         self._observations = _LatestObservation()
         self._network_messages: SimpleQueue[tuple[str, str]] = SimpleQueue()
@@ -330,6 +430,9 @@ class AsyncEEController:
         self._paused = True
         self._action_chunk = None
         self._last_command_q = None
+        self._last_command_pose = None
+        self._tracking_offset = None
+        self._ready_move = None
         self._disable_requested = True
         self._last_pause_reason = reason
 
@@ -366,12 +469,16 @@ class AsyncEEController:
         if not self._service_main_thread_safety():
             return False
         with self._state_lock:
+            if self._ready_move is not None:
+                LOGGER.warning("Ready movement in progress; s aborts it, f is ignored")
+                return False
             if not self._network_ready:
                 self._last_pause_reason = "server not connected; press f after reconnect"
                 return False
             self._paused = True
             self._action_chunk = None
             self._last_command_q = None
+            self._tracking_offset = None
             generation_before_prepare = self._generation
 
         try:
@@ -382,6 +489,16 @@ class AsyncEEController:
                     "First real activation may initialize impedance control and open the configured gripper"
                 )
                 self.robot.enable_servo_commands()
+            # Preserve the controller's equilibrium/reference. Re-anchoring each
+            # tick on a compliant measured pose can turn tracking bias into drift.
+            reference, measured, offset = self._read_anchor_and_offset()
+            LOGGER.info(
+                "EE command anchor jnt_ref_deg=%s jnt_ang_deg=%s offset_deg=%s tracking_limit_rad=%.6f",
+                np.round(np.rad2deg(reference), 5).tolist(),
+                np.round(np.rad2deg(measured), 5).tolist(),
+                np.round(np.rad2deg(offset), 4).tolist(),
+                self.config.max_joint_tracking_error_rad,
+            )
         except Exception as exc:
             with self._state_lock:
                 self._invalidate_locked(f"servo gate activation fault: {exc}")
@@ -399,6 +516,11 @@ class AsyncEEController:
             if activated:
                 self._generation += 1
                 generation = self._generation
+                self._last_command_q = reference.copy()
+                self._last_command_pose = np.asarray(
+                    self.adapter.kinematics.forward(reference), dtype=np.float64
+                )
+                self._tracking_offset = offset.copy()
                 self._paused = False
             else:
                 # Preparation completed after a safety transition.  Even if
@@ -422,7 +544,15 @@ class AsyncEEController:
         if key == "f":
             return self.activate()
         if key == "s":
+            with self._state_lock:
+                aborting_ready = self._ready_move is not None
+            if aborting_ready:
+                # Never chain a second automatic move after an operator abort.
+                self.pause("operator aborted ready movement")
+                return True
             self.pause("operator pause")
+            if self.config.move_to_ready_on_stop:
+                self.start_ready_move("operator stop")
             return True
         if key == "q":
             self.pause("operator quit")
@@ -437,6 +567,143 @@ class AsyncEEController:
             self._invalidate_locked(detail)
         self._service_main_thread_safety()
         LOGGER.error("EE motion fault; explicit f required to rearm: %s", detail)
+
+    def _read_anchor_and_offset(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Read controller reference and measured joints; validate their gap.
+
+        Returns ``(reference, measured, offset)`` with ``offset = measured -
+        reference``.  A gap beyond the tracking limit means the controller has
+        not settled (or is not tracking its own reference), so it fails closed.
+        """
+        reference = np.asarray(self.robot.get_reference_joint_positions(), dtype=np.float64)
+        measured = np.asarray(self.robot.get_joint_positions(measured=True), dtype=np.float64)
+        self.adapter.kinematics.forward(reference)
+        self.adapter.kinematics.forward(measured)
+        gap = np.abs(reference - measured)
+        if np.any(gap > self.config.max_joint_tracking_error_rad):
+            worst = int(np.argmax(gap))
+            raise ValueError(
+                "controller reference exceeds the measured tracking error limit: "
+                f"joint_{worst} |jnt_ref - jnt_ang| = {np.rad2deg(gap[worst]):.3f} deg "
+                f"> {np.rad2deg(self.config.max_joint_tracking_error_rad):.3f} deg; "
+                f"jnt_ref_deg={np.round(np.rad2deg(reference), 3).tolist()} "
+                f"jnt_ang_deg={np.round(np.rad2deg(measured), 3).tolist()}. "
+                "The control box reference has not settled on the measured pose "
+                "(e.g. after freedrive, a manual jog or an emergency stop); re-sync it "
+                "(a short pendant/jog move) before activating"
+            )
+        return reference, measured, measured - reference
+
+    def start_ready_move(self, reason: str) -> bool:
+        """Begin a profiled joint move to the ready pose; the caller owns the robot.
+
+        Inference is paused first.  The move streams ServoJ commands from the
+        controller reference towards ``ready_pose_rad`` with a cosine profile
+        over at least ``ready_move_duration_s``, then settles and pauses.
+        It is skipped in dry-run mode because it actuates the arm.
+        """
+        with self._state_lock:
+            if self._ready_move is not None:
+                return True
+            self._invalidate_locked(f"ready movement: {reason}")
+        if not self._service_main_thread_safety():
+            return False
+        if self.config.dry_run:
+            LOGGER.info("Ready movement skipped in dry-run (%s)", reason)
+            return False
+        try:
+            target = np.asarray(self.config.ready_pose_rad, dtype=np.float64)
+            self.adapter.kinematics.forward(target)
+            LOGGER.warning(
+                "Ready movement (%s) to %s deg over >= %.1f s; clear the workspace. "
+                "s aborts. Servo preparation may open the gripper.",
+                reason, np.round(np.rad2deg(target), 3).tolist(), self.config.ready_move_duration_s,
+            )
+            self.robot.enable_servo_commands()
+            # Actuator preparation can block; anchor only after it returns.
+            reference, measured, offset = self._read_anchor_and_offset()
+            speed = min(
+                self.config.ready_max_joint_speed_rad_s,
+                self.config.max_joint_delta / self.config.nominal_dt,
+            )
+            # A cosine profile peaks at pi/2 times the mean speed.
+            duration = max(
+                self.config.ready_move_duration_s,
+                math.pi * float(np.max(np.abs(target - reference))) / (2.0 * speed),
+            )
+            now = self._clock()
+            LOGGER.info(
+                "Ready movement anchor jnt_ref_deg=%s jnt_ang_deg=%s offset_deg=%s duration_s=%.2f",
+                np.round(np.rad2deg(reference), 5).tolist(),
+                np.round(np.rad2deg(measured), 5).tolist(),
+                np.round(np.rad2deg(offset), 4).tolist(),
+                duration,
+            )
+            move = _ReadyMove(
+                reason=reason,
+                start_q=reference.copy(),
+                target_q=target,
+                last_q=reference.copy(),
+                offset=offset,
+                started_at=now,
+                last_tick_at=now,
+                duration=duration,
+            )
+            with self._state_lock:
+                if self._disable_requested or self._quit:
+                    raise RuntimeError("safety transition during ready preparation")
+                self._ready_move = move
+            return True
+        except Exception as exc:
+            self._fault("ready movement fault", exc)
+            return False
+
+    def _tick_ready_move(self, move: _ReadyMove) -> dict[str, float] | None:
+        try:
+            now = self._clock()
+            if now - move.started_at > 2.0 * move.duration + 10.0:
+                raise RuntimeError("ready pose arrival timed out")
+            measured = np.asarray(self.robot.get_joint_positions(measured=True), dtype=np.float64)
+            self.adapter.kinematics.forward(measured)
+            current_ref = measured - move.offset
+            if np.any(np.abs(move.last_q - current_ref) > self.config.max_joint_tracking_error_rad):
+                raise RuntimeError("measured joints exceeded the ready movement tracking error limit")
+            phase = min(1.0, max(0.0, (now - move.started_at) / move.duration))
+            desired = move.start_q + (move.target_q - move.start_q) * (1 - math.cos(math.pi * phase)) / 2
+            dt = min(self.config.nominal_dt, max(0.0, now - move.last_tick_at))
+            step = min(self.config.max_joint_delta, self.config.max_joint_velocity_rad_s * dt)
+            lower = np.maximum(current_ref - self.config.max_joint_tracking_error_rad, move.last_q - step)
+            upper = np.minimum(current_ref + self.config.max_joint_tracking_error_rad, move.last_q + step)
+            if np.any(lower > upper):
+                raise RuntimeError("ready movement has no safe joint step")
+            command_q = np.clip(desired, lower, upper)
+            self.adapter.kinematics.forward(command_q)
+            if phase >= 1.0 and move.arrived_at is None:
+                move.arrived_at = now
+            if move.arrived_at is not None and now - move.arrived_at >= self.config.ready_settle_s:
+                residual = np.rad2deg(measured - move.target_q)
+                self.pause("ready pose reached; press f to start inference")
+                LOGGER.info(
+                    "Ready pose reached (%s); measured_minus_target_deg=%s. Inference paused until f",
+                    move.reason, np.round(residual, 3).tolist(),
+                )
+                return None
+            if self._clock() - now > self.config.nominal_dt:
+                raise RuntimeError("ready movement joint state became obsolete")
+            command = dict(zip(JOINT_KEYS, map(float, command_q), strict=True))
+            if self.config.ready_gripper_open:
+                # Dataset convention 1 = open; the driver only forwards a change.
+                command["gripper_0"] = 1.0
+            with self._state_lock:
+                if self._ready_move is not move or self._disable_requested:
+                    return None
+                self.robot.send_action(command)
+                move.last_q = command_q.copy()
+                move.last_tick_at = now
+            return command
+        except Exception as exc:
+            self._fault("ready movement fault", exc)
+            return None
 
     @staticmethod
     def _joint_vector(raw: dict[str, Any]) -> np.ndarray:
@@ -470,11 +737,16 @@ class AsyncEEController:
         """Run one main-thread control tick and return the selected command."""
         self._service_main_thread_safety()
         with self._state_lock:
+            ready_move = self._ready_move
+        if ready_move is not None:
+            return self._tick_ready_move(ready_move)
+        with self._state_lock:
             if self._paused or self._quit:
                 return None
             generation = self._generation
+            offset = np.zeros(6) if self._tracking_offset is None else self._tracking_offset.copy()
 
-        now = self._clock()
+        tick_started = self._clock()
         try:
             raw = self._snapshot_observation(self.robot.get_observation())
             current_q = self._joint_vector(raw)
@@ -482,12 +754,20 @@ class AsyncEEController:
         except Exception as exc:
             self._fault("observation/FK fault", exc)
             return None
+        # Camera reads block until each camera delivers a new frame, so the
+        # observation is only "acquired" here.  Chunk indexing and the IK
+        # budget are measured from this instant, not from the tick start.
+        now = self._clock()
+        observation_ms = (now - tick_started) * 1e3
 
         self._publish_observation(wire, now, generation)
 
         with self._state_lock:
             chunk = self._action_chunk
         if chunk is None or chunk.generation != generation:
+            if self._chunk_wait_logged_generation != generation:
+                self._chunk_wait_logged_generation = generation
+                LOGGER.info("EE generation %d waiting for its first action chunk", generation)
             return None
 
         action_index = int(max(0.0, now - chunk.observed_at) / self.config.nominal_dt)
@@ -495,34 +775,92 @@ class AsyncEEController:
             self._fault("action chunk horizon expired")
             return None
 
+        # Measured joints corrected by the activation-time controller bias.
+        # Tracking limits compare this against commands; the raw measurement
+        # is still what the model observed.
+        current_ref = current_q - offset
         action7 = chunk.actions[action_index].copy()
+        if self.config.servo_mode == "cartesian":
+            return self._cartesian_step(
+                chunk, action_index, action7, current_q, current_ref, offset, now, observation_ms
+            )
         try:
+            with self._state_lock:
+                previous_q = None if self._last_command_q is None else self._last_command_q.copy()
+            if previous_q is None:
+                raise ValueError("missing controller reference; explicit f required")
+            if np.any(np.abs(previous_q - current_ref) > self.config.max_joint_tracking_error_rad):
+                raise ValueError("measured joints exceeded the previous-command tracking error limit")
             command = self.adapter.joint_action(
                 action7,
-                current_q,
+                current_ref,
                 max_joint_delta=self.config.max_joint_delta,
+                previous_q=previous_q,
+                max_tracking_error=self.config.max_joint_tracking_error_rad,
             )
             target_q = np.asarray([command[key] for key in JOINT_KEYS], dtype=np.float64)
             command_values = np.asarray(list(command.values()), dtype=np.float64)
             if target_q.shape != (6,) or not np.all(np.isfinite(command_values)):
                 raise ValueError("IK returned a malformed or non-finite joint action")
-            with self._state_lock:
-                previous_q = None if self._last_command_q is None else self._last_command_q.copy()
+            if np.any(np.abs(target_q - current_ref) > self.config.max_joint_tracking_error_rad + 1e-12):
+                raise ValueError("measured-to-command tracking error exceeds the configured limit")
             if previous_q is not None and np.any(
                 np.abs(target_q - previous_q) > self.config.max_joint_delta + 1e-12
             ):
                 raise ValueError("command-to-command joint delta exceeds the configured limit")
         except Exception as exc:
+            tracking_error = None if previous_q is None else np.rad2deg(previous_q - current_ref)
+            LOGGER.error(
+                "Rejected EE action[%d]: target_xyz_m=%s measured_q_rad=%s "
+                "previous_minus_corrected_measured_deg=%s offset_deg=%s",
+                action_index, action7[:3].tolist(), current_q.tolist(),
+                None if tracking_error is None else np.round(tracking_error, 4).tolist(),
+                np.round(np.rad2deg(offset), 4).tolist(),
+            )
             self._fault("IK/action safety fault", exc)
             return None
+        ik_ms = (self._clock() - now) * 1e3
+
+        if (
+            self.config.action_log_interval_s > 0
+            and now - self._last_action_log_at >= self.config.action_log_interval_s
+        ):
+            try:
+                measured_xyz = np.asarray(self.adapter.kinematics.forward(current_q))[:3]
+                command_xyz = np.asarray(self.adapter.kinematics.forward(target_q))[:3]
+                anchor_xyz = np.asarray(self.adapter.kinematics.forward(previous_q))[:3]
+                LOGGER.info(
+                    "EE action[%d] frame=link0 unit=m dry_run=%s current_xyz=%s "
+                    "target_xyz=%s target_delta=%s command_fk_delta=%s command_from_anchor_delta=%s "
+                    "measured_q_deg=%s previous_command_q_deg=%s planned_command_q_deg=%s "
+                    "tracking_error_deg=%s observation_ms=%.1f ik_ms=%.1f",
+                    action_index, self.config.dry_run,
+                    np.round(measured_xyz, 6).tolist(), np.round(action7[:3], 6).tolist(),
+                    np.round(action7[:3] - measured_xyz, 6).tolist(),
+                    np.round(command_xyz - measured_xyz, 6).tolist(),
+                    np.round(command_xyz - anchor_xyz, 6).tolist(),
+                    np.round(np.rad2deg(current_q), 5).tolist(),
+                    np.round(np.rad2deg(previous_q), 5).tolist(),
+                    np.round(np.rad2deg(target_q), 5).tolist(),
+                    np.round(np.rad2deg(previous_q - current_ref), 4).tolist(),
+                    observation_ms, ik_ms,
+                )
+                self._last_action_log_at = now
+            except Exception as exc:
+                self._fault("command FK diagnostic fault", exc)
+                return None
 
         # Network phase can place this tick arbitrarily close to the next
         # nominal action-index boundary.  Give IK one full control period from
-        # this acquisition tick, while never extending validity beyond the
+        # observation acquisition, while never extending validity beyond the
         # complete chunk horizon.
         chunk_deadline = chunk.observed_at + len(chunk.actions) * self.config.nominal_dt
         command_deadline = min(now + self.config.nominal_dt, chunk_deadline)
         if self._clock() > command_deadline:
+            LOGGER.error(
+                "IK overran its budget: observation_ms=%.1f ik_ms=%.1f budget_ms=%.1f",
+                observation_ms, ik_ms, self.config.nominal_dt * 1e3,
+            )
             self._fault("action became obsolete during IK")
             return None
 
@@ -538,6 +876,112 @@ class AsyncEEController:
                     self.robot.send_action(command)
         except Exception as exc:
             self._fault("robot send_action fault", exc)
+            return None
+        return command
+
+    def _cartesian_step(
+        self,
+        chunk: _ActionChunk,
+        action_index: int,
+        action7: np.ndarray,
+        current_q: np.ndarray,
+        current_ref: np.ndarray,
+        offset: np.ndarray,
+        now: float,
+        observation_ms: float,
+    ) -> dict[str, float] | None:
+        """ServoL variant of the command phase: bounded TCP waypoint, no client IK.
+
+        The waypoint continues from the previous TCP command (anchored to the
+        controller reference at activation) along the straight line and
+        shortest rotation towards the model target, with one common fraction
+        so the TCP direction is preserved.  Tracking compares the previous
+        command with the offset-corrected measured TCP pose.
+        """
+        cfg = self.config
+        try:
+            with self._state_lock:
+                previous = None if self._last_command_pose is None else self._last_command_pose.copy()
+            if previous is None:
+                raise ValueError("missing controller reference; explicit f required")
+            measured_pose = np.asarray(self.adapter.kinematics.forward(current_ref), dtype=np.float64)
+            previous_rotation = Rotation.from_euler("xyz", previous[3:])
+            measured_rotation = Rotation.from_euler("xyz", measured_pose[3:])
+            tracking_position = float(np.linalg.norm(previous[:3] - measured_pose[:3]))
+            tracking_rotation = float(
+                np.linalg.norm((previous_rotation * measured_rotation.inv()).as_rotvec())
+            )
+            if tracking_position > cfg.max_tcp_tracking_error_m or tracking_rotation > cfg.max_tcp_tracking_error_rad:
+                raise ValueError(
+                    "measured TCP exceeded the previous-command tracking error limit "
+                    f"(position={tracking_position:.4f} m, rotation={tracking_rotation:.4f} rad)"
+                )
+            target = np.asarray(action7[:6], dtype=np.float64)
+            if target.shape != (6,) or not np.all(np.isfinite(action7)):
+                raise ValueError("EE action is malformed or non-finite")
+            target_rotation = Rotation.from_euler("xyz", target[3:])
+            delta_position = target[:3] - previous[:3]
+            delta_rotvec = (target_rotation * previous_rotation.inv()).as_rotvec()
+            position_norm = float(np.linalg.norm(delta_position))
+            rotation_norm = float(np.linalg.norm(delta_rotvec))
+            fraction = 1.0
+            if position_norm > 0.0:
+                fraction = min(fraction, cfg.max_tcp_speed_m_s * cfg.nominal_dt / position_norm)
+            if rotation_norm > 0.0:
+                fraction = min(fraction, cfg.max_tcp_angular_speed_rad_s * cfg.nominal_dt / rotation_norm)
+            planned_rotation = Rotation.from_rotvec(fraction * delta_rotvec) * previous_rotation
+            planned = np.concatenate(
+                (previous[:3] + fraction * delta_position, planned_rotation.as_euler("xyz"))
+            )
+            if not np.all(np.isfinite(planned)):
+                raise ValueError("planned TCP waypoint is non-finite")
+            gripper = float(np.clip(action7[6], 0.0, 1.0))
+        except Exception as exc:
+            LOGGER.error(
+                "Rejected EE action[%d] (cartesian): target_pose=%s measured_q_rad=%s offset_deg=%s",
+                action_index, action7[:6].tolist(), current_q.tolist(),
+                np.round(np.rad2deg(offset), 4).tolist(),
+            )
+            self._fault("TCP/action safety fault", exc)
+            return None
+        plan_ms = (self._clock() - now) * 1e3
+
+        if cfg.action_log_interval_s > 0 and now - self._last_action_log_at >= cfg.action_log_interval_s:
+            measured_xyz = np.asarray(self.adapter.kinematics.forward(current_q))[:3]
+            LOGGER.info(
+                "EE action[%d] mode=cartesian frame=link0 unit=m dry_run=%s current_xyz=%s "
+                "target_xyz=%s target_delta=%s command_fk_delta=%s command_from_anchor_delta=%s "
+                "measured_q_deg=%s planned_pose=%s fraction=%.3f "
+                "tracking_error_m=%.4f tracking_error_rad=%.4f observation_ms=%.1f plan_ms=%.1f",
+                action_index, cfg.dry_run,
+                np.round(measured_xyz, 6).tolist(), np.round(target[:3], 6).tolist(),
+                np.round(target[:3] - measured_xyz, 6).tolist(),
+                np.round(planned[:3] - measured_xyz, 6).tolist(),
+                np.round(planned[:3] - previous[:3], 6).tolist(),
+                np.round(np.rad2deg(current_q), 5).tolist(),
+                np.round(planned, 6).tolist(), fraction,
+                tracking_position, tracking_rotation, observation_ms, plan_ms,
+            )
+            self._last_action_log_at = now
+
+        chunk_deadline = chunk.observed_at + len(chunk.actions) * cfg.nominal_dt
+        if self._clock() > min(now + cfg.nominal_dt, chunk_deadline):
+            self._fault("action became obsolete during planning")
+            return None
+
+        command = {
+            **dict(zip(("x", "y", "z", "rx", "ry", "rz"), map(float, planned), strict=True)),
+            "gripper_0": gripper,
+        }
+        try:
+            with self._state_lock:
+                if self._paused or self._generation != chunk.generation:
+                    return None
+                self._last_command_pose = planned.copy()
+                if not cfg.dry_run:
+                    self.robot.send_cartesian_action(planned, gripper)
+        except Exception as exc:
+            self._fault("robot send_cartesian_action fault", exc)
             return None
         return command
 
@@ -680,12 +1124,17 @@ def run_client(
     controller = AsyncEEController(cfg, robot, adapter)
     connected = False
     try:
+        LOGGER.info("Connecting to robot and cameras (actuator initialization deferred)")
         robot.connect()  # type: ignore[attr-defined]
         connected = True
         controller.initialize_robot_safety()
         controller.start_network_worker()
-        LOGGER.info("RB10 EE client paused. Keys: f=activate, s=pause, q=quit")
         with _Keyboard() as keyboard:
+            LOGGER.info("Keys: f=activate inference, s=stop and return to ready pose, q=quit")
+            if cfg.move_to_ready_on_start:
+                controller.start_ready_move("startup")
+            else:
+                LOGGER.info("Started paused without preset movement")
             while not controller.should_quit:
                 started = time.monotonic()
                 key = keyboard.poll()
@@ -719,6 +1168,11 @@ def async_ee_client(cfg: EEClientConfig) -> None:
 
 def main() -> None:
     """Register polymorphic configs before draccus parses ``robot.type``."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
     from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
     from lerobot.cameras.realsense import RealSenseCameraConfig  # noqa: F401
     from lerobot.utils.import_utils import register_third_party_plugins

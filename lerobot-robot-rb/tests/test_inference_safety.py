@@ -134,6 +134,11 @@ class _FakeCobot:
         self.servo_commands.append(list(joints_deg))
         return True
 
+    def ServoL(self, *, pose_mm_deg: Any, **kwargs: Any) -> bool:
+        self.events.append("servo_l")
+        self.servo_commands.append(list(pose_mm_deg))
+        return True
+
     def DisConnectToCB(self) -> bool:
         self.events.append("disconnect")
         return True
@@ -274,7 +279,7 @@ def test_safe_mode_gates_arm_and_gripper_during_pause(robot_factory) -> None:
     "action",
     [
         _action(gripper=math.nan),
-        _action(joints=[3.141, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        _action(joints=[2 * math.pi + 0.001, 0.0, 0.0, 0.0, 0.0, 0.0]),
         _action(joints=[0.0, 0.0, math.radians(165.1), 0.0, 0.0, 0.0]),
     ],
 )
@@ -314,3 +319,30 @@ def test_legacy_connect_and_gripper_gate_behavior_is_unchanged(
     robot.send_action(_action(gripper=0.0))
     assert cobot.servo_commands == []
     assert gripper.positions == [1.0]
+
+
+def test_inference_servoj_preserves_recorded_unwrapped_angles(robot_factory):
+    robot, cobot, _ = robot_factory()
+    robot.enable_servo_commands()
+    degrees = [-181.0, -3.3101, 141.8867, 41.4234, 277.4747, 180.0]
+    robot.send_action(_action(joints=[math.radians(value) for value in degrees]))
+    assert cobot.servo_commands[-1] == pytest.approx(degrees)
+
+
+def test_cartesian_servol_converts_units_and_respects_the_gate(robot_factory):
+    robot, cobot, gripper = robot_factory()
+    pose = [-0.3767, 0.1193, 0.1887, 0.3034, 0.1683, -1.4675]
+    # Gate closed: nothing reaches the control box or the gripper.
+    sent = robot.send_cartesian_action(pose, gripper=0.0)
+    assert "servo_l" not in cobot.events and "gripper_action" not in cobot.events
+    assert sent["gripper_0"] == 0.0
+
+    robot.enable_servo_commands()
+    robot.send_cartesian_action(pose, gripper=0.0)
+    assert cobot.events[-2:] == ["servo_l", "gripper_action"]
+    expected = [-376.7, 119.3, 188.7] + [math.degrees(v) for v in pose[3:]]
+    assert cobot.servo_commands[-1] == pytest.approx(expected)
+    assert gripper.positions[-1] == pytest.approx(1.0)  # dataset 0=closed -> hardware 1
+
+    with pytest.raises(ValueError):
+        robot.send_cartesian_action([0.0, 0.0, math.nan, 0.0, 0.0, 0.0])

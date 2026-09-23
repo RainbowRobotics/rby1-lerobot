@@ -4,6 +4,7 @@ set -euo pipefail
 if [[ $# -lt 3 ]]; then
     echo "Usage: bash scripts/inference_ee.sh rb10|rb10e SERVER_HOST:PORT ROBOT_IP [client options]" >&2
     echo "Starts paused, dry_run=true. Connect reads robot/cameras; actuator initialization is deferred." >&2
+    echo "Starts paused without preset movement. f starts inference; s stops movement." >&2
     exit 2
 fi
 
@@ -25,6 +26,7 @@ exec python -m lerobot_async_inference.robot_client_ee \
     --robot.gripper_type=rby1_dynamixel \
     --robot.control_rate_hz=30 \
     --robot.first_state_timeout_s=0.25 \
+    --robot.cameras='{"wrist":{"type":"intelrealsense","serial_number_or_name":"262622274852","fps":30,"width":640,"height":480,"rotation":0},"front":{"type":"intelrealsense","serial_number_or_name":"409122274689","fps":30,"width":640,"height":480,"rotation":0}}' \
     --kinematics_model="$model" \
     --server_address="$server" \
     --task="Control the RB10 arm and gripper using Meta Quest VR." \
