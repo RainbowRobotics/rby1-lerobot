@@ -628,3 +628,34 @@ def test_config_wear_and_viz_validation():
     with pytest.raises(ValueError):
         Rby1XRConfig(viz_enabled=True, viz_cameras=["front"], viz_offsets_x=[0.0, 1.0])
     assert Rby1XRConfig(viz_enabled=True, viz_cameras=["front"], viz_offsets_x=[0.0]).viz_lock_mode == "gimbal"
+
+
+def test_posture_hint_frozen_while_released(stubbed_pipeline, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    from lerobot_teleoperator_rby1.isaac_teleop.arm_retargeter import forward_points
+
+    q_a = np.array([0.3, -0.4, 0.2, -1.2])
+    q_b = np.array([0.8, -0.9, 0.5, -0.6])
+    S, E, W = forward_points(q_a, "right")
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(W, squeeze=0.9), body=_body_with_arm("right", S, E, W)))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", use_torso=False, use_left_arm=False, use_head=False,
+                    arm_posture_hint=True, posture_hint_smoothing=1.0, posture_hint_max_vel=100.0)
+    t.connect()
+    readers[0].torso = np.eye(4)
+    a = t.get_action()  # engaged: hint follows the arm
+    assert a["right_arm_0.null"] == pytest.approx(q_a[0], abs=1e-5)
+    # Release the squeeze and move the arm: the hint must not change.
+    S2, E2, W2 = forward_points(q_b, "right")
+    clock[0] += 0.02
+    session.push(_frame(right=fakes.controller(W2, squeeze=0.0), body=_body_with_arm("right", S2, E2, W2)))
+    a = t.get_action()
+    assert a["right_arm_0.null"] == pytest.approx(q_a[0], abs=1e-5)
+    assert a["right_arm_3.null"] == pytest.approx(q_a[3], abs=1e-5)
+    # Squeeze again: the hint follows the new posture.
+    clock[0] += 0.02
+    session.push(_frame(right=fakes.controller(W2, squeeze=0.9), body=_body_with_arm("right", S2, E2, W2)))
+    a = t.get_action()
+    assert a["right_arm_0.null"] == pytest.approx(q_b[0], abs=1e-5)

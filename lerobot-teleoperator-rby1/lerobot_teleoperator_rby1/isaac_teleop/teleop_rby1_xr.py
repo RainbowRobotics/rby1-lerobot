@@ -808,9 +808,17 @@ class Rby1XR(IsaacTeleopTeleoperator):
         clutch.set_commanded(T)
 
     def _update_posture_hints(self, frame: XRFrame, snap: RobotSnapshot, t: float, dt: float) -> None:
+        """Retarget the arm posture only while that arm is engaged (squeeze held).
+
+        A released arm must not move at all, so its nullspace hint is frozen
+        at the last value together with its EE target.
+        """
         if not self._posture or self._stopped or self._returning:
             return
         for side, retargeter in self._posture.items():
+            clutch = self._clutch.get(side)
+            if clutch is None or not clutch.engaged:
+                continue
             S, E, Wb = self._body_points(frame, side)
             ctrl = frame.right if side == "right" else frame.left
             W = ctrl.position if (self.config.hint_wrist_source == "controller" and ctrl is not None) else Wb
