@@ -49,7 +49,6 @@ from .models import DOF, GRIPPER_NAME, JOINT_NAMES, MODEL_SPECS
 logger = logging.getLogger(__name__)
 
 
-_INFERENCE_URDF_JOINT_LIMIT_RAD = 3.14
 
 
 # The standard LeRobot CLI connects the Robot before the Teleoperator.
@@ -758,14 +757,8 @@ class RbCobot(Robot):
                     dtype=np.float64,
                 )
             )
-            lower = np.maximum(
-                model_limits_rad[:, 0],
-                -_INFERENCE_URDF_JOINT_LIMIT_RAD,
-            )
-            upper = np.minimum(
-                model_limits_rad[:, 1],
-                _INFERENCE_URDF_JOINT_LIMIT_RAD,
-            )
+            lower = model_limits_rad[:, 0]
+            upper = model_limits_rad[:, 1]
             outside = (joint_rad < lower) | (joint_rad > upper)
             if np.any(outside):
                 invalid = [
@@ -858,4 +851,68 @@ class RbCobot(Robot):
         if dataset_gripper_target is not None:
             sent[GRIPPER_NAME] = dataset_gripper_target
 
+        return sent
+
+    def send_cartesian_action(
+        self,
+        pose_m_rad: Any,
+        gripper: float | None = None,
+    ) -> dict[str, Any]:
+        """Send one TCP ServoL command when the command gate is enabled.
+
+        ``pose_m_rad`` is ``[x, y, z, rx, ry, rz]`` in metres and extrinsic
+        XYZ Euler radians (``R = Rz @ Ry @ Rx``), the same convention as the
+        control box's Z-Y'-X'' degrees, so only units are converted.  The
+        control box performs the inverse kinematics with its own TCP
+        calibration; no joint envelope check is possible on the command.
+        """
+        if not self.is_connected:
+            raise DeviceNotConnectedError(
+                f"{self} is not connected."
+            )
+
+        pose = np.asarray(pose_m_rad, dtype=np.float64)
+        if pose.shape != (DOF,) or not np.all(np.isfinite(pose)):
+            raise ValueError(
+                "RB cartesian action must be six finite values "
+                f"[x, y, z, rx, ry, rz], got {pose_m_rad!r}."
+            )
+        dataset_gripper_target = self._validated_gripper_target(
+            {} if gripper is None else {GRIPPER_NAME: gripper}
+        )
+
+        if self._servo_enabled:
+            pose_native = np.concatenate(
+                (pose[:3] * 1000.0, np.rad2deg(pose[3:]))
+            )
+            success = self.low_level_cobot.ServoL(
+                pose_mm_deg=pose_native,
+                t1=self._config.servo_t1,
+                t2=self._config.servo_t2,
+                gain=self._config.servo_gain,
+                alpha=self._config.servo_alpha,
+            )
+            if not success:
+                raise RuntimeError(
+                    "RB control box rejected the ServoL command."
+                )
+
+        gripper_gate_open = (
+            self._servo_enabled
+            or not self._config.inference_safe_start
+        )
+        if (
+            self._gripper is not None
+            and dataset_gripper_target is not None
+            and gripper_gate_open
+        ):
+            # Same dataset (1=open) to hardware (0=open) inversion as send_action.
+            self._gripper.set_position(1.0 - dataset_gripper_target)
+
+        sent: dict[str, Any] = {
+            name: float(pose[index])
+            for index, name in enumerate(("x", "y", "z", "rx", "ry", "rz"))
+        }
+        if dataset_gripper_target is not None:
+            sent[GRIPPER_NAME] = dataset_gripper_target
         return sent

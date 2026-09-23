@@ -128,7 +128,9 @@ def adapter(protocol):
     instance.front_camera_key = "front"
     instance.kinematics = types.SimpleNamespace(
         forward=lambda q: np.arange(6) * 0.1,
-        inverse=lambda target, seed, **kwargs: seed.copy(),
+        inverse_step=lambda target, seed, **kwargs: seed.copy(),
+        max_joint_delta=0.5,
+        joint_limits=np.tile([-2 * np.pi, 2 * np.pi], (6, 1)),
     )
     return instance
 
@@ -153,7 +155,7 @@ def test_camera_mapping_missing_front_and_buffer_snapshot(adapter):
 
 
 def test_ik_failure_and_out_of_limit_never_become_commands(adapter):
-    adapter.kinematics.inverse = lambda target, seed, **kwargs: seed + 1
+    adapter.kinematics.inverse_step = lambda target, seed, **kwargs: seed + 1
     with pytest.raises(ValueError, match="displacement"):
         adapter.joint_action(np.zeros(7), np.zeros(6), max_joint_delta=0.01)
     with pytest.raises(ValueError, match="finite"):
@@ -165,3 +167,74 @@ def test_adapter_preserves_radians_and_gripper_open_convention(adapter):
     action = adapter.joint_action(np.r_[np.zeros(6), 1.0], q, max_joint_delta=0.1)
     np.testing.assert_array_equal([action[f"joint_{i}"] for i in range(6)], q)
     assert action["gripper_0"] == 1.0
+
+
+def test_adapter_uses_cartesian_step_solver_with_servo_limit(adapter):
+    def solve(target, seed, *, max_joint_delta, previous_q, max_tracking_error):
+        assert max_joint_delta == 0.5 / 30
+        assert previous_q is None
+        assert max_tracking_error is None
+        return seed + max_joint_delta
+
+    adapter.kinematics.inverse_step = solve
+    command = adapter.joint_action(np.zeros(7), np.zeros(6), max_joint_delta=0.5 / 30)
+    np.testing.assert_allclose([command[f"joint_{i}"] for i in range(6)], 0.5 / 30)
+
+
+def test_step_respects_measured_and_previous_command_bounds(adapter):
+    adapter.kinematics.inverse_step = lambda target, seed, **kwargs: seed.copy()
+    command = adapter.joint_action(
+        np.zeros(7), np.zeros(6), max_joint_delta=0.01, previous_q=np.full(6, 0.01)
+    )
+    np.testing.assert_allclose([command[f"joint_{i}"] for i in range(6)], 0.0)
+    with pytest.raises(ValueError, match="no safe step intersection"):
+        adapter.joint_action(
+            np.zeros(7), np.zeros(6), max_joint_delta=0.01, previous_q=np.full(6, 0.03)
+        )
+
+
+def test_unreachable_goal_is_not_hidden_by_step_limiter(adapter):
+    def fail(*args, **kwargs):
+        raise RuntimeError("inverse kinematics residual exceeds tolerance")
+
+    adapter.kinematics.inverse_step = fail
+    with pytest.raises(RuntimeError, match="residual"):
+        adapter.joint_action(np.zeros(7), np.zeros(6), max_joint_delta=0.01)
+
+
+def test_explicit_tracking_preserves_command_anchor_without_relaxing_speed(adapter):
+    reference = np.full(6, 0.02)
+
+    def solve(target, seed, *, max_joint_delta, previous_q, max_tracking_error):
+        assert max_joint_delta == 0.005
+        assert max_tracking_error == 0.05
+        np.testing.assert_array_equal(previous_q, reference)
+        return previous_q.copy()
+
+    adapter.kinematics.inverse_step = solve
+    command = adapter.joint_action(
+        np.zeros(7), np.zeros(6), max_joint_delta=0.005,
+        previous_q=reference, max_tracking_error=0.05,
+    )
+    np.testing.assert_array_equal([command[f"joint_{i}"] for i in range(6)], reference)
+    adapter.kinematics.inverse_step = lambda *args, **kwargs: reference + 0.006
+    with pytest.raises(ValueError, match="displacement"):
+        adapter.joint_action(
+            np.zeros(7), np.zeros(6), max_joint_delta=0.005,
+            previous_q=reference, max_tracking_error=0.05,
+        )
+
+
+def test_explicit_tracking_rejects_excessive_existing_error(adapter):
+    with pytest.raises(ValueError, match="tracking error"):
+        adapter.joint_action(
+            np.zeros(7), np.zeros(6), max_joint_delta=0.005,
+            previous_q=np.full(6, 0.06), max_tracking_error=0.05,
+        )
+
+
+def test_goal_outside_model_limits_is_rejected_before_limiting(adapter):
+    adapter.kinematics.inverse_step = lambda target, seed, **kwargs: seed + 0.08
+    adapter.kinematics.joint_limits = np.tile([-0.05, 0.05], (6, 1))
+    with pytest.raises(ValueError, match="safety joint limits"):
+        adapter.joint_action(np.zeros(7), np.zeros(6), max_joint_delta=0.01)

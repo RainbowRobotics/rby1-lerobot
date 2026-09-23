@@ -1035,6 +1035,47 @@ class Cobot:
             CMD_TYPE.NONMOVE,
         )
 
+    def ServoL(
+        self,
+        pose_mm_deg: Sequence[float],
+        t1: float,
+        t2: float,
+        gain: float,
+        alpha: float,
+    ) -> bool:
+        """Send the original RB move_servo_l command.
+
+        ``pose_mm_deg`` is ``[x, y, z, rx, ry, rz]`` in the control-box units:
+        millimetres and Z-Y'-X'' Euler degrees (``R = Rz @ Ry @ Rx``).
+        The control box solves inverse kinematics with its own TCP setting.
+        """
+
+        if len(pose_mm_deg) != 6:
+            raise ValueError(
+                "ServoL requires exactly six pose values."
+            )
+
+        values = [float(value) for value in pose_mm_deg]
+
+        command = (
+            "move_servo_l(pnt["
+            f"{values[0]:.3f},"
+            f"{values[1]:.3f},"
+            f"{values[2]:.3f},"
+            f"{values[3]:.3f},"
+            f"{values[4]:.3f},"
+            f"{values[5]:.3f}], "
+            f"{float(t1):.3f}, "
+            f"{float(t2):.3f}, "
+            f"{float(gain):.3f}, "
+            f"{float(alpha):.3f})"
+        )
+
+        return self.SendCOMMAND(
+            command,
+            CMD_TYPE.NONMOVE,
+        )
+
     def InitDxlCurrentMode(self) -> bool:
         return self.SendCOMMAND(
             "gripper_macro 37,0,0,0,0,0,0,0,0,0",

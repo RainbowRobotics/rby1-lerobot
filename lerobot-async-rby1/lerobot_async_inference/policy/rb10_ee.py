@@ -124,19 +124,46 @@ class EEPolicyAdapter:
         return result
 
     def joint_action(
-        self, action, current_q, *, max_joint_delta: float
+        self, action, current_q, *, max_joint_delta: float, previous_q=None,
+        max_tracking_error: float | None = None,
     ) -> dict[str, float]:
         target = _vector(action, 7, "EE action")
         seed = _vector(current_q, 6, "IK seed")
         if not np.isfinite(max_joint_delta) or max_joint_delta <= 0:
             raise ValueError("max_joint_delta must be finite and positive")
+        tracking = max_joint_delta if max_tracking_error is None else max_tracking_error
+        if not np.isfinite(tracking) or tracking <= 0:
+            raise ValueError("max_tracking_error must be finite and positive")
+        # Cartesian waypoint IK preserves the requested TCP direction; clipping
+        # individual joints after a full-goal solve changes that direction.
         q = _vector(
-            self.kinematics.inverse(target[:6], seed, max_joint_delta=max_joint_delta),
+            self.kinematics.inverse_step(
+                target[:6], seed, max_joint_delta=max_joint_delta, previous_q=previous_q,
+                max_tracking_error=max_tracking_error,
+            ),
             6,
             "IK result",
         )
-        if np.any(np.abs(q - seed) > max_joint_delta + 1e-9):
-            raise ValueError("IK result exceeds the per-tick joint displacement limit")
+        limits = self.kinematics.joint_limits
+        if np.any(q < limits[:, 0]) or np.any(q > limits[:, 1]):
+            raise ValueError("IK result exceeds the safety joint limits")
+
+        # Both tracking error and command-to-command velocity stay bounded.
+        lower = np.maximum(seed - tracking, limits[:, 0])
+        upper = np.minimum(seed + tracking, limits[:, 1])
+        if previous_q is not None:
+            previous = _vector(previous_q, 6, "previous joint command")
+            if max_tracking_error is not None and np.any(np.abs(previous - seed) > tracking + 1e-10):
+                raise ValueError("previous command exceeds the measured tracking error limit")
+            lower = np.maximum(lower, previous - max_joint_delta)
+            upper = np.minimum(upper, previous + max_joint_delta)
+        else:
+            lower = np.maximum(lower, seed - max_joint_delta)
+            upper = np.minimum(upper, seed + max_joint_delta)
+        if np.any(lower > upper):
+            raise ValueError("measured joints and previous command have no safe step intersection")
+        if np.any(q < lower - 1e-10) or np.any(q > upper + 1e-10):
+            raise ValueError("IK result exceeds the safe servo displacement limit")
         return {
             **dict(zip(JOINT_KEYS, q.tolist(), strict=True)),
             GRIPPER_KEY: float(np.clip(target[6], 0, 1)),
