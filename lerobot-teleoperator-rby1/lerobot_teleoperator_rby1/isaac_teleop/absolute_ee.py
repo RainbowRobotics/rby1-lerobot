@@ -26,6 +26,7 @@ class AbsoluteEeMapper:
         *,
         robot_reach: float,
         human_reach: float | None = None,   # None = estimate from the body joints
+        fallback_reach: float | None = None,  # used while no body estimate exists yet
         position_scale: float = 1.0,
         reach_max_ratio: float = 0.98,
         shoulder_smoothing: float = 0.2,
@@ -37,6 +38,7 @@ class AbsoluteEeMapper:
         self.side = side
         self.robot_reach = robot_reach
         self._human_reach_cfg = human_reach
+        self._fallback_reach = fallback_reach
         self.position_scale = position_scale
         self.reach_max_ratio = reach_max_ratio
         self.shoulder_smoothing = shoulder_smoothing
@@ -55,7 +57,13 @@ class AbsoluteEeMapper:
 
     @property
     def human_reach(self) -> float | None:
-        return self._human_reach_cfg if self._human_reach_cfg is not None else self._human_reach
+        if self._human_reach_cfg is not None:
+            return self._human_reach_cfg
+        return self._human_reach if self._human_reach is not None else self._fallback_reach
+
+    def set_shoulder(self, shoulder: np.ndarray) -> None:
+        """Set the (already estimated) shoulder position directly, no smoothing."""
+        self._shoulder = np.asarray(shoulder, dtype=float).copy()
 
     @property
     def orientation_offset(self) -> np.ndarray:

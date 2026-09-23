@@ -190,6 +190,45 @@ lerobot-teleoperate ... --teleop.type=rby1_isaac \
   --teleop.arm_mode=ee_absolute --teleop.arm_posture_hint=true
 ```
 
+#### Camera panels in the headset (Televiz)
+
+The robot cameras can be shown in the headset as floating panels (one per camera,
+rendered by Isaac Teleop's Televiz through the same CloudXR connection). The frames
+come from the robot's own camera reads (`--robot.cameras`), so nothing is opened twice:
+
+```bash
+lerobot-teleoperate ... \
+  --robot.cameras='{"front": {...}, "left": {...}, "right": {...}}' \
+  --teleop.viz_enabled=true --teleop.viz_cameras='["front","left","right"]' \
+  --teleop.viz_offsets_x='[0.0,-1.1,1.1]'
+```
+
+Panels follow your head position and yaw (`viz_lock_mode=gimbal`; `head` = full head
+lock, `world` = fixed in the room). On **Jetson Orin** keep `viz_openxr_composition=false`
+(default) and set the **Video Codec to H.264** in the CloudXR web client, otherwise the
+panels stay black. Run the preflight `--only V_viz --viz-seconds 15` first: three colour
+bars must be visible.
+
+#### Wearing the headset around the neck (`wear_mode=neck`)
+
+For long sessions the headset can hang from the neck instead of being worn:
+
+```bash
+lerobot-teleoperate ... --teleop.wear_mode=neck --teleop.torso_engage=any_arm \
+  --teleop.arm_length_source=config
+```
+
+- The robot **head is held at the ready pose** and the **headset pose drives the torso**
+  (smoothed by `neck_torso_smoothing`), so bending forward with the headset on your
+  chest bends the robot.
+- The operator frame (Right A) comes from the body-tracking shoulder line when
+  available, otherwise from the headset → both-controllers direction; the absolute-EE
+  shoulder is estimated from the headset (`neck_shoulder_offset`).
+- **Disable the Quest proximity sensor first** (Meta Quest Developer Hub → Device
+  Actions → *Proximity Sensor* off — it re-enables ~10 min after MQDH disconnects — or
+  cover the sensor with tape). Otherwise the headset sleeps within seconds of being taken
+  off, the OpenXR session loses focus and the controllers stop streaming.
+
 `lerobot-record` takes the same `--robot.*` / `--teleop.*` arguments plus the
 `--dataset.*` ones from the sections below. The teleoperator's `use_torso`,
 `use_right_arm`, `use_left_arm`, `use_gripper`, `use_mobile_base` and `use_head`
@@ -210,6 +249,7 @@ The process prints the host IP addresses and waits for the headset:
 | Right **A** | Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; re-reference the operator frame so the direction you are facing becomes robot +X; also resumes after a stop and re-centres the head origin. The base is not moved |
 | Headset orientation | `head_0` (pan) / `head_1` (tilt) relative to the pose at the first tracked frame |
 | Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, while **both** arms are clutched (`torso_engage=both_arms`, default; `any_arm` / `always` available) |
+| Headset pose (`wear_mode=neck`) | Torso pose (the robot head stays at the ready pose) |
 | Body tracking shoulder / elbow (`arm_posture_hint=true`) | The arm posture (shoulder + elbow angles) is retargeted to `arm_0..arm_3` and sent as a **nullspace hint** to the Cartesian solver: the elbow follows yours while the EE pose keeps priority. Not recorded unless `record_posture_hint` (both sides) |
 
 ## Record Data and upload to HF
@@ -287,6 +327,10 @@ lerobot-record \
 | `cloudxr_env_file` | `None` | KEY=value profile for CloudXR; default is the packaged `default.env` (Quest3 profile) |
 | `session_start` | `"connect"` | `"first_action"` opens the XR session on the first `get_action()` (Jetson Orin mitigation) |
 | `tracking_wait_timeout_s` | `0.0` | Give up waiting for the headset after this many seconds (0 = forever) |
+| `wear_mode` | `"head"` | `head` (worn) or `neck` (hanging from the neck: head joints held at the ready pose, headset pose → torso, headset-based operator frame / shoulder estimate) |
+| `neck_torso_smoothing`, `neck_shoulder_offset`, `shoulder_source` | `0.3`, `[-0.05,0.20,-0.15]`, `"auto"` | Neck mode: EMA on the headset pose driving the torso; shoulder position relative to the headset (left side, mirrored for right); absolute-EE shoulder from `body` / `headset` / `auto` |
+| `viz_enabled`, `viz_cameras`, `viz_offsets_x`, `viz_offset_y`, `viz_distance_m`, `viz_width_m` | `False`, `[front,left,right]`, `[0,-1.1,1.1]`, `0`, `1.5`, `1.0` | Televiz camera panels: robot camera names and their placement (m) |
+| `viz_lock_mode`, `viz_openxr_composition`, `viz_wait_headset_s` | `"gimbal"`, `False`, `-1` | Panel lock mode; runtime vs Televiz compositing (keep False on Jetson Orin); wait for the headset when creating the XR session |
 | `arm_mode` | `"ee_clutch"` | `ee_clutch` (delta from the squeeze moment) or `ee_absolute` (hand relative to the IOBT shoulder, scaled onto the robot shoulder; squeeze = dead-man) |
 | `engage_ramp_s`, `ee_max_linear_vel`, `ee_max_angular_vel` | `2.0`, `1.0`, `3.0` | `ee_absolute`: ramp to the target on engage; rate limits (m/s, rad/s) |
 | `ee_position_scale`, `ee_reach_max_ratio` | `1.0`, `0.98` | `ee_absolute`: extra multiplier on the robot/human reach ratio; clamp of the hand-to-shoulder distance |

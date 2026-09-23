@@ -80,6 +80,7 @@ from .retargeters import (
     thumbsticks_to_base_vel,
 )
 from .robot_state import Rby1StateReader, RobotSnapshot
+from .viz_panels import CameraPanels, PanelLayout, bus_frame_source
 from .xr_frame import (
     BodyJointIndex,
     ButtonEdge,
@@ -117,8 +118,12 @@ class Rby1XR(IsaacTeleopTeleoperator):
         session_factory: Any | None = None,
         launcher_factory: Any | None = None,
         state_reader_factory: Callable[[str, str], Any] | None = None,
+        viz_module: Any | None = None,
+        viz_uploader: Any | None = None,
     ) -> None:
         super().__init__(config, session_factory=session_factory, launcher_factory=launcher_factory)
+        self._viz_module_override = viz_module
+        self._viz_uploader_override = viz_uploader
         self.config: Rby1XRConfig = config
         self._reader_factory = state_reader_factory or Rby1StateReader
         self._reader: Any = None
@@ -170,6 +175,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._hints: dict[str, np.ndarray | None] = {"right": None, "left": None}
         self._needs_offset_latch = True
         self._last_tick_t: float | None = None
+        # Neck mode: smoothed headset pose driving the torso.
+        self._neck_driver: np.ndarray | None = None
+        self._warned_neck_torso = False
 
     # ------------------------------------------------------------------
     # Features
@@ -231,6 +239,28 @@ class Rby1XR(IsaacTeleopTeleoperator):
         cfg = self.config
         logger.info("rby1_isaac: opening read-only robot link at %s …", cfg.robot_address)
         self._reader = self._reader_factory(cfg.robot_address, cfg.robot_model)
+        logger.info("rby1_isaac: wear_mode=%s", cfg.wear_mode)
+        if cfg.wear_mode == "neck":
+            logger.warning(
+                "wear_mode=neck: the headset must NOT go to sleep while hanging from the neck — "
+                "disable the Quest proximity sensor (MQDH → Device Actions → Proximity Sensor off, "
+                "or cover the sensor). The robot head is held at the start pose and the headset "
+                "pose drives the torso."
+            )
+        if cfg.viz_enabled:
+            layouts = [
+                PanelLayout(name, offset_x=ox, offset_y=cfg.viz_offset_y, distance=cfg.viz_distance_m, width=cfg.viz_width_m)
+                for name, ox in zip(cfg.viz_cameras, cfg.viz_offsets_x)
+            ]
+            self._viz = CameraPanels(
+                layouts,
+                bus_frame_source,
+                lock_mode=cfg.viz_lock_mode,
+                openxr_composition=cfg.viz_openxr_composition,
+                viz_module=self._viz_module_override,
+                uploader=self._viz_uploader_override,
+                daemon=self._viz_module_override is not None,  # test doubles must not pin the process
+            )
         try:
             self._reader.connect()
             self._init_arm_mappers()
@@ -268,6 +298,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
 
     def _open_session(self) -> None:
         """Launch CloudXR + TeleopSession, wait for the headset, latch the start pose."""
+        if self._viz is not None:
+            # VizSession.create() blocks until the headset connects: show the
+            # connection instructions before that.
+            print_xr_connect_help()
         super().connect()
         try:
             self._external_inputs = build_external_inputs(self.config.base_T_anchor)
@@ -301,6 +335,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
                     max_linear_vel=cfg.ee_max_linear_vel,
                     max_angular_vel=cfg.ee_max_angular_vel,
                     orientation_offset=offset,
+                    fallback_reach=cfg.human_arm_length_m,
                 )
             if cfg.arm_posture_hint:
                 self._posture[side] = ArmPostureRetargeter(
@@ -357,6 +392,15 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 if np.linalg.norm(fwd[:2]) > 1e-3:
                     yaw = math.atan2(fwd[1], fwd[0])
                     source = "shoulder line"
+        if yaw is None and self.config.wear_mode == "neck" and raw.head is not None:
+            # Both controllers are needed: a single hand sits ~0.2 m off-centre
+            # and would bias the facing direction by tens of degrees.
+            if raw.right is not None and raw.left is not None:
+                mid = 0.5 * (raw.right.position + raw.left.position)
+                fwd = mid - raw.head.position
+                if np.linalg.norm(fwd[:2]) > 0.05:
+                    yaw = math.atan2(fwd[1], fwd[0])
+                    source = "headset→controllers direction"
         if yaw is None:
             if raw.head is None:
                 return False
@@ -706,8 +750,17 @@ class Rby1XR(IsaacTeleopTeleoperator):
         cfg = self.config
 
         S, E, W = self._body_points(frame, side)
-        mapper.observe_body(S, E, W)
-        if S is not None:
+        src = cfg.shoulder_source
+        use_body = src in ("auto", "body") and S is not None
+        if use_body:
+            mapper.observe_body(S, E, W)
+            self._abs_last_body_t[side] = t
+        elif src in ("auto", "headset") and frame.head is not None:
+            # Estimate the shoulder from the headset position (operator frame
+            # is yaw-referenced: +x forward, +y left).
+            ox, oy, oz = cfg.neck_shoulder_offset
+            est = frame.head.position + np.array([ox, oy if side == "left" else -oy, oz])
+            mapper.set_shoulder(est)
             self._abs_last_body_t[side] = t
         body_ok = self._abs_last_body_t[side] is not None and t - self._abs_last_body_t[side] <= cfg.abs_hold_s
 
@@ -777,6 +830,19 @@ class Rby1XR(IsaacTeleopTeleoperator):
 
     def _torso_driver_pose(self, frame: XRFrame) -> np.ndarray | None:
         src = self.config.torso_source
+        if self.config.wear_mode == "neck":
+            if src == "body" and not self._warned_neck_torso:
+                logger.warning("wear_mode=neck: torso_source=body is replaced by the headset pose.")
+                self._warned_neck_torso = True
+            if frame.head is None:
+                return None
+            pose = frame.head.pose
+            a = self.config.neck_torso_smoothing
+            if self._neck_driver is None or a >= 1.0:
+                self._neck_driver = pose
+            else:
+                self._neck_driver = interpolate_pose(self._neck_driver, pose, a)
+            return self._neck_driver
         if src == "body":
             pose = chest_pose_from_body(frame.body, self._torso_joint, self._torso_required)
             if pose is None and not self._warned_no_body:
@@ -816,8 +882,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
                             if not bool(frame.body.valid[i])
                         ]
                         self._torso_hold_reason = f"body joints invalid: {bad}"
-                elif src == "head":
-                    self._torso_hold_reason = "no head pose"
+                elif src == "head" or self.config.wear_mode == "neck":
+                    self._torso_hold_reason = "no headset pose"
                 else:
                     self._torso_hold_reason = "torso_source=none"
         if driver is None:
@@ -844,6 +910,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
     def _update_head(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot]) -> None:
         if not self.config.use_head or self._stopped or self._returning:
             return
+        if self.config.wear_mode == "neck":
+            return  # head joints stay at the held (start / ready) pose
         if frame.head is None:
             return
         if not self._head.latched:
@@ -926,7 +994,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
             wz,
             hint("right"),
             hint("left"),
-            " | STOPPED" if self._stopped else "",
+            (" | STOPPED" if self._stopped else "")
+            + (f" | wear={self.config.wear_mode}" if self.config.wear_mode != "head" else "")
+            + (f" | {self._viz.status()}" if self._viz is not None else ""),
         )
 
     def _build_action(self) -> dict[str, Any]:

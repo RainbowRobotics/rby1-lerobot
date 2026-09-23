@@ -522,3 +522,109 @@ def test_right_a_latches_orientation_against_start_pose(stubbed_pipeline, monkey
     a = t.get_action()
     R_cmd = Rotation.from_rotvec([a["right_ee.wx"], a["right_ee.wy"], a["right_ee.wz"]]).as_matrix()
     np.testing.assert_allclose(R_cmd, start_R, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Neck wear mode
+# ---------------------------------------------------------------------------
+
+
+def test_neck_mode_head_fixed_and_torso_follows_headset(stubbed_pipeline):
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(squeeze=0.9), head=fakes.head((0.0, 0.0, 1.5), quat=_head_quat(0))))
+    readers: list = []
+    t = make_teleop(session, readers, wear_mode="neck", torso_source="body", torso_engage="any_arm",
+                    neck_torso_smoothing=1.0, use_left_arm=False, torso_use_xy=True, torso_max_rot_delta_deg=35.0)
+    t.connect()
+    a = t.get_action()  # torso engages on the headset pose
+    head_q = readers[0].head_q.copy()
+    z0 = readers[0].torso[2, 3]
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], head_q)
+    assert t._torso_hold_reason == "following"
+    # Headset (hanging from the neck) moves down 10 cm and yaws 30 deg: the head
+    # joints stay put, the torso follows the headset pose.
+    session.push(_frame(right=fakes.controller(squeeze=0.9), head=fakes.head((0.0, 0.0, 1.4), quat=_head_quat(30))))
+    a = t.get_action()
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], head_q)
+    assert a["torso_ee.z"] == pytest.approx(z0 - 0.1)
+    assert abs(a["torso_ee.wz"]) == pytest.approx(math.radians(30), abs=1e-6)
+
+
+def test_neck_mode_reference_from_controllers_when_no_body(stubbed_pipeline):
+    session = fakes.FakeSession()
+    # Headset at the origin looking "down" (gaze is meaningless), controllers held out along +Y.
+    q_down = Rotation.from_matrix(R_HEAD_FWD @ Rotation.from_euler("x", -80, degrees=True).as_matrix()).as_quat()
+    session.push(_frame(right=fakes.controller((0.1, 0.5, 1.0)), left=fakes.controller((-0.1, 0.5, 1.0)), head=fakes.head((0, 0, 1.3), quat=q_down)))
+    readers: list = []
+    t = make_teleop(session, readers, wear_mode="neck", torso_source="none", use_torso=False)
+    t.connect()
+    t.get_action()
+    assert t._yaw_correction == pytest.approx(-math.pi / 2, abs=1e-6)  # facing +Y -> rotated to +X
+
+
+def test_neck_mode_absolute_ee_uses_headset_shoulder_estimate(stubbed_pipeline, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    session = fakes.FakeSession()
+    head_pos = (0.0, 0.0, 1.6)
+    # Both controllers held symmetrically (their midpoint sets the facing direction: +X).
+    left_ctrl = fakes.controller((0.3, 0.2, 1.45))
+    session.push(_frame(right=fakes.controller((0.3, -0.2, 1.45)), left=left_ctrl, head=fakes.head(head_pos, quat=_head_quat(0))))
+    readers: list = []
+    t = make_teleop(
+        session, readers, wear_mode="neck", arm_mode="ee_absolute", torso_source="none", use_torso=False,
+        use_left_arm=False, use_head=False, engage_ramp_s=0.5, ee_max_linear_vel=100.0,
+        arm_length_source="config", human_arm_length_m=0.6, neck_shoulder_offset=[-0.05, 0.20, -0.15],
+    )
+    t.connect()
+    t.get_action()
+    # Right shoulder estimate = head + (-0.05, -0.20, -0.15) = (-0.05, -0.20, 1.45); hand 0.35 m ahead of it.
+    session.push(_frame(right=fakes.controller((0.30, -0.2, 1.45), squeeze=0.9), left=left_ctrl, head=fakes.head(head_pos, quat=_head_quat(0))))
+    t.get_action()
+    clock[0] += 1.0
+    a = t.get_action()
+    reach = mod.robot_reach("1.3")
+    expected_x = readers[0].torso[0, 3] + 0.35 * reach / 0.6
+    assert a["right_ee.x"] == pytest.approx(expected_x, abs=1e-6)
+    assert t._abs_state["right"] == "track"
+
+
+def test_viz_enabled_uses_televiz_owned_session(stubbed_pipeline):
+    from tests.test_viz_panels import FakeTeleviz
+
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller()))
+    readers: list = []
+    cfg = dict(torso_source="none", use_torso=False, use_head=False, viz_enabled=True,
+               viz_cameras=["front", "left", "right"], viz_offsets_x=[0.0, -1.1, 1.1])
+
+    def reader_factory(address, model):
+        readers.append(fakes.FakeStateReader(address, model))
+        return readers[-1]
+
+    t = mod.Rby1XR(
+        Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **cfg),
+        session_factory=lambda pipeline: session,
+        state_reader_factory=reader_factory,
+        viz_module=FakeTeleviz,
+        viz_uploader=lambda f: f,
+    )
+    t.connect()
+    viz_session = FakeTeleviz.VizSession.last
+    assert viz_session is not None and t._viz is not None
+    a = t.get_action()
+    assert "right_ee.x" in a
+    import time as _time
+
+    _time.sleep(0.05)
+    assert viz_session.renders > 0
+    t.disconnect()
+    assert viz_session.destroyed and session.exited
+
+
+def test_config_wear_and_viz_validation():
+    with pytest.raises(ValueError):
+        Rby1XRConfig(wear_mode="chest")
+    with pytest.raises(ValueError):
+        Rby1XRConfig(viz_enabled=True, viz_cameras=["front"], viz_offsets_x=[0.0, 1.0])
+    assert Rby1XRConfig(viz_enabled=True, viz_cameras=["front"], viz_offsets_x=[0.0]).viz_lock_mode == "gimbal"

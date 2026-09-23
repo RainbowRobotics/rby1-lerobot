@@ -92,6 +92,9 @@ class IsaacTeleopTeleoperator(Teleoperator):
         self._cloudxr_launcher: Any = None
         self._session_factory = session_factory
         self._launcher_factory = launcher_factory
+        # Optional Televiz camera panels: when set before connect(), Televiz
+        # owns the (graphics) OpenXR session and the TeleopSession attaches to it.
+        self._viz: Any = None
 
     # ------------------------------------------------------------------
     # Pipeline construction (device override point)
@@ -140,10 +143,30 @@ class IsaacTeleopTeleoperator(Teleoperator):
 
         try:
             pipeline = self._build_pipeline()
-            self._session = self._make_session(pipeline)
+            oxr_handles = None
+            if self._viz is not None:
+                # Televiz creates the graphics OpenXR session (blocking until the
+                # headset connects); the trackers' extensions must be on that
+                # XrInstance, so they are aggregated from the pipeline first.
+                extensions = self._required_extensions(pipeline)
+                self._viz.create_session(
+                    self.config.app_name, extensions, getattr(self.config, "viz_wait_headset_s", -1)
+                )
+                handles = self._viz.oxr_handles()
+                if handles is not None:
+                    oxr_handles = self._make_oxr_handles(handles)
+                self._viz.start_render_thread()
+            self._session = self._make_session(pipeline, oxr_handles)
             self._session.__enter__()
+            if self._viz is not None:
+                self._viz.begin_rendering()
         except Exception:
             self._session = None
+            if self._viz is not None:
+                try:
+                    self._viz.destroy()
+                except Exception:
+                    logger.exception("Failed to destroy the Televiz session during connect() rollback")
             try:
                 self._stop_cloudxr_runtime()
             except Exception:
@@ -151,14 +174,38 @@ class IsaacTeleopTeleoperator(Teleoperator):
             raise
         logger.info("Isaac Teleop session started: %s", self.config.app_name)
 
-    def _make_session(self, pipeline: Any) -> Any:
+    def _required_extensions(self, pipeline: Any) -> list[str]:
+        if self._session_factory is not None:
+            return []
+        from isaacteleop.teleop_session_manager import get_required_oxr_extensions_from_pipeline
+
+        return list(get_required_oxr_extensions_from_pipeline(pipeline))
+
+    @staticmethod
+    def _make_oxr_handles(handles: Any) -> Any:
+        try:
+            from isaacteleop.oxr import OpenXRSessionHandles
+        except ImportError:  # test doubles
+            return handles
+        return OpenXRSessionHandles(*handles)
+
+    def _make_session(self, pipeline: Any, oxr_handles: Any = None) -> Any:
         if self._session_factory is not None:
             return self._session_factory(pipeline)
-        session_config = TeleopSessionConfig(app_name=self.config.app_name, pipeline=pipeline)
+        if oxr_handles is not None:
+            session_config = TeleopSessionConfig(
+                app_name=self.config.app_name, pipeline=pipeline, oxr_handles=oxr_handles
+            )
+        else:
+            session_config = TeleopSessionConfig(app_name=self.config.app_name, pipeline=pipeline)
         return TeleopSession(session_config)
 
     def disconnect(self) -> None:
         try:
+            # Order with Televiz: stop the frame loop -> detach the trackers
+            # (session exit) -> destroy the viz session -> stop CloudXR.
+            if self._viz is not None:
+                self._viz.stop_rendering()
             if self._session is not None:
                 # Null the handle BEFORE __exit__: even a failed session teardown
                 # must not wedge the device as is_connected.
@@ -167,6 +214,12 @@ class IsaacTeleopTeleoperator(Teleoperator):
                 session.__exit__(None, None, None)
                 logger.info("Isaac Teleop session ended")
         finally:
+            if self._viz is not None:
+                try:
+                    self._viz.destroy()
+                except Exception:
+                    logger.exception("Failed to destroy the Televiz session")
+                self._viz = None
             # Reap the CloudXR runtime even if session teardown raised; a no-op
             # when we never launched CloudXR (opt-out / externally-owned runtime).
             self._stop_cloudxr_runtime()

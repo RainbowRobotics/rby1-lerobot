@@ -55,6 +55,7 @@ STAGES = {
     "F_stop_then_thread": "thread creation after session exit + launcher.stop()",
     "G_record_dryrun": "real lerobot-record, 1 short episode (needs robot)",
     "S_headset": "wait for the headset; print controller / head / body samples",
+    "V_viz": "Televiz XR session: 3 synthetic camera panels for --viz-seconds (needs the headset)",
 }
 CRITICAL = ("S_session", "A_threads_before", "E_rby1_after", "F_stop_then_thread", "G_record_dryrun")
 DEFERRABLE = ("B_thread_after", "C_camera_after")
@@ -381,6 +382,88 @@ def stage_S_headset(args) -> dict:
     return {"seen": seen, "steps": steps, "body_valid_max": body_valid_max, "body_in_graph": body_in_graph}
 
 
+def stage_V_viz(args) -> dict:
+    """Televiz smoke test on this host: three colour-bar panels in the headset.
+
+    Uses the same CameraPanels class as the teleoperator (render thread, lazy
+    layers, gimbal placement) with a synthetic frame source; no robot needed.
+    Connect the headset when the instructions are printed. Check: three
+    coloured panels visible (front centre, left / right), fps ~ display rate,
+    no 'stale' layers. On Jetson Orin keep openxr_composition=False and set the
+    WebXR client codec to H.264.
+    """
+    import numpy as np
+
+    from lerobot_teleoperator_rby1.isaac_teleop.teleop_rby1_xr import print_xr_connect_help
+    from lerobot_teleoperator_rby1.isaac_teleop.viz_panels import CameraPanels, PanelLayout
+
+    colors = {"front": (255, 60, 60), "left": (60, 255, 60), "right": (60, 60, 255)}
+    frames: dict = {}
+    seq = [0]
+    h, w = args.viz_height, args.viz_width
+
+    def make(name: str, k: int):
+        img = np.zeros((h, w, 3), np.uint8)
+        img[:, :] = colors[name]
+        bar = (k * 8) % w
+        img[:, bar : min(bar + 40, w)] = 255
+        return img
+
+    def source(name: str):
+        return frames.get(name)
+
+    launcher = None
+    if os.environ.get("LEROBOT_CLOUDXR_SKIP_AUTOLAUNCH", "") != "1":
+        from isaacteleop.cloudxr import CloudXRLauncher
+
+        from lerobot_teleoperator_rby1.isaac_teleop.base import default_cloudxr_env_file
+
+        _log("launching CloudXR runtime …")
+        launcher = CloudXRLauncher(install_dir=str(Path.home() / ".cloudxr"), env_config=default_cloudxr_env_file(), accept_eula=False)
+    panels = CameraPanels(
+        [PanelLayout("front", 0.0), PanelLayout("left", -1.1), PanelLayout("right", 1.1)],
+        source,
+        lock_mode=args.viz_lock,
+        openxr_composition=args.viz_openxr_composition,
+    )
+    result: dict = {}
+    try:
+        print_xr_connect_help()
+        _log("creating the Televiz XR session (waits for the headset) …")
+        panels.create_session("rby1_isaac_preflight_viz", [], -1)
+        panels.start_render_thread()
+        panels.begin_rendering()
+        t0 = time.monotonic()
+        k = 0
+        while time.monotonic() - t0 < args.viz_seconds and not panels.lost:
+            for name in colors:
+                seq[0] += 1
+                frames[name] = (make(name, k), time.monotonic(), seq[0])
+            k += 1
+            if k % 30 == 0:
+                _log(panels.status())
+            time.sleep(1.0 / 30.0)
+        st = panels.last_stats
+        result = {
+            "renders": panels.render_count,
+            "seconds": round(time.monotonic() - t0, 1),
+            "lost": panels.lost,
+            "fps": getattr(st, "fps", None) if st is not None else None,
+            "stale_layers": list(getattr(st, "stale_layers", []) or []) if st is not None else None,
+        }
+    finally:
+        panels.stop_rendering()
+        panels.destroy()
+        if launcher is not None:
+            try:
+                launcher.stop()
+            except Exception as e:  # noqa: BLE001
+                _log(f"launcher stop failed: {e!r}")
+    if result.get("lost"):
+        raise RuntimeError("Televiz session was lost (headset disconnected?)")
+    return result
+
+
 # ---------------------------------------------------------------------------
 # driver
 # ---------------------------------------------------------------------------
@@ -499,6 +582,11 @@ def main() -> int:
     p.add_argument("--record-root", default="~/preflight_datasets")
     p.add_argument("--session-start", default="connect", choices=("connect", "first_action"))
     p.add_argument("--wait-headset", type=float, default=0.0, help="seconds; >0 includes stage S_headset")
+    p.add_argument("--viz-seconds", type=float, default=15.0, help="stage V_viz duration")
+    p.add_argument("--viz-width", type=int, default=640)
+    p.add_argument("--viz-height", type=int, default=480)
+    p.add_argument("--viz-lock", default="gimbal", choices=("gimbal", "head", "world"))
+    p.add_argument("--viz-openxr-composition", action="store_true", help="use the runtime compositor (NOT on Jetson Orin)")
     args = p.parse_args()
 
     if args.stage:
@@ -523,6 +611,9 @@ def main() -> int:
         f"--camera-serial={args.camera_serial}", f"--camera-index={args.camera_index}",
         f"--record-root={args.record_root}", f"--session-start={args.session_start}",
         f"--wait-headset={args.wait_headset}",
+        f"--viz-seconds={args.viz_seconds}", f"--viz-width={args.viz_width}", f"--viz-height={args.viz_height}",
+        f"--viz-lock={args.viz_lock}",
+        *(["--viz-openxr-composition"] if args.viz_openxr_composition else []),
     ]
     results: dict[str, tuple[str, object]] = {}
     for name in stages:

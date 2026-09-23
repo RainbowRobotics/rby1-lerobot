@@ -34,6 +34,9 @@ ARM_MODE_CHOICES = ("ee_clutch", "ee_absolute")
 ARM_LENGTH_SOURCE_CHOICES = ("body", "config")
 HINT_WRIST_SOURCE_CHOICES = ("controller", "body")
 ROBOT_VERSION_CHOICES = ("auto", "1.2", "1.3")
+WEAR_MODE_CHOICES = ("head", "neck")
+SHOULDER_SOURCE_CHOICES = ("auto", "body", "headset")
+VIZ_LOCK_CHOICES = ("gimbal", "head", "world")
 
 
 @dataclass(kw_only=True)
@@ -83,6 +86,36 @@ class Rby1XRConfig(IsaacTeleopConfig):
     use_gripper: bool = True
     use_mobile_base: bool = True
     use_head: bool = True
+
+    # ── Wear mode ─────────────────────────────────────────────────────
+    # "head": headset worn normally (head joints follow the gaze, torso from
+    #         body tracking / head, operator frame from the shoulder line).
+    # "neck": headset hanging from the neck. The robot head is held at the
+    #         start (ready) pose, the HEADSET pose drives the torso, the
+    #         operator frame is taken from the shoulder line or, when body
+    #         tracking is unavailable, from the headset→controllers direction,
+    #         and the absolute-EE shoulder is estimated from the headset pose.
+    #         Requires the Quest proximity sensor to be disabled (MQDH Device
+    #         Actions → Proximity Sensor off, or tape) so the session stays
+    #         FOCUSED and the controllers keep streaming.
+    wear_mode: str = "head"
+    neck_torso_smoothing: float = 0.3     # EMA on the headset pose driving the torso
+    neck_shoulder_offset: list[float] = field(default_factory=lambda: [-0.05, 0.20, -0.15])  # from the headset, left side (y mirrored for right)
+    shoulder_source: str = "auto"         # absolute mode: "body" | "headset" | "auto" (body when valid)
+
+    # ── Headset camera panels (Televiz) ──────────────────────────────
+    # One quad per robot camera name (as configured in --robot.cameras); the
+    # frames come from the in-process frame bus. Televiz then owns the OpenXR
+    # session (the tracking session attaches to it).
+    viz_enabled: bool = False
+    viz_cameras: list[str] = field(default_factory=lambda: ["front", "left", "right"])
+    viz_offsets_x: list[float] = field(default_factory=lambda: [0.0, -1.1, 1.1])  # m, per camera
+    viz_offset_y: float = 0.0
+    viz_distance_m: float = 1.5
+    viz_width_m: float = 1.0
+    viz_lock_mode: str = "gimbal"         # "gimbal" (position + yaw) | "head" | "world"
+    viz_openxr_composition: bool = False  # keep False on Jetson Orin (black quads otherwise)
+    viz_wait_headset_s: int = -1          # VizSession.create waits for the headset (-1 = forever)
 
     # ── Arm mapping mode ──────────────────────────────────────────────
     # "ee_clutch":   squeeze latches a clutch; the arm follows the controller
@@ -216,6 +249,9 @@ class Rby1XRConfig(IsaacTeleopConfig):
                 f"torso_engage must be one of {TORSO_ENGAGE_CHOICES}, got {self.torso_engage!r}"
             )
         for name, value, choices in (
+            ("wear_mode", self.wear_mode, WEAR_MODE_CHOICES),
+            ("shoulder_source", self.shoulder_source, SHOULDER_SOURCE_CHOICES),
+            ("viz_lock_mode", self.viz_lock_mode, VIZ_LOCK_CHOICES),
             ("arm_mode", self.arm_mode, ARM_MODE_CHOICES),
             ("arm_length_source", self.arm_length_source, ARM_LENGTH_SOURCE_CHOICES),
             ("hint_wrist_source", self.hint_wrist_source, HINT_WRIST_SOURCE_CHOICES),
@@ -227,6 +263,10 @@ class Rby1XRConfig(IsaacTeleopConfig):
             raise ValueError("record_posture_hint requires arm_posture_hint=True")
         if len(self.ee_orientation_offset_rpy_deg) != 3:
             raise ValueError("ee_orientation_offset_rpy_deg must have 3 values")
+        if len(self.neck_shoulder_offset) != 3:
+            raise ValueError("neck_shoulder_offset must have 3 values")
+        if self.viz_enabled and len(self.viz_offsets_x) != len(self.viz_cameras):
+            raise ValueError("viz_offsets_x must have one entry per viz_cameras entry")
         if self.robot_model.strip().lower() not in ("a", "m", "ub"):
             raise ValueError(f'robot_model must be "a", "m" or "ub", got {self.robot_model!r}')
         if not (0.0 < self.head_smoothing <= 1.0):

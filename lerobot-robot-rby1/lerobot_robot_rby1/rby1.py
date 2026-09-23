@@ -43,6 +43,7 @@ from lerobot.robots.robot import Robot
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 from . import command_builders as cb
+from . import frame_bus
 from . import model_probe
 from .config_rby1 import (
     READY_HEAD,
@@ -642,9 +643,12 @@ class Rby1(Robot):
             if self._config.use_left_arm:
                 obs[f"left_gripper_0{POS_SUFFIX}"] = 1.0 - float(gripper_pos[1])
 
-        # Cameras.
+        # Cameras (also published on the in-process frame bus for the
+        # headset camera panels of the rby1_isaac teleoperator).
         for cam_key, cam in self.cameras.items():
-            obs[cam_key] = cam.async_read()
+            frame = cam.async_read()
+            obs[cam_key] = frame
+            frame_bus.bus.publish(cam_key, frame)
 
         return obs
 
