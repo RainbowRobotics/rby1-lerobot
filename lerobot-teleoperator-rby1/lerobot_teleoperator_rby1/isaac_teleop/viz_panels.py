@@ -37,11 +37,11 @@ class PanelLayout:
 
 
 CUDA_UPLOAD_HINT = (
-    "Televiz needs the camera frames as CUDA arrays. The installed PyTorch cannot use "
-    "this GPU (on Jetson the PyPI aarch64 wheels are built for CUDA 12.8+/SBSA while "
-    "JetPack 6.x ships CUDA 12.6). Install NVIDIA's JetPack wheel, e.g. "
-    "`pip install --force-reinstall torch --index-url https://pypi.jetson-ai-lab.io/jp6/cu126`, "
-    "or `pip install cupy-cuda12x` (used as a fallback)."
+    "Televiz needs the camera frames as CUDA arrays and no working upload backend was "
+    "found. On Jetson (JetPack 6.x = CUDA 12.6) the PyPI torch wheels are built for CUDA "
+    "12.8+ and NVIDIA's JetPack torch wheels exist only for Python 3.10, so install the "
+    "driver-API backend instead: `pip install \"cuda-python==12.6.*\"` (matches the "
+    "JetPack driver), or `pip install cupy-cuda12x`."
 )
 
 
@@ -58,6 +58,8 @@ def _rgba_host(frame: np.ndarray) -> np.ndarray:
 def _upload_torch(frame: np.ndarray, _cache: dict = {}) -> Any:
     import torch
 
+    if not torch.cuda.is_available():
+        raise RuntimeError("torch.cuda.is_available() is False")
     t = torch.from_numpy(np.ascontiguousarray(frame)).to("cuda", non_blocking=False)
     if t.shape[-1] == 4:
         return t.contiguous()
@@ -75,6 +77,82 @@ def _upload_cupy(frame: np.ndarray) -> Any:
     return cupy.asarray(_rgba_host(frame))
 
 
+class DriverDeviceArray:
+    """A CUDA device buffer allocated through the driver API (``cuda-python``).
+
+    Exposes ``__cuda_array_interface__`` so Televiz (or CuPy / torch) can read
+    it. Only ``libcuda`` (the GPU driver) is needed — no CUDA toolkit runtime,
+    which is what makes it work in a Python 3.12 environment on JetPack 6.x.
+    """
+
+    _ctx: Any = None
+    _drv: Any = None
+
+    def __init__(self, shape: tuple[int, ...]) -> None:
+        drv = self._driver()
+        self.shape = tuple(int(x) for x in shape)
+        self.nbytes = int(np.prod(self.shape))
+        err, ptr = drv.cuMemAlloc(self.nbytes)
+        self._check(err, "cuMemAlloc")
+        self._ptr = ptr
+
+    @classmethod
+    def _driver(cls) -> Any:
+        if cls._drv is None:
+            try:
+                from cuda.bindings import driver as drv  # cuda-python >= 12.6
+            except ImportError:
+                from cuda import cuda as drv  # older cuda-python layout
+            cls._check_static(drv, drv.cuInit(0)[0], "cuInit")
+            err, dev = drv.cuDeviceGet(0)
+            cls._check_static(drv, err, "cuDeviceGet")
+            err, ctx = drv.cuDevicePrimaryCtxRetain(dev)
+            cls._check_static(drv, err, "cuDevicePrimaryCtxRetain")
+            cls._drv, cls._ctx = drv, ctx
+        # The primary context must be current on the calling thread (render thread).
+        cls._check_static(cls._drv, cls._drv.cuCtxSetCurrent(cls._ctx)[0], "cuCtxSetCurrent")
+        return cls._drv
+
+    @staticmethod
+    def _check_static(drv: Any, err: Any, what: str) -> None:
+        if err != drv.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(f"{what} failed: {err}")
+
+    def _check(self, err: Any, what: str) -> None:
+        self._check_static(self._drv, err, what)
+
+    def upload(self, host: np.ndarray) -> "DriverDeviceArray":
+        drv = self._driver()
+        host = np.ascontiguousarray(host)
+        if host.nbytes != self.nbytes:
+            raise ValueError(f"frame has {host.nbytes} bytes, buffer {self.nbytes}")
+        self._check(drv.cuMemcpyHtoD(self._ptr, host.ctypes.data, self.nbytes)[0], "cuMemcpyHtoD")
+        return self
+
+    @property
+    def __cuda_array_interface__(self) -> dict:
+        return {"shape": self.shape, "typestr": "|u1", "data": (int(self._ptr), False), "version": 3, "strides": None}
+
+    def __del__(self) -> None:
+        try:
+            if self._drv is not None and getattr(self, "_ptr", None) is not None:
+                self._drv.cuMemFree(self._ptr)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_driver_buffers: dict[tuple[int, ...], DriverDeviceArray] = {}
+
+
+def _upload_cuda_driver(frame: np.ndarray) -> Any:
+    rgba = _rgba_host(frame)
+    buf = _driver_buffers.get(rgba.shape)
+    if buf is None:
+        buf = DriverDeviceArray(rgba.shape)
+        _driver_buffers[rgba.shape] = buf
+    return buf.upload(rgba)
+
+
 _uploader_impl: Callable[[np.ndarray], Any] | None = None
 
 
@@ -88,7 +166,7 @@ def rgb_to_rgba_cuda(frame: np.ndarray) -> Any:
     if _uploader_impl is not None:
         return _uploader_impl(frame)
     errors = []
-    for name, fn in (("torch", _upload_torch), ("cupy", _upload_cupy)):
+    for name, fn in (("torch", _upload_torch), ("cuda-python", _upload_cuda_driver), ("cupy", _upload_cupy)):
         try:
             out = fn(frame)
         except Exception as e:  # noqa: BLE001

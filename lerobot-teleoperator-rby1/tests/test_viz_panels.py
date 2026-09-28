@@ -197,3 +197,45 @@ def test_cuda_upload_check_fails_fast(monkeypatch):
     with pytest.raises(RuntimeError, match="upload check failed"):
         panels.create_session("t", [], 0)
     assert panels.session is None and FakeTeleviz.VizSession.last.destroyed
+
+
+def test_driver_device_array_interface(monkeypatch):
+    """DriverDeviceArray against a fake `cuda.bindings.driver` (no GPU needed)."""
+    import sys
+    import types
+
+    from lerobot_teleoperator_rby1.isaac_teleop import viz_panels as vp
+
+    calls = []
+
+    class CUresult:
+        CUDA_SUCCESS = 0
+
+    drv = types.SimpleNamespace(
+        CUresult=CUresult,
+        cuInit=lambda f: (0,),
+        cuDeviceGet=lambda i: (0, "dev0"),
+        cuDevicePrimaryCtxRetain=lambda d: (0, "ctx"),
+        cuCtxSetCurrent=lambda c: (0,),
+        cuMemAlloc=lambda n: (calls.append(("alloc", n)) or (0, 0xDEAD0000)),
+        cuMemcpyHtoD=lambda dst, src, n: (calls.append(("copy", n)) or (0,)),
+        cuMemFree=lambda p: (0,),
+    )
+    pkg = types.ModuleType("cuda")
+    bindings = types.ModuleType("cuda.bindings")
+    bindings.driver = drv
+    pkg.bindings = bindings
+    monkeypatch.setitem(sys.modules, "cuda", pkg)
+    monkeypatch.setitem(sys.modules, "cuda.bindings", bindings)
+    monkeypatch.setitem(sys.modules, "cuda.bindings.driver", drv)
+    monkeypatch.setattr(vp.DriverDeviceArray, "_drv", None)
+    monkeypatch.setattr(vp.DriverDeviceArray, "_ctx", None)
+    monkeypatch.setattr(vp, "_driver_buffers", {})
+
+    frame = np.zeros((4, 6, 3), np.uint8)
+    out = vp._upload_cuda_driver(frame)
+    cai = out.__cuda_array_interface__
+    assert cai["shape"] == (4, 6, 4) and cai["typestr"] == "|u1" and cai["data"] == (0xDEAD0000, False)
+    assert calls == [("alloc", 96), ("copy", 96)]
+    vp._upload_cuda_driver(frame)  # buffer reused
+    assert calls[-1] == ("copy", 96) and len([c for c in calls if c[0] == "alloc"]) == 1

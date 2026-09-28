@@ -203,12 +203,18 @@ lerobot-teleoperate ... \
   --teleop.viz_offsets_x='[0.0,-1.1,1.1]'
 ```
 
-Frames are uploaded to the GPU with PyTorch (CuPy as fallback). **On Jetson the PyPI
-`torch` wheel is built for CUDA 12.8+ and fails with "The NVIDIA driver on your system is
-too old (found version 12060)" on JetPack 6.x (CUDA 12.6)** — install NVIDIA's JetPack
-build instead: `pip install --force-reinstall torch --index-url https://pypi.jetson-ai-lab.io/jp6/cu126`.
+Frames are uploaded to the GPU with the first working backend: PyTorch, then the CUDA
+driver API (`cuda-python`), then CuPy. **On Jetson (JetPack 6.x = CUDA 12.6) the PyPI
+`torch` wheel is built for CUDA 12.8+ ("The NVIDIA driver on your system is too old
+(found version 12060)") and NVIDIA's JetPack torch wheels exist only for Python 3.10**, so
+in the Python 3.12 LeRobot environment install the driver-API backend:
+
+```bash
+pip install "cuda-python==12.6.*"   # matches the JetPack 6.x driver; only libcuda is needed
+```
+
 The teleoperator runs a small upload check when the Televiz session is created and stops
-with this hint if the CUDA stack is unusable.
+with this hint if no backend works.
 
 Panels follow your head position and yaw (`viz_lock_mode=gimbal`; `head` = full head
 lock, `world` = fixed in the room). On **Jetson Orin** keep `viz_openxr_composition=false`
