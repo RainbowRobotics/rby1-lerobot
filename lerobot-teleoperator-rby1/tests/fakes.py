@@ -39,14 +39,16 @@ def controller(
     primary=False,
     secondary=False,
     valid=True,
+    aim_pos=None,
+    aim_quat=None,
 ) -> FakeGroup:
     return FakeGroup(
         {
             ControllerInputIndex.GRIP_POSITION: np.asarray(pos, dtype=np.float32),
             ControllerInputIndex.GRIP_ORIENTATION: np.asarray(quat, dtype=np.float32),
             ControllerInputIndex.GRIP_IS_VALID: valid,
-            ControllerInputIndex.AIM_POSITION: np.zeros(3, np.float32),
-            ControllerInputIndex.AIM_ORIENTATION: IDENTITY_QUAT.astype(np.float32),
+            ControllerInputIndex.AIM_POSITION: np.asarray(pos if aim_pos is None else aim_pos, dtype=np.float32),
+            ControllerInputIndex.AIM_ORIENTATION: np.asarray(quat if aim_quat is None else aim_quat, dtype=np.float32),
             ControllerInputIndex.AIM_IS_VALID: valid,
             ControllerInputIndex.PRIMARY_CLICK: 1.0 if primary else 0.0,
             ControllerInputIndex.SECONDARY_CLICK: 1.0 if secondary else 0.0,

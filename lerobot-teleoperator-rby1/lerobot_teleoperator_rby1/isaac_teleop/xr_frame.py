@@ -125,10 +125,19 @@ class ControllerState:
     thumbstick: np.ndarray    # (2,) x (right +), y (forward +)
     primary: bool             # A / X
     secondary: bool           # B / Y
+    aim_position: np.ndarray | None = None     # (3,) aim (pointer) pose, same frame
+    aim_orientation: np.ndarray | None = None  # (4,) xyzw; None = not provided / invalid
 
     @property
     def pose(self) -> np.ndarray:
         return pose_to_se3(self.position, self.orientation)
+
+    @property
+    def aim_pose(self) -> np.ndarray:
+        """Aim pose when valid, else the grip pose."""
+        if self.aim_position is None or self.aim_orientation is None:
+            return self.pose
+        return pose_to_se3(self.aim_position, self.aim_orientation)
 
 
 @dataclass(frozen=True)
@@ -219,7 +228,16 @@ def _parse_controller(group: Any) -> ControllerState | None:
         return None
     if not _pose_ok(pos, quat):
         return None
-    return ControllerState(pos, quat, squeeze, trigger, thumb, primary, secondary)
+    aim_pos = aim_quat = None
+    try:
+        if bool(group[ControllerInputIndex.AIM_IS_VALID]):
+            ap = np.asarray(group[ControllerInputIndex.AIM_POSITION], dtype=float).reshape(3)
+            aq = np.asarray(group[ControllerInputIndex.AIM_ORIENTATION], dtype=float).reshape(4)
+            if _pose_ok(ap, aq):
+                aim_pos, aim_quat = ap, aq
+    except (IndexError, KeyError, TypeError, ValueError):
+        pass  # layouts without an aim pose: callers fall back to the grip pose
+    return ControllerState(pos, quat, squeeze, trigger, thumb, primary, secondary, aim_pos, aim_quat)
 
 
 def _parse_head(group: Any) -> HeadState | None:
@@ -316,6 +334,8 @@ def rotate_frame_about_z(frame: XRFrame, yaw: float) -> XRFrame:
             c.thumbstick,
             c.primary,
             c.secondary,
+            None if c.aim_position is None else R @ c.aim_position,
+            None if c.aim_orientation is None else (rz * Rotation.from_quat(c.aim_orientation)).as_quat(),
         )
 
     head = None

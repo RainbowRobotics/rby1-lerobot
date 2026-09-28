@@ -262,3 +262,124 @@ def test_xr_panel_pose_gimbal_follows_pitch_but_not_roll():
     pos_r, q_r = xr_panel_pose(head, np.array([w, x, y, z]), lay, "gimbal", follow_pitch=True)
     np.testing.assert_allclose(pos_r, pos, atol=1e-9)
     np.testing.assert_allclose(q_r, q, atol=1e-9)
+
+
+def _wait(cond, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if cond():
+            return True
+        time.sleep(0.005)
+    return cond()
+
+
+def _ray(origin, target):
+    o = np.asarray(origin, float)
+    d = np.asarray(target, float) - o
+    return o, d / np.linalg.norm(d)
+
+
+def test_grab_handles_hover_drag_release_and_callback():
+    from lerobot_teleoperator_rby1.isaac_teleop.viz_grab import HandInput
+
+    frames = {"front": (np.zeros((480, 640, 3), np.uint8), 0.0, 1)}
+    changed = []
+    panels = CameraPanels(
+        [PanelLayout("front", 0.0)],
+        lambda n: frames.get(n),
+        uploader=lambda f: ("uploaded", f.shape),
+        viz_module=FakeTeleviz,
+        daemon=True,
+        grab_enabled=True,
+        frame_bridge="identity",
+        on_layout_changed=lambda lays: changed.append(lays),
+    )
+    session = panels.create_session("t", [], 0)
+    panels.start_render_thread()
+    panels.begin_rendering()
+    assert _wait(lambda: len(session.layers) == 2)
+    cam, handle = session.layers
+    assert [cam.cfg.name, handle.cfg.name] == ["front", "front.handle"]
+    assert (handle.cfg.resolution.w, handle.cfg.resolution.h) == (256, 24)
+    assert handle.cfg.openxr_composition is False
+    assert _wait(lambda: len(handle.placements) > 0)
+    assert len(handle.submits) == 1 and handle.submits[0] == ("uploaded", (24, 256, 4))  # idle texture
+    # Handle bar sits above the panel: centre y = 1.6 + 0.75/2 + 0.03 + 0.03, size (1.0, 0.06).
+    hp = handle.placements[-1]
+    np.testing.assert_allclose(hp.pose.position, [0.0, 2.035, -1.5], atol=1e-9)
+    np.testing.assert_allclose(hp.size_meters, [1.0, 0.06], atol=1e-9)
+    head = (0.0, 1.6, 0.0)
+    # Hover.
+    o, d = _ray(head, (0.0, 2.035, -1.5))
+    panels.set_hands({"right": HandInput(o, d, 0.0, True)})
+    assert _wait(lambda: panels.hover()["right"] == "front")
+    assert _wait(lambda: len(handle.submits) == 2)  # hover texture
+    assert panels.ui_active() == {"right": True, "left": False}
+    # Grab (trigger rises while hovering with a free hand).
+    panels.set_hands({"right": HandInput(o, d, 0.9, True)})
+    assert _wait(lambda: panels.grabbing()["right"] == "front")
+    assert _wait(lambda: len(handle.submits) == 3)  # grab texture
+    # Drag 0.3 m to the right: the layout follows (x offset), distance about unchanged.
+    o2, d2 = _ray(head, (0.3, 2.035, -1.5))
+    panels.set_hands({"right": HandInput(o2, d2, 0.9, True)})
+    assert _wait(lambda: abs(panels.layout("front").offset_x - 0.3) < 0.03)
+    lay = panels.layout("front")
+    assert abs(lay.distance - 1.5) < 0.05 and abs(lay.offset_y) < 0.03
+    # Release -> callback with the new layout, texture back to idle/hover.
+    panels.set_hands({"right": HandInput(o2, d2, 0.0, True)})
+    assert _wait(lambda: len(changed) == 1)
+    assert changed[0][0].name == "front" and abs(changed[0][0].offset_x - 0.3) < 0.03
+    assert panels.grabbing()["right"] is None
+    assert "hover=" in panels.status() or "grab=" not in panels.status()
+    assert panels.stop_rendering(timeout=2.0) and panels.destroy(timeout=2.0)
+
+
+def test_engaged_hand_cannot_grab_and_face_head_orients_side_panels():
+    from lerobot_teleoperator_rby1.isaac_teleop.viz_grab import HandInput
+
+    frames = {"left": (np.zeros((480, 640, 3), np.uint8), 0.0, 1)}
+    panels = CameraPanels(
+        [PanelLayout("left", -1.1)], lambda n: frames.get(n), uploader=lambda f: f, viz_module=FakeTeleviz,
+        daemon=True, grab_enabled=True, frame_bridge="identity", face_head=True,
+    )
+    session = panels.create_session("t", [], 0)
+    panels.start_render_thread()
+    panels.begin_rendering()
+    assert _wait(lambda: len(session.layers) == 2 and len(session.layers[0].placements) > 0)
+    pl = session.layers[0].placements[-1]
+    w, x, y, z = pl.pose.orientation
+    assert y > 0.1  # yawed towards the viewer (panel on the left turns right)
+    # The handle follows the panel orientation.
+    hq = session.layers[1].placements[-1].pose.orientation
+    np.testing.assert_allclose(hq, pl.pose.orientation, atol=1e-9)
+    hpos = np.asarray(session.layers[1].placements[-1].pose.position)
+    o, d = _ray((0, 1.6, 0), hpos)
+    panels.set_hands({"left": HandInput(o, d, 0.9, False)})  # clutched hand
+    assert _wait(lambda: panels.hover()["left"] == "left")
+    time.sleep(0.05)
+    assert panels.grabbing()["left"] is None and panels.ui_active()["left"] is True
+    assert panels.stop_rendering(timeout=2.0) and panels.destroy(timeout=2.0)
+
+
+def test_frame_bridge_estimated_from_simultaneous_head_poses():
+    from lerobot_teleoperator_rby1.isaac_teleop.viz_grab import HandInput
+
+    frames = {"front": (np.zeros((48, 64, 3), np.uint8), 0.0, 1)}
+    panels = CameraPanels(
+        [PanelLayout("front")], lambda n: frames.get(n), uploader=lambda f: f, viz_module=FakeTeleviz,
+        daemon=True, grab_enabled=True, frame_bridge="auto",
+    )
+    session = panels.create_session("t", [], 0)
+    panels.start_render_thread()
+    panels.begin_rendering()
+    assert _wait(lambda: len(session.layers) == 2 and len(session.layers[0].placements) > 0)
+    # The teleop session sees the head 1 m to the -X of where Televiz sees it.
+    T_teleop = np.eye(4)
+    T_teleop[:3, 3] = [-1.0, 1.6, 0.0]
+    for _ in range(40):
+        panels.set_hands({"right": HandInput(np.zeros(3), np.array([0, 0, -1.0]), 0.0, True)}, T_teleop)
+        time.sleep(0.004)
+    assert _wait(lambda: panels._bridge_done)
+    np.testing.assert_allclose(panels._bridge[:3, 3], [1.0, 0.0, 0.0], atol=1e-9)
+    np.testing.assert_allclose(panels._bridge[:3, :3], np.eye(3), atol=1e-9)
+    assert panels.stop_rendering(timeout=2.0) and panels.destroy(timeout=2.0)

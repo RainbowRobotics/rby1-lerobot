@@ -219,7 +219,21 @@ with this hint if no backend works.
 
 Panels follow your head position, yaw and pitch — never roll — (`viz_lock_mode=gimbal`;
 `viz_follow_pitch=false` for yaw only, `head` = full head lock including roll, `world` =
-fixed in the room). On **Jetson Orin** keep `viz_openxr_composition=false`
+fixed in the room) and turn to face you (`viz_face_head`).
+
+**Moving the panels in the headset.** Like the CloudXR web client's own control panel,
+every camera panel has a **grab bar** above it (`viz_grab_enabled`, default on). Point a
+*free* hand at the bar — free = squeeze released, arm not clutched — it brightens; **hold
+the trigger** and move the controller to drag the panel (the bar turns orange), push /
+pull it with that hand's thumbstick, release the trigger to drop it. While a free hand
+points at or holds a bar its trigger is a UI click: that gripper keeps its last value and
+the hand cannot clutch until it lets go. Moved panels keep the lock mode (gimbal: the new
+offsets follow your head) and are saved to `viz_layout_file`
+(`~/.cache/rby1_isaac/viz_layout.json`), restored on the next run; `--teleop.viz_layout_reset=true`
+starts from the config values again. The controller rays live in the tracking session's
+OpenXR space and the panels in Televiz's; the first 30 ticks estimate the transform
+between the two from the head pose seen by both (`viz_frame_bridge=auto`, logged as
+"frame bridge: translation … rotation …", identity when both spaces coincide). On **Jetson Orin** keep `viz_openxr_composition=false`
 (default) and set the **Video Codec to H.264** in the CloudXR web client, otherwise the
 panels stay black. Run the preflight `--only V_viz --viz-seconds 15` first: three colour
 bars must be visible.
@@ -346,6 +360,8 @@ lerobot-record \
 | `neck_torso_smoothing`, `neck_shoulder_offset`, `shoulder_source` | `0.3`, `[-0.05,0.20,-0.15]`, `"auto"` | Neck mode: EMA on the headset pose driving the torso; shoulder position relative to the headset (left side, mirrored for right); absolute-EE shoulder from `body` / `headset` / `auto` |
 | `viz_enabled`, `viz_cameras`, `viz_offsets_x`, `viz_offset_y`, `viz_distance_m`, `viz_width_m` | `False`, `[front,left,right]`, `[0,-1.1,1.1]`, `0`, `1.5`, `1.0` | Televiz camera panels: robot camera names and their placement (m) |
 | `viz_lock_mode`, `viz_follow_pitch`, `viz_openxr_composition`, `viz_wait_headset_s` | `"gimbal"`, `True`, `False`, `-1` | Panel lock mode; gimbal also follows the head pitch (never roll); runtime vs Televiz compositing (keep False on Jetson Orin); wait for the headset when creating the XR session |
+| `viz_grab_enabled`, `viz_grab_threshold`, `viz_grab_push_rate_mps`, `viz_face_head` | `True`, `0.7`, `0.5`, `True` | Grab bars above the panels (free hand + trigger drags, thumbstick pushes / pulls); trigger level that starts a grab (release < 0.3); panels turn to face the head |
+| `viz_frame_bridge`, `viz_layout_file`, `viz_layout_reset` | `"auto"`, `~/.cache/rby1_isaac/viz_layout.json`, `False` | Televiz ← tracking-space transform from simultaneous head poses (`identity` to skip); where moved panels are saved / restored (`""` = off); ignore the saved layout once |
 | `arm_mode` | `"ee_clutch"` | `ee_clutch` (delta from the squeeze moment) or `ee_absolute` (hand relative to the IOBT shoulder, scaled onto the robot shoulder; squeeze = dead-man) |
 | `engage_ramp_s`, `ee_max_linear_vel`, `ee_max_angular_vel` | `2.0`, `1.0`, `3.0` | `ee_absolute`: ramp to the target on engage; rate limits (m/s, rad/s) |
 | `ee_position_scale`, `ee_reach_max_ratio` | `1.0`, `0.98` | `ee_absolute`: extra multiplier on the robot/human reach ratio; clamp of the hand-to-shoulder distance |

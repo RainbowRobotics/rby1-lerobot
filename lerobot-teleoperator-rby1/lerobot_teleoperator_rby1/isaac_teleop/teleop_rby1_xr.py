@@ -80,6 +80,7 @@ from .retargeters import (
     thumbsticks_to_base_vel,
 )
 from .robot_state import Rby1StateReader, RobotSnapshot
+from .viz_grab import HandInput, hand_input, load_layouts, save_layouts
 from .viz_panels import CameraPanels, PanelLayout, bus_frame_source
 from .xr_frame import (
     BodyJointIndex,
@@ -247,16 +248,30 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 PanelLayout(name, offset_x=ox, offset_y=cfg.viz_offset_y, distance=cfg.viz_distance_m, width=cfg.viz_width_m)
                 for name, ox in zip(cfg.viz_cameras, cfg.viz_offsets_x)
             ]
+            if cfg.viz_layout_file and not cfg.viz_layout_reset:
+                layouts = load_layouts(cfg.viz_layout_file, layouts)
             self._viz = CameraPanels(
                 layouts,
                 bus_frame_source,
                 lock_mode=cfg.viz_lock_mode,
                 follow_pitch=cfg.viz_follow_pitch,
+                face_head=cfg.viz_face_head,
                 openxr_composition=cfg.viz_openxr_composition,
                 viz_module=self._viz_module_override,
                 uploader=self._viz_uploader_override,
                 daemon=self._viz_module_override is not None,  # test doubles must not pin the process
+                grab_enabled=cfg.viz_grab_enabled,
+                grab_threshold=cfg.viz_grab_threshold,
+                grab_push_rate_mps=cfg.viz_grab_push_rate_mps,
+                frame_bridge=cfg.viz_frame_bridge,
+                on_layout_changed=self._save_panel_layout if cfg.viz_layout_file else None,
             )
+            if cfg.viz_grab_enabled:
+                logger.info(
+                    "Camera panels can be moved: point a free hand (squeeze released) at the bar above a "
+                    "panel and hold the trigger; thumbstick pushes / pulls. Layout file: %s",
+                    cfg.viz_layout_file or "(not persisted)",
+                )
         try:
             self._reader.connect()
             self._init_arm_mappers()
@@ -494,6 +509,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
             return snap
 
         self._resync_disengaged(snap)
+        # Camera-panel grab: feed the aim rays; a grabbing hand neither clutches
+        # nor drives its gripper / thumbstick while it holds a panel.
+        grabbing = self._feed_panel_hands(raw)
+        frame = _mask_grabbing_hands(frame, grabbing)
 
         if any(events.values()):
             logger.info("xr button edge: %s", [k for k, v in events.items() if v])
@@ -759,6 +778,39 @@ class Rby1XR(IsaacTeleopTeleoperator):
             self._needs_offset_latch = False
             logger.info("Absolute EE orientation offset latched for %s (controller ↦ start-pose EE).", latched)
 
+    # ------------------------------------------------------------------
+    # Camera-panel grab (Televiz)
+    # ------------------------------------------------------------------
+
+    def _feed_panel_hands(self, raw: XRFrame | None) -> dict[str, str | None]:
+        """Send the controller aim rays (XR anchor frame) to the panels; return who is grabbing."""
+        viz = self._viz
+        none = {"right": None, "left": None}
+        if viz is None or not self.config.viz_grab_enabled:
+            return none
+        if raw is None:
+            viz.set_hands({}, None)
+            return viz.grabbing()
+        # raw = base_T_anchor · anchor pose (no yaw correction): undo the anchor transform.
+        anchor_T_base = np.linalg.inv(np.asarray(self.config.base_T_anchor, dtype=float))
+        hands: dict[str, HandInput | None] = {}
+        for side, ctrl in (("right", raw.right), ("left", raw.left)):
+            if ctrl is None:
+                hands[side] = None
+                continue
+            clutch = self._clutch.get(side)
+            hands[side] = hand_input(
+                ctrl.aim_pose, anchor_T_base, ctrl.trigger,
+                free=clutch is None or not clutch.engaged, thumb_y=ctrl.thumbstick[1],
+            )
+        head = None if raw.head is None else anchor_T_base @ raw.head.pose
+        viz.set_hands(hands, head)
+        return viz.grabbing()
+
+    def _save_panel_layout(self, layouts: list[PanelLayout]) -> None:
+        if save_layouts(self.config.viz_layout_file, layouts):
+            logger.info("Camera panel layout saved to %s.", self.config.viz_layout_file)
+
     def _latch_head_offset(self, frame: XRFrame) -> None:
         """Headset look direction now ↦ ``_head_latch_target`` (start / measured head joints).
 
@@ -976,11 +1028,18 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._head.update(frame.head.pose)
 
     def _update_grippers(self, frame: XRFrame) -> None:
-        # Trigger 1 (squeezed) -> closed. Dataset convention: 1.0 = open.
-        if frame.right is not None:
-            self._gripper["right"] = 1.0 - float(np.clip(frame.right.trigger, 0.0, 1.0))
-        if frame.left is not None:
-            self._gripper["left"] = 1.0 - float(np.clip(frame.left.trigger, 0.0, 1.0))
+        # Trigger 1 (squeezed) -> closed. Dataset convention: 1.0 = open. A free
+        # hand pointing at / holding a camera-panel handle keeps its last gripper
+        # value: its trigger is a UI click, not a gripper command.
+        ui = self._viz.ui_active() if self._viz is not None else {}
+        for side, ctrl in (("right", frame.right), ("left", frame.left)):
+            if ctrl is None:
+                continue
+            clutch = self._clutch.get(side)
+            free = clutch is None or not clutch.engaged
+            if ui.get(side) and free:
+                continue
+            self._gripper[side] = 1.0 - float(np.clip(ctrl.trigger, 0.0, 1.0))
 
     def _update_base(self, frame: XRFrame) -> None:
         cfg = self.config
@@ -1090,6 +1149,22 @@ class Rby1XR(IsaacTeleopTeleoperator):
                     for i in range(4):
                         action[f"{side}_arm_{i}{NULL_SUFFIX}"] = float(h[i])
         return action
+
+
+def _mask_grabbing_hands(frame: XRFrame, grabbing: dict[str, str | None]) -> XRFrame:
+    """Neutralise squeeze / trigger / thumbstick of hands that hold a camera panel."""
+    if not any(grabbing.values()):
+        return frame
+    from dataclasses import replace as _replace
+
+    def mask(c: ControllerState | None) -> ControllerState | None:
+        if c is None:
+            return None
+        return _replace(c, squeeze=0.0, trigger=c.trigger, thumbstick=np.zeros(2))
+
+    right = mask(frame.right) if grabbing.get("right") else frame.right
+    left = mask(frame.left) if grabbing.get("left") else frame.left
+    return XRFrame(right=right, left=left, head=frame.head, body=frame.body)
 
 
 class _ReturnMotion:

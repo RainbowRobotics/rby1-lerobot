@@ -391,11 +391,19 @@ def stage_V_viz(args) -> dict:
     coloured panels visible (front centre, left / right), fps ~ display rate,
     no 'stale' layers. On Jetson Orin keep openxr_composition=False and set the
     WebXR client codec to H.264.
+
+    With --viz-grab (default) a tracking TeleopSession (controllers) is attached
+    to the Televiz session and the grab bars above the panels are live: point a
+    controller at a bar (it brightens), hold the trigger and move it. The status
+    line shows hover / grab and the Televiz<-teleop frame bridge is logged.
     """
     import numpy as np
 
+    from lerobot_teleoperator_rby1.isaac_teleop.config_isaac_teleop import DEFAULT_BASE_T_ANCHOR
     from lerobot_teleoperator_rby1.isaac_teleop.teleop_rby1_xr import print_xr_connect_help
+    from lerobot_teleoperator_rby1.isaac_teleop.viz_grab import hand_input
     from lerobot_teleoperator_rby1.isaac_teleop.viz_panels import CameraPanels, PanelLayout
+    from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import build_pipeline, frame_from_outputs
 
     colors = {"front": (255, 60, 60), "left": (60, 255, 60), "right": (60, 60, 255)}
     frames: dict = {}
@@ -425,23 +433,61 @@ def stage_V_viz(args) -> dict:
         source,
         lock_mode=args.viz_lock,
         openxr_composition=args.viz_openxr_composition,
+        grab_enabled=args.viz_grab,
+        on_layout_changed=lambda lays: _log("layout: " + ", ".join(f"{l.name}: x={l.offset_x:+.2f} y={l.offset_y:+.2f} d={l.distance:.2f}" for l in lays)),
     )
+    session = None
+    ext = None
+    anchor_T_base = np.linalg.inv(np.asarray(DEFAULT_BASE_T_ANCHOR, dtype=float))
     result: dict = {}
     try:
         print_xr_connect_help()
+        pipeline = None
+        required: list = []
+        if args.viz_grab:
+            from isaacteleop.teleop_session_manager import get_required_oxr_extensions_from_pipeline
+
+            pipeline, _ = build_pipeline(with_body=False)
+            required = list(get_required_oxr_extensions_from_pipeline(pipeline))
         _log("creating the Televiz XR session (waits for the headset) …")
-        panels.create_session("rby1_isaac_preflight_viz", [], -1)
+        panels.create_session("rby1_isaac_preflight_viz", required, -1)
+        if args.viz_grab:
+            from isaacteleop.oxr import OpenXRSessionHandles
+            from isaacteleop.teleop_session_manager import TeleopSession, TeleopSessionConfig
+
+            session = TeleopSession(
+                TeleopSessionConfig(
+                    app_name="rby1_isaac_preflight_viz", pipeline=pipeline,
+                    oxr_handles=OpenXRSessionHandles(*panels.oxr_handles()),
+                )
+            )
+            session.__enter__()
+            ext = _external_inputs()
+            _log("TeleopSession attached to the Televiz session (controllers -> grab bars)")
         panels.start_render_thread()
         panels.begin_rendering()
         t0 = time.monotonic()
         k = 0
+        last_print = 0.0
+        seen_ctrl = False
         while time.monotonic() - t0 < args.viz_seconds and not panels.lost:
             for name in colors:
                 seq[0] += 1
                 frames[name] = (make(name, k), time.monotonic(), seq[0])
             k += 1
-            if k % 30 == 0:
-                _log(panels.status())
+            if session is not None:
+                out = session.step(external_inputs=ext)
+                f = frame_from_outputs(out, want_body=False)
+                hands = {}
+                for side, c in (("right", f.right), ("left", f.left)):
+                    hands[side] = None if c is None else hand_input(c.aim_pose, anchor_T_base, c.trigger, True, c.thumbstick[1])
+                seen_ctrl |= any(v is not None for v in hands.values())
+                head = None if f.head is None else anchor_T_base @ f.head.pose
+                panels.set_hands(hands, head)
+            now = time.monotonic()
+            if now - last_print >= 1.0:
+                last_print = now
+                _log(panels.status() + (f" | controllers={'yes' if seen_ctrl else 'no'}" if session is not None else ""))
             time.sleep(1.0 / 30.0)
         st = panels.last_stats
         result = {
@@ -450,9 +496,16 @@ def stage_V_viz(args) -> dict:
             "lost": panels.lost,
             "fps": getattr(st, "fps", None) if st is not None else None,
             "stale_layers": list(getattr(st, "stale_layers", []) or []) if st is not None else None,
+            "controllers_seen": seen_ctrl if session is not None else None,
+            "layout": {l.name: (round(l.offset_x, 2), round(l.offset_y, 2), round(l.distance, 2)) for l in panels.layouts_snapshot()},
         }
     finally:
         panels.stop_rendering()
+        if session is not None:
+            try:
+                session.__exit__(None, None, None)
+            except Exception as e:  # noqa: BLE001
+                _log(f"session exit failed: {e!r}")
         panels.destroy()
         if launcher is not None:
             try:
@@ -583,6 +636,8 @@ def main() -> int:
     p.add_argument("--session-start", default="connect", choices=("connect", "first_action"))
     p.add_argument("--wait-headset", type=float, default=0.0, help="seconds; >0 includes stage S_headset")
     p.add_argument("--viz-seconds", type=float, default=15.0, help="stage V_viz duration")
+    p.add_argument("--viz-grab", dest="viz_grab", action="store_true", default=True, help="V_viz: attach controllers and enable the grab bars (default)")
+    p.add_argument("--no-viz-grab", dest="viz_grab", action="store_false", help="V_viz: panels only, no tracking session")
     p.add_argument("--viz-width", type=int, default=640)
     p.add_argument("--viz-height", type=int, default=480)
     p.add_argument("--viz-lock", default="gimbal", choices=("gimbal", "head", "world"))
@@ -613,6 +668,7 @@ def main() -> int:
         f"--wait-headset={args.wait_headset}",
         f"--viz-seconds={args.viz_seconds}", f"--viz-width={args.viz_width}", f"--viz-height={args.viz_height}",
         f"--viz-lock={args.viz_lock}",
+        *([] if args.viz_grab else ["--no-viz-grab"]),
         *(["--viz-openxr-composition"] if args.viz_openxr_composition else []),
     ]
     results: dict[str, tuple[str, object]] = {}

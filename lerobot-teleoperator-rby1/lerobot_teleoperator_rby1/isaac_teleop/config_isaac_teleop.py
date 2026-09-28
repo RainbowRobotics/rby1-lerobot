@@ -38,6 +38,7 @@ WEAR_MODE_CHOICES = ("head", "neck")
 HEAD_MODE_CHOICES = ("absolute", "relative")
 SHOULDER_SOURCE_CHOICES = ("auto", "body", "headset")
 VIZ_LOCK_CHOICES = ("gimbal", "head", "world")
+VIZ_BRIDGE_CHOICES = ("auto", "identity")
 
 
 @dataclass(kw_only=True)
@@ -118,6 +119,17 @@ class Rby1XRConfig(IsaacTeleopConfig):
     viz_follow_pitch: bool = True         # gimbal: panels also follow the head pitch (never roll)
     viz_openxr_composition: bool = False  # keep False on Jetson Orin (black quads otherwise)
     viz_wait_headset_s: int = -1          # VizSession.create waits for the headset (-1 = forever)
+    # Grab handle above each panel (like the CloudXR client's control panel):
+    # point a FREE hand (squeeze released) at the bar and hold the trigger to
+    # drag it; the thumbstick of that hand pushes / pulls. That hand's gripper
+    # and thumbstick are held while grabbing.
+    viz_grab_enabled: bool = True
+    viz_grab_threshold: float = 0.7       # trigger value that starts a grab (release below 0.3)
+    viz_grab_push_rate_mps: float = 0.5   # thumbstick-y push / pull speed while grabbing
+    viz_face_head: bool = True            # panels turn to face the head (gimbal / world)
+    viz_frame_bridge: str = "auto"        # "auto": estimate Televiz<-teleop frame from head poses | "identity"
+    viz_layout_file: str = "~/.cache/rby1_isaac/viz_layout.json"  # "" = do not persist moved panels
+    viz_layout_reset: bool = False        # ignore the saved layout once (start from the config values)
 
     # ── Arm mapping mode ──────────────────────────────────────────────
     # "ee_clutch":   squeeze latches a clutch; the arm follows the controller
@@ -268,6 +280,7 @@ class Rby1XRConfig(IsaacTeleopConfig):
             ("head_mode", self.head_mode, HEAD_MODE_CHOICES),
             ("shoulder_source", self.shoulder_source, SHOULDER_SOURCE_CHOICES),
             ("viz_lock_mode", self.viz_lock_mode, VIZ_LOCK_CHOICES),
+            ("viz_frame_bridge", self.viz_frame_bridge, VIZ_BRIDGE_CHOICES),
             ("arm_mode", self.arm_mode, ARM_MODE_CHOICES),
             ("arm_length_source", self.arm_length_source, ARM_LENGTH_SOURCE_CHOICES),
             ("hint_wrist_source", self.hint_wrist_source, HINT_WRIST_SOURCE_CHOICES),
@@ -283,6 +296,8 @@ class Rby1XRConfig(IsaacTeleopConfig):
             raise ValueError("neck_shoulder_offset must have 3 values")
         if self.viz_enabled and len(self.viz_offsets_x) != len(self.viz_cameras):
             raise ValueError("viz_offsets_x must have one entry per viz_cameras entry")
+        if not (0.0 < self.viz_grab_threshold <= 1.0):
+            raise ValueError("viz_grab_threshold must be in (0, 1]")
         if self.robot_model.strip().lower() not in ("a", "m", "ub"):
             raise ValueError(f'robot_model must be "a", "m" or "ub", got {self.robot_model!r}')
         if not (0.0 < self.head_smoothing <= 1.0):

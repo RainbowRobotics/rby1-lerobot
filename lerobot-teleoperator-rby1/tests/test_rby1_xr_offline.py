@@ -809,3 +809,84 @@ def test_head_latch_waits_for_tracked_head(stubbed_pipeline):
     a = t.get_action()
     assert t._head_latch_target is None
     np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], [0.2, 0.7], atol=1e-6)
+
+
+def test_camera_panel_grab_holds_gripper_and_blocks_clutch(stubbed_pipeline, monkeypatch, tmp_path):
+    """A free hand pointing at the handle bar: trigger = grab (gripper held, no clutch), layout saved."""
+    import time as _time
+
+    from tests.test_viz_panels import FakeTeleviz
+
+    frames = {"front": (np.zeros((480, 640, 3), np.uint8), 0.0, 1)}
+    monkeypatch.setattr(mod, "bus_frame_source", lambda n: frames.get(n))
+    layout_file = tmp_path / "viz_layout.json"
+    # XR anchor frame: viewer at (0, 1.6, 0) (FakeVizSession head), handle bar centre at (0, 2.035, -1.5).
+    M = np.asarray(Rby1XRConfig.__dataclass_fields__["base_T_anchor"].default_factory(), float)[:3, :3]
+
+    def ctrl(target_xr, **kw):
+        d = np.asarray(target_xr, float) - np.array([0.0, 1.6, 0.0])
+        pitch = math.atan2(d[1], -d[2])
+        yaw = math.atan2(-d[0], -d[2])
+        R_xr = Rotation.from_euler("y", yaw) * Rotation.from_euler("x", pitch)  # -Z -> d
+        R_robot = Rotation.from_matrix(M @ R_xr.as_matrix())
+        return fakes.controller(pos=M @ np.array([0.0, 1.6, 0.0]), quat=R_robot.as_quat(), **kw)
+
+    session = fakes.FakeSession()
+    session.push(_frame(right=ctrl((0, 2.035, -1.5))))
+    readers: list = []
+    cfg = dict(torso_source="none", use_torso=False, use_head=False, viz_enabled=True, viz_cameras=["front"],
+               viz_offsets_x=[0.0], viz_frame_bridge="identity", viz_layout_file=str(layout_file))
+
+    def reader_factory(address, model):
+        readers.append(fakes.FakeStateReader(address, model))
+        return readers[-1]
+
+    t = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **cfg),
+                   session_factory=lambda pipeline: session, state_reader_factory=reader_factory,
+                   viz_module=FakeTeleviz, viz_uploader=lambda f: f)
+    t.connect()
+    try:
+        a = t.get_action()
+        assert a["right_gripper_0.pos"] == 1.0
+
+        def wait(cond):
+            deadline = _time.time() + 2.0
+            while _time.time() < deadline and not cond():
+                t.get_action()
+                _time.sleep(0.01)
+            return cond()
+
+        assert wait(lambda: t._viz.hover()["right"] == "front")
+        # Trigger while hovering: grab, gripper stays open.
+        session.push(_frame(right=ctrl((0, 2.035, -1.5), trigger=0.9)))
+        a = t.get_action()
+        assert a["right_gripper_0.pos"] == 1.0
+        assert wait(lambda: t._viz.grabbing()["right"] == "front")
+        # Squeezing while grabbing does not clutch the arm; the gripper is still held.
+        session.push(_frame(right=ctrl((0.3, 2.035, -1.5), trigger=0.9, squeeze=0.9)))
+        a = t.get_action()
+        assert not t._clutch["right"].engaged and a["right_gripper_0.pos"] == 1.0
+        assert wait(lambda: abs(t._viz.layout("front").offset_x - 0.3) < 0.03)
+        # Release: layout persisted.
+        session.push(_frame(right=ctrl((0.3, 2.035, -1.5), trigger=0.0)))
+        assert wait(lambda: t._viz.grabbing()["right"] is None and layout_file.exists())
+        import json
+
+        assert abs(json.loads(layout_file.read_text())["front"]["offset_x"] - 0.3) < 0.03
+        # Gripper works again once the ray leaves the bar.
+        session.push(_frame(right=ctrl((0, 0.5, -1.5), trigger=1.0)))
+        assert wait(lambda: t._viz.hover()["right"] is None)
+        assert t.get_action()["right_gripper_0.pos"] == 0.0
+    finally:
+        t.disconnect()
+    # A new teleop restores the saved layout.
+    session2 = fakes.FakeSession()
+    session2.push(_frame(right=fakes.controller()))
+    t2 = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **cfg),
+                    session_factory=lambda pipeline: session2, state_reader_factory=reader_factory,
+                    viz_module=FakeTeleviz, viz_uploader=lambda f: f)
+    t2.connect()
+    try:
+        assert abs(t2._viz.layout("front").offset_x - 0.3) < 0.03
+    finally:
+        t2.disconnect()
