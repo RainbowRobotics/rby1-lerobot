@@ -143,7 +143,7 @@ def test_head_latches_then_follows_yaw(stubbed_pipeline):
     session = fakes.FakeSession()
     session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(0))))
     readers: list = []
-    t = make_teleop(session, readers, torso_source="none")
+    t = make_teleop(session, readers, torso_source="none", head_mode="relative")
     t.connect()
     a = t.get_action()  # latch frame
     assert a["head_0.pos"] == pytest.approx(0.0)
@@ -309,7 +309,7 @@ def test_right_a_returns_to_start_pose(stubbed_pipeline, monkeypatch):
     session = fakes.FakeSession()
     session.push(_frame(right=fakes.controller((0, 0, 0), squeeze=0.9), head=fakes.head(quat=_head_quat(0))))
     readers: list = []
-    t = make_teleop(session, readers, torso_source="none", ready_return_duration_s=2.0)
+    t = make_teleop(session, readers, torso_source="none", ready_return_duration_s=2.0, head_mode="relative")
     t.connect()
     a0 = t.get_action()  # start pose recorded here (first action)
     x_start, head_start = a0["right_ee.x"], a0["head_1.pos"]
@@ -659,3 +659,27 @@ def test_posture_hint_frozen_while_released(stubbed_pipeline, monkeypatch):
     session.push(_frame(right=fakes.controller(W2, squeeze=0.9), body=_body_with_arm("right", S2, E2, W2)))
     a = t.get_action()
     assert a["right_arm_0.null"] == pytest.approx(q_b[0], abs=1e-3)
+
+
+def test_head_absolute_mode_follows_headset_orientation(stubbed_pipeline):
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(0))))
+    readers: list = []
+    readers_head = np.array([0.3, 0.85])  # robot head starts somewhere else (ready pitch)
+    t = make_teleop(session, readers, torso_source="none", use_torso=False, head_pitch_offset_deg=10.0)
+    t.connect()
+    readers[0].head_q = readers_head
+    a = t.get_action()  # first frame: latch marks only; the held (measured) value is emitted
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], readers_head)
+    a = t.get_action()  # straight ahead -> yaw 0, pitch offset 10 deg (absolute, not the measured 0.85)
+    assert a["head_0.pos"] == pytest.approx(0.0, abs=1e-6)
+    assert a["head_1.pos"] == pytest.approx(math.radians(10.0), abs=1e-6)
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(-40))))
+    a = t.get_action()
+    assert a["head_0.pos"] == pytest.approx(math.radians(-40), abs=1e-6)
+    # Right A does not re-centre the head in absolute mode: the same headset yaw
+    # keeps giving the same joint angle (only the operator-frame reference matters).
+    session.push(_frame(right=fakes.controller(primary=True), head=fakes.head(quat=_head_quat(-40))))
+    t.get_action()
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(-40))))
+    assert abs(t.get_action()["head_0.pos"]) <= math.radians(40) + 1e-6

@@ -247,7 +247,7 @@ The process prints the host IP addresses and waits for the headset:
 | Right thumbstick / left thumbstick | Base linear velocity / yaw rate |
 | Right **B** | Stop: freeze every target, zero the base |
 | Right **A** | Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; re-reference the operator frame so the direction you are facing becomes robot +X; also resumes after a stop and re-centres the head origin. The base is not moved |
-| Headset orientation | `head_0` (pan) / `head_1` (tilt) relative to the pose at the first tracked frame |
+| Headset orientation | `head_0` (pan) / `head_1` (tilt) from the headset yaw / pitch in the operator frame (`head_mode=absolute`; Right A sets straight-ahead) |
 | Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, while **both** arms are clutched (`torso_engage=both_arms`, default; `any_arm` / `always` available) |
 | Headset pose (`wear_mode=neck`) | Torso pose (the robot head stays at the ready pose) |
 | Body tracking shoulder / elbow (`arm_posture_hint=true`) | The arm posture (shoulder + elbow angles) is retargeted to `arm_0..arm_3` and sent as a **nullspace hint** to the Cartesian solver: the elbow follows yours while the EE pose keeps priority. Not recorded unless `record_posture_hint` (both sides) |
@@ -341,6 +341,7 @@ lerobot-record \
 | `clutch_threshold` | `0.5` | Squeeze value above which an arm follows |
 | `latch_orientation` | `"measured"` | Home orientation on engage: measured EE pose (`"commanded"` = upstream SO-101 behaviour) |
 | `thumbstick_deadzone`, `base_max_linear`, `base_max_angular` | `0.15`, `0.3`, `0.6` | Thumbstick → base velocity mapping |
+| `head_mode`, `head_yaw_offset_deg`, `head_pitch_offset_deg` | `"absolute"`, `0`, `0` | `absolute`: head joints = headset yaw / pitch in the operator frame (straight ahead = offsets); `relative`: deltas from the pose latched at start / Right A |
 | `head_yaw_sign`, `head_pitch_sign` | `1.0`, `-1.0` | Flip if the head moves the wrong way |
 | `head_yaw_limit_deg`, `head_pitch_min_deg`, `head_pitch_max_deg` | `80`, `-45`, `80` | Head joint clamps |
 | `head_smoothing` | `0.3` | EMA weight of the new head sample (1.0 = no filtering) |

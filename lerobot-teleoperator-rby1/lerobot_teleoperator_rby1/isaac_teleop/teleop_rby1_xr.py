@@ -135,16 +135,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
 
         self._clutch: dict[str, Clutch | None] = {"right": None, "left": None, "torso": None}
         self._torso_target: np.ndarray | None = None
-        self._head = HeadRetargeter(
-            yaw_sign=config.head_yaw_sign,
-            pitch_sign=config.head_pitch_sign,
-            yaw_gain=config.head_yaw_gain,
-            pitch_gain=config.head_pitch_gain,
-            yaw_limit=math.radians(config.head_yaw_limit_deg),
-            pitch_min=math.radians(config.head_pitch_min_deg),
-            pitch_max=math.radians(config.head_pitch_max_deg),
-            smoothing=config.head_smoothing,
-        )
+        self._head = self._make_head_retargeter()
         self._gripper = {"right": 1.0, "left": 1.0}  # dataset convention: 1 = open
         self._base_vel = (0.0, 0.0, 0.0)
         self._stopped = False
@@ -670,6 +661,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
             pitch_min=math.radians(cfg.head_pitch_min_deg),
             pitch_max=math.radians(cfg.head_pitch_max_deg),
             smoothing=cfg.head_smoothing,
+            absolute=cfg.head_mode == "absolute",
+            yaw_offset=math.radians(cfg.head_yaw_offset_deg),
+            pitch_offset=math.radians(cfg.head_pitch_offset_deg),
         )
 
     @property

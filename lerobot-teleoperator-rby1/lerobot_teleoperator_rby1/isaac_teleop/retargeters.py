@@ -62,7 +62,17 @@ class HeadRetargeter:
         pitch_min: float = math.radians(-45.0),
         pitch_max: float = math.radians(80.0),
         smoothing: float = 0.3,
+        absolute: bool = False,
+        yaw_offset: float = 0.0,
+        pitch_offset: float = 0.0,
     ) -> None:
+        # absolute: joints = sign * gain * (headset yaw / pitch in the operator
+        # frame) + offset — no latch origin, looking straight ahead gives the
+        # offsets. relative (legacy): deltas from the pose at latch time added
+        # to the measured joints of that moment.
+        self.absolute = absolute
+        self.yaw_offset = yaw_offset
+        self.pitch_offset = pitch_offset
         self.yaw_sign = yaw_sign
         self.pitch_sign = pitch_sign
         self.yaw_gain = yaw_gain
@@ -90,9 +100,12 @@ class HeadRetargeter:
         self._target = np.asarray(head_q, dtype=float).copy()
 
     def latch(self, R_head_robot: np.ndarray, head_q_measured: np.ndarray) -> None:  # noqa: N803
-        self._yaw0, self._pitch0 = head_yaw_pitch(R_head_robot)
         self._q0 = np.asarray(head_q_measured, dtype=float).copy()
-        self._target = self._q0.copy()
+        if self._target is None:
+            self._target = self._q0.copy()
+        if not self.absolute:
+            self._yaw0, self._pitch0 = head_yaw_pitch(R_head_robot)
+            self._target = self._q0.copy()
         self._latched = True
 
     def update(self, R_head_robot: np.ndarray | None) -> np.ndarray | None:  # noqa: N803
@@ -100,14 +113,22 @@ class HeadRetargeter:
         if R_head_robot is None or not self._latched:
             return self.target
         yaw, pitch = head_yaw_pitch(R_head_robot)
-        dyaw = wrap_pi(yaw - self._yaw0) * self.yaw_gain
-        dpitch = (pitch - self._pitch0) * self.pitch_gain
-        raw = np.array(
-            [
-                np.clip(self._q0[0] + self.yaw_sign * dyaw, -self.yaw_limit, self.yaw_limit),
-                np.clip(self._q0[1] + self.pitch_sign * dpitch, self.pitch_min, self.pitch_max),
-            ]
-        )
+        if self.absolute:
+            raw = np.array(
+                [
+                    np.clip(self.yaw_sign * yaw * self.yaw_gain + self.yaw_offset, -self.yaw_limit, self.yaw_limit),
+                    np.clip(self.pitch_sign * pitch * self.pitch_gain + self.pitch_offset, self.pitch_min, self.pitch_max),
+                ]
+            )
+        else:
+            dyaw = wrap_pi(yaw - self._yaw0) * self.yaw_gain
+            dpitch = (pitch - self._pitch0) * self.pitch_gain
+            raw = np.array(
+                [
+                    np.clip(self._q0[0] + self.yaw_sign * dyaw, -self.yaw_limit, self.yaw_limit),
+                    np.clip(self._q0[1] + self.pitch_sign * dpitch, self.pitch_min, self.pitch_max),
+                ]
+            )
         if self._target is None:
             self._target = raw
         else:

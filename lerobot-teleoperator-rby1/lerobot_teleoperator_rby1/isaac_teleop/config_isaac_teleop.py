@@ -35,6 +35,7 @@ ARM_LENGTH_SOURCE_CHOICES = ("body", "config")
 HINT_WRIST_SOURCE_CHOICES = ("controller", "body")
 ROBOT_VERSION_CHOICES = ("auto", "1.2", "1.3")
 WEAR_MODE_CHOICES = ("head", "neck")
+HEAD_MODE_CHOICES = ("absolute", "relative")
 SHOULDER_SOURCE_CHOICES = ("auto", "body", "headset")
 VIZ_LOCK_CHOICES = ("gimbal", "head", "world")
 
@@ -177,6 +178,14 @@ class Rby1XRConfig(IsaacTeleopConfig):
     base_max_angular: float = 0.6  # rad/s at full deflection
 
     # ── Headset orientation -> head_0 (yaw) / head_1 (pitch) ─────────
+    # "absolute": joints follow the headset yaw / pitch measured in the
+    #             operator frame (Right A sets which direction is straight
+    #             ahead); looking straight ahead gives head_*_offset_deg.
+    # "relative": legacy — deltas from the pose latched at start / Right A,
+    #             added to the head joints measured then.
+    head_mode: str = "absolute"
+    head_yaw_offset_deg: float = 0.0
+    head_pitch_offset_deg: float = 0.0
     head_yaw_sign: float = 1.0      # +head_0 = look left; flip if reversed on HW
     head_pitch_sign: float = -1.0   # +head_1 = look down (READY_HEAD pitch = +49 deg)
     head_yaw_gain: float = 1.0
@@ -250,6 +259,7 @@ class Rby1XRConfig(IsaacTeleopConfig):
             )
         for name, value, choices in (
             ("wear_mode", self.wear_mode, WEAR_MODE_CHOICES),
+            ("head_mode", self.head_mode, HEAD_MODE_CHOICES),
             ("shoulder_source", self.shoulder_source, SHOULDER_SOURCE_CHOICES),
             ("viz_lock_mode", self.viz_lock_mode, VIZ_LOCK_CHOICES),
             ("arm_mode", self.arm_mode, ARM_MODE_CHOICES),
