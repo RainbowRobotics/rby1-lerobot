@@ -203,6 +203,13 @@ lerobot-teleoperate ... \
   --teleop.viz_offsets_x='[0.0,-1.1,1.1]'
 ```
 
+Frames are uploaded to the GPU with PyTorch (CuPy as fallback). **On Jetson the PyPI
+`torch` wheel is built for CUDA 12.8+ and fails with "The NVIDIA driver on your system is
+too old (found version 12060)" on JetPack 6.x (CUDA 12.6)** — install NVIDIA's JetPack
+build instead: `pip install --force-reinstall torch --index-url https://pypi.jetson-ai-lab.io/jp6/cu126`.
+The teleoperator runs a small upload check when the Televiz session is created and stops
+with this hint if the CUDA stack is unusable.
+
 Panels follow your head position and yaw (`viz_lock_mode=gimbal`; `head` = full head
 lock, `world` = fixed in the room). On **Jetson Orin** keep `viz_openxr_composition=false`
 (default) and set the **Video Codec to H.264** in the CloudXR web client, otherwise the

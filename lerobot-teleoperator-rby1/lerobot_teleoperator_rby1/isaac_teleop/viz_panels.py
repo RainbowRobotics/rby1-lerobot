@@ -36,17 +36,73 @@ class PanelLayout:
     width: float = 1.0      # m; height follows the frame aspect ratio
 
 
-def rgb_to_rgba_cuda(frame: np.ndarray, _cache: dict = {}) -> Any:
-    """Upload an (H, W, 3) uint8 RGB host frame as a contiguous (H, W, 4) CUDA tensor."""
+CUDA_UPLOAD_HINT = (
+    "Televiz needs the camera frames as CUDA arrays. The installed PyTorch cannot use "
+    "this GPU (on Jetson the PyPI aarch64 wheels are built for CUDA 12.8+/SBSA while "
+    "JetPack 6.x ships CUDA 12.6). Install NVIDIA's JetPack wheel, e.g. "
+    "`pip install --force-reinstall torch --index-url https://pypi.jetson-ai-lab.io/jp6/cu126`, "
+    "or `pip install cupy-cuda12x` (used as a fallback)."
+)
+
+
+def _rgba_host(frame: np.ndarray) -> np.ndarray:
+    frame = np.ascontiguousarray(frame)
+    if frame.ndim == 3 and frame.shape[2] == 4:
+        return frame
+    rgba = np.empty((*frame.shape[:2], 4), np.uint8)
+    rgba[..., :3] = frame
+    rgba[..., 3] = 255
+    return rgba
+
+
+def _upload_torch(frame: np.ndarray, _cache: dict = {}) -> Any:
     import torch
 
     t = torch.from_numpy(np.ascontiguousarray(frame)).to("cuda", non_blocking=False)
+    if t.shape[-1] == 4:
+        return t.contiguous()
     key = tuple(t.shape[:2])
     alpha = _cache.get(key)
     if alpha is None:
         alpha = torch.full((*key, 1), 255, dtype=torch.uint8, device="cuda")
         _cache[key] = alpha
     return torch.cat([t, alpha], dim=-1).contiguous()
+
+
+def _upload_cupy(frame: np.ndarray) -> Any:
+    import cupy
+
+    return cupy.asarray(_rgba_host(frame))
+
+
+_uploader_impl: Callable[[np.ndarray], Any] | None = None
+
+
+def rgb_to_rgba_cuda(frame: np.ndarray) -> Any:
+    """Upload an (H, W, 3) uint8 RGB host frame as a contiguous (H, W, 4) CUDA array.
+
+    Tries PyTorch first, then CuPy; the working backend is cached. Raises a
+    RuntimeError with install guidance when neither can reach the GPU.
+    """
+    global _uploader_impl
+    if _uploader_impl is not None:
+        return _uploader_impl(frame)
+    errors = []
+    for name, fn in (("torch", _upload_torch), ("cupy", _upload_cupy)):
+        try:
+            out = fn(frame)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{name}: {e.__class__.__name__}: {str(e).splitlines()[0][:160]}")
+            continue
+        _uploader_impl = fn
+        logger.info("Televiz CUDA upload backend: %s", name)
+        return out
+    raise RuntimeError(CUDA_UPLOAD_HINT + " Tried: " + " | ".join(errors))
+
+
+def check_cuda_upload(uploader: Callable[[np.ndarray], Any]) -> None:
+    """Run one tiny upload so a broken CUDA stack fails at connect time, not per frame."""
+    uploader(np.zeros((2, 2, 3), np.uint8))
 
 
 def xr_panel_pose(
@@ -137,6 +193,12 @@ class CameraPanels:
         cfg.xr_system_wait_seconds = int(wait_headset_s)
         self.session = tv.VizSession.create(cfg)
         logger.info("Televiz XR session created (%d camera panels, lock=%s).", len(self.layouts), self.lock_mode)
+        try:
+            check_cuda_upload(self._upload)
+        except Exception as e:  # noqa: BLE001
+            self.session.destroy()
+            self.session = None
+            raise RuntimeError(f"Camera panel upload check failed: {e}") from e
         return self.session
 
     def oxr_handles(self) -> Any:
@@ -250,7 +312,7 @@ class CameraPanels:
                 layer.submit(self._upload(frame))
             except Exception as e:  # noqa: BLE001
                 if name not in self._warned_missing:
-                    logger.warning("Televiz submit failed for '%s': %s", name, e)
+                    logger.error("Televiz submit failed for '%s': %s", name, e)
                     self._warned_missing.add(name)
 
     def _apply_placements(self) -> None:

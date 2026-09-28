@@ -59,7 +59,8 @@ class FakeVizSession:
         return _Obj(fps=72.0, stale_layers=[])
 
     def destroy(self):
-        assert threading.current_thread().name == "televiz-render"
+        # Destroyed on the render thread normally; the connect-time upload check
+        # tears down a session that never had a render thread.
         self.destroyed = True
 
 
@@ -169,7 +170,7 @@ def test_camera_panels_thread_lifecycle_and_submits():
 
 
 def test_camera_panels_detects_session_loss():
-    panels = CameraPanels([PanelLayout("front")], lambda n: None, viz_module=FakeTeleviz, daemon=True)
+    panels = CameraPanels([PanelLayout("front")], lambda n: None, viz_module=FakeTeleviz, daemon=True, uploader=lambda f: f)
     session = panels.create_session("t", [], 0)
     panels.start_render_thread()
     panels.begin_rendering()
@@ -186,3 +187,13 @@ def test_status_string():
     assert panels.status().startswith("viz: 0/1 panels")
     with pytest.raises(RuntimeError):
         panels.start_render_thread()
+
+
+def test_cuda_upload_check_fails_fast(monkeypatch):
+    def broken(frame):
+        raise RuntimeError("The NVIDIA driver on your system is too old")
+
+    panels = CameraPanels([PanelLayout("front")], lambda n: None, viz_module=FakeTeleviz, uploader=broken, daemon=True)
+    with pytest.raises(RuntimeError, match="upload check failed"):
+        panels.create_session("t", [], 0)
+    assert panels.session is None and FakeTeleviz.VizSession.last.destroyed
