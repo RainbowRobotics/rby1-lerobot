@@ -210,7 +210,8 @@ driver API (`cuda-python`), then CuPy. **On Jetson (JetPack 6.x = CUDA 12.6) the
 in the Python 3.12 LeRobot environment install the driver-API backend:
 
 ```bash
-pip install "cuda-python==12.6.*"   # matches the JetPack 6.x driver; only libcuda is needed
+pip install "cuda-bindings>=12.6,<13"   # CUDA 12.x driver-API bindings (cp312 aarch64 wheels); only libcuda is needed
+python -c "from cuda.bindings import driver as d; print(d.cuInit(0), d.cuDriverGetVersion())"
 ```
 
 The teleoperator runs a small upload check when the Televiz session is created and stops

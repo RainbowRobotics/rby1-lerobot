@@ -40,8 +40,8 @@ CUDA_UPLOAD_HINT = (
     "Televiz needs the camera frames as CUDA arrays and no working upload backend was "
     "found. On Jetson (JetPack 6.x = CUDA 12.6) the PyPI torch wheels are built for CUDA "
     "12.8+ and NVIDIA's JetPack torch wheels exist only for Python 3.10, so install the "
-    "driver-API backend instead: `pip install \"cuda-python==12.6.*\"` (matches the "
-    "JetPack driver), or `pip install cupy-cuda12x`."
+    "driver-API backend instead: `pip install \"cuda-bindings>=12.6,<13\"` (12.x driver API, "
+    "cp312 aarch64 wheels; only libcuda is needed), or `pip install cupy-cuda12x`."
 )
 
 
