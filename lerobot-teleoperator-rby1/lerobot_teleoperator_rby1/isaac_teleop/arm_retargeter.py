@@ -20,9 +20,10 @@ matter. Solving:
 
 1. ``u = R_tᵀ·norm(E - S)`` must equal ``R_a0(q0) R_x(q1) e``. Because
    ``R_x`` keeps the x component, ``(R_a0(q0)ᵀ u)_x = e_x`` is a
-   ``A cos q0 + B sin q0 = C`` equation with two solutions; the one whose
-   ``q1`` sign matches the arm_1 limit (right ≤ 0, left ≥ 0) is kept, ties go
-   to the previous ``q0``. Then ``q1 = atan2(v_y, -v_z)``.
+   ``A cos q0 + B sin q0 = C`` equation with two solutions; candidates whose
+   ``q1`` respects the arm_1 limit (right ≤ 0, left ≥ 0) are preferred, the
+   one nearest to the previous / seeded joints wins, and when neither is
+   feasible (elbow inward of the shoulder) the least-violating one is clipped.
 2. ``q3`` from the elbow angle ``φ = angle(u, f)``: ``cos φ = e·R_y(q3) g``
    is ``P cos q3 + Q sin q3``, solved in closed form on ``[-150°, 0]``.
 3. ``q2`` from the azimuth of the forearm in the link_1 frame, corrected by
@@ -79,19 +80,32 @@ def _wrap(a: float) -> float:
     return float((a + math.pi) % (2.0 * math.pi) - math.pi)
 
 
-def _nearest_branch(candidates: list[float], prev: float | None) -> float:
-    if prev is None:
-        return candidates[0]
-    return min(candidates, key=lambda c: abs(_wrap(c - prev)))
-
-
 def forearm_dir_link2(q3: float, version: str = "1.3") -> np.ndarray:
     g = FOREARM_VEC.get(version, FOREARM_VEC["1.3"])
     return _rot(np.array([0.0, 1.0, 0.0]), q3) @ (g / np.linalg.norm(g))
 
 
+def _q1_violation(q1: float, lim: np.ndarray) -> float:
+    """Distance (rad) of ``q1`` outside the arm_1 position limits (0 when inside)."""
+    lo, hi = float(lim[1][0]), float(lim[1][1])
+    if q1 < lo:
+        return lo - q1
+    if q1 > hi:
+        return q1 - hi
+    return 0.0
+
+
 def _solve_q0_q1(u: np.ndarray, e: np.ndarray, side: str, prev: np.ndarray | None) -> tuple[float, float]:
-    """``u = R_a0(q0) R_x(q1) e`` for a given (link_1-frame) upper-arm rest vector ``e``."""
+    """``u = R_a0(q0) R_x(q1) e`` for a given (link_1-frame) upper-arm rest vector ``e``.
+
+    Two ``(q0, q1)`` pairs reach the same direction. Candidates whose ``q1``
+    lies inside the arm_1 limits are preferred; among those the one nearest to
+    ``prev`` (joint-space distance over q0 and q1) wins. When *no* candidate is
+    feasible — typically a right elbow slightly inward of the shoulder, which
+    would need adduction past the +1° limit — the least-violating candidate is
+    taken and ``q1`` is clipped to the limit, giving the nearest reachable
+    direction instead of the mirrored "arm over the shoulder" branch.
+    """
     a0 = ARM0_AXIS[side]
     lim = ARM_LIMITS[side]
     c = np.cross(a0, u)
@@ -106,23 +120,29 @@ def _solve_q0_q1(u: np.ndarray, e: np.ndarray, side: str, prev: np.ndarray | Non
     else:
         d = math.acos(C / r)
         cands = [base + d, base - d]
-    best: tuple[float, float] | None = None
-    fallback: tuple[float, float] | None = None
-    for q0 in cands:
+
+    def dist_prev(q0: float, q1: float) -> float:
+        if prev is None:
+            return 0.0
+        return abs(_wrap(q0 - float(prev[0]))) + abs(_wrap(q1 - float(prev[1])))
+
+    solutions: list[tuple[float, float, float]] = []  # (violation, dist_prev, idx)
+    pairs: list[tuple[float, float]] = []
+    for i, q0 in enumerate(cands):
         v = _rot(a0, -q0) @ u
         # R_x(q1) e = (e_x, e_y cos - e_z sin, e_y sin + e_z cos): solve the 2-D rotation.
         q1 = math.atan2(v[1] * e[2] - v[2] * e[1], v[1] * e[1] + v[2] * e[2]) * -1.0
-        q1 = _wrap(q1)
-        sign_ok = (q1 <= lim[1][1] + 1e-6) if side == "right" else (q1 >= lim[1][0] - 1e-6)
-        if sign_ok:
-            if best is None or (
-                prev is not None and abs(_wrap(q0 - prev[0])) < abs(_wrap(best[0] - prev[0]))
-            ):
-                best = (q0, q1)
-        elif fallback is None:
-            fallback = (q0, q1)
-    q0, q1 = best if best is not None else fallback  # type: ignore[misc]
-    return _wrap(q0), q1
+        q0, q1 = _wrap(q0), _wrap(q1)
+        pairs.append((q0, q1))
+        solutions.append((_q1_violation(q1, lim), dist_prev(q0, q1), float(i)))
+    feasible = [t for t in solutions if t[0] <= 1e-6]
+    if feasible:
+        _, _, idx = min(feasible, key=lambda t: t[1])
+    else:
+        _, _, idx = min(solutions, key=lambda t: (t[0], t[1]))
+    q0, q1 = pairs[int(idx)]
+    q1 = float(np.clip(q1, lim[1][0], lim[1][1]))
+    return q0, q1
 
 
 def solve_shoulder_elbow(
@@ -245,8 +265,15 @@ class ArmPostureRetargeter:
         R_torso: np.ndarray,  # noqa: N803
         t: float,
         dt: float,
+        seed: np.ndarray | None = None,
     ) -> np.ndarray | None:
-        """Feed base-frame S/E/W (any None = invalid) and return the current hint."""
+        """Feed base-frame S/E/W (any None = invalid) and return the current hint.
+
+        ``seed`` (the robot's measured ``arm_0..arm_3``) is used when no hint
+        exists yet: the solver branch nearest to the robot's actual posture is
+        chosen and the hint ramps from there (EMA + velocity limit) instead of
+        jumping to the human posture on the first sample.
+        """
         if shoulder is None or elbow is None or wrist is None:
             if self._last_valid_t is not None and t - self._last_valid_t > self.hold_s:
                 self._q = None
@@ -254,6 +281,9 @@ class ArmPostureRetargeter:
         Rt = np.asarray(R_torso, dtype=float)[:3, :3]
         u = Rt.T @ (np.asarray(elbow, dtype=float) - np.asarray(shoulder, dtype=float))
         f = Rt.T @ (np.asarray(wrist, dtype=float) - np.asarray(elbow, dtype=float))
+        if self._q is None and seed is not None:
+            lim = ARM_LIMITS[self.side]
+            self._q = np.clip(np.asarray(seed, dtype=float)[:4], lim[:, 0], lim[:, 1])
         q = solve_shoulder_elbow(u, f, self.side, self._q, self.version)
         if q is None:
             return self.hint

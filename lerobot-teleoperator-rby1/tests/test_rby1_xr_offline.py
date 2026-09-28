@@ -449,7 +449,7 @@ def test_posture_hint_keys_and_recording(stubbed_pipeline, monkeypatch):
     session.push(_frame(right=fakes.controller(W, squeeze=0.9), body=body))  # hints only while engaged
     readers: list = []
     t = make_teleop(session, readers, torso_source="none", use_torso=False, use_left_arm=False, use_head=False,
-                    arm_posture_hint=True, posture_hint_smoothing=1.0)
+                    arm_posture_hint=True, posture_hint_smoothing=1.0, posture_hint_max_vel=1000.0)
     t.connect()
     readers[0].torso = T
     a = t.get_action()
@@ -460,9 +460,78 @@ def test_posture_hint_keys_and_recording(stubbed_pipeline, monkeypatch):
     t2 = make_teleop(fakes.FakeSession(), [], torso_source="none", use_torso=False, use_left_arm=False, use_head=False,
                      arm_posture_hint=True, record_posture_hint=True)
     assert "right_arm_3.null" in t2.action_features and "left_arm_0.null" not in t2.action_features
-    # Body lost while engaged: the hint holds, then times out -> no hint keys (unless recorded).
+    # Body lost while engaged (beyond hold_s): the last hint is kept — the
+    # solver must not fall back to its default nullspace pose mid-motion.
     session.push(_frame(right=fakes.controller(W, squeeze=0.9)))
     clock[0] += 5.0
+    a = t.get_action()
+    assert a["right_arm_0.null"] == pytest.approx(q_true[0], abs=1e-3)
+
+
+def test_posture_hint_seeded_from_measured_joints_and_ramped(stubbed_pipeline, monkeypatch):
+    """The first hint starts at the robot's actual arm_0..3 and ramps at max_vel."""
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    from lerobot_teleoperator_rby1.isaac_teleop.arm_retargeter import forward_points
+
+    q_robot = np.array([0.26, -0.17, -0.26, -2.0, 0, 0, 0])  # ready-like
+    q_human = np.array([0.3, -0.4, 0.2, -1.2])
+    S, E, W = forward_points(q_human, "right")
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(W, squeeze=0.9), body=_body_with_arm("right", S, E, W)))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", use_torso=False, use_left_arm=False, use_head=False,
+                    arm_posture_hint=True, posture_hint_smoothing=1.0, posture_hint_max_vel=1.0)
+    t.connect()
+    readers[0].torso = np.eye(4)
+    readers[0].right_q = q_robot
+    a = t.get_action()  # first tick: dt defaults to 1/60 s -> at most 1/60 rad away from the seed
+    for i in range(4):
+        assert abs(a[f"right_arm_{i}.null"] - q_robot[i]) <= 1.0 / 60.0 + 1e-9
+    # Converges towards the human posture over time.
+    for _ in range(120):
+        clock[0] += 0.02
+        session.push(_frame(right=fakes.controller(W, squeeze=0.9), body=_body_with_arm("right", S, E, W)))
+        a = t.get_action()
+    for i in range(4):
+        assert a[f"right_arm_{i}.null"] == pytest.approx(q_human[i], abs=1e-3)
+
+
+def test_recorded_hint_without_body_is_measured_posture_not_zeros(stubbed_pipeline):
+    """record_posture_hint=True with no hint available must not emit q = 0."""
+    q_robot = np.array([0.26, -0.17, -0.26, -2.0, 0, 0, 0])
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller((0.3, -0.2, 0.9), squeeze=0.0)))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", use_torso=False, use_left_arm=False, use_head=False,
+                    arm_posture_hint=True, record_posture_hint=True)
+    t.connect()
+    readers[0].right_q = q_robot
+    a = t.get_action()
+    for i in range(4):
+        assert a[f"right_arm_{i}.null"] == pytest.approx(q_robot[i], abs=1e-9)
+
+
+def test_posture_hint_dropped_on_right_a(stubbed_pipeline, monkeypatch):
+    """Right A (re-reference + return motion) discards hints from the old frame."""
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    from lerobot_teleoperator_rby1.isaac_teleop.arm_retargeter import forward_points
+
+    q_a = np.array([0.3, -0.4, 0.2, -1.2])
+    S, E, W = forward_points(q_a, "right")
+    body = _body_with_arm("right", S, E, W)
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(W, squeeze=0.9), body=body))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", use_torso=False, use_left_arm=False, use_head=False,
+                    arm_posture_hint=True, posture_hint_smoothing=1.0, posture_hint_max_vel=1000.0)
+    t.connect()
+    readers[0].torso = np.eye(4)
+    a = t.get_action()
+    assert "right_arm_0.null" in a
+    clock[0] += 0.02
+    session.push(_frame(right=fakes.controller(W, squeeze=0.9, primary=True), body=body))
     a = t.get_action()
     assert "right_arm_0.null" not in a
 

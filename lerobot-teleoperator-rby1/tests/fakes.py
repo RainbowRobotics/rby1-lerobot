@@ -156,6 +156,8 @@ class FakeStateReader:
         self.right_ee = se3((0.4, -0.2, 0.9))
         self.left_ee = se3((0.4, 0.2, 0.9))
         self.head_q = np.array([0.0, 0.85])
+        self.right_q = np.zeros(7)
+        self.left_q = np.zeros(7)
 
     def connect(self):
         self.connected = True
@@ -163,7 +165,8 @@ class FakeStateReader:
     def read(self):
         self.reads += 1
         return FakeSnapshot(
-            self.torso.copy(), self.right_ee.copy(), self.left_ee.copy(), self.head_q.copy()
+            self.torso.copy(), self.right_ee.copy(), self.left_ee.copy(), self.head_q.copy(),
+            self.right_q.copy(), self.left_q.copy(),
         )
 
     def close(self):

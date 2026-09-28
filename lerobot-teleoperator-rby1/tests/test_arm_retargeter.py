@@ -114,3 +114,46 @@ def test_reach_and_shoulder_position():
     T = np.eye(4)
     T[:3, 3] = [0, 0, 1.0]
     np.testing.assert_allclose(robot_shoulder_position(T, "right"), [0, -0.22, 1.080073451539], atol=1e-6)
+
+
+def _dir_error_deg(q, side, u):
+    S, E, _ = forward_points(q, side)
+    uu = (E - S) / np.linalg.norm(E - S)
+    return math.degrees(math.acos(float(np.clip(uu @ (u / np.linalg.norm(u)), -1.0, 1.0))))
+
+
+@pytest.mark.parametrize("side", ["right", "left"])
+def test_elbow_inward_of_shoulder_uses_nearest_feasible_branch(side):
+    """A slightly adducted upper arm needs arm_1 past its limit: the solver must
+    clip on the near branch (small q0, q1 at the limit), never flip the arm over
+    the shoulder (q0 ~ 175 deg, q2 ~ 178 deg) as it did before."""
+    y = 1.0 if side == "right" else -1.0  # inward
+    lim = ARM_LIMITS[side]
+    for inward in (0.05, 0.1, 0.3):
+        u = np.array([0.2, y * inward, -1.0])
+        f = np.array([1.0, 0.0, 0.0])
+        for prev in (None, np.deg2rad([15, -10, -15, -115]) * np.array([1, -y, -y, 1])):
+            q = solve_shoulder_elbow(u, f, side, q_prev=prev)
+            assert abs(q[0]) < math.radians(30), (side, inward, np.rad2deg(q))
+            assert abs(q[2]) < math.radians(45), (side, inward, np.rad2deg(q))
+            assert q[1] == pytest.approx(lim[1][1] if side == "right" else lim[1][0], abs=1e-9)
+            assert _dir_error_deg(q, side, u) < math.degrees(math.asin(inward)) + 2.0
+
+
+def test_previous_solution_selects_near_branch_for_abducted_arm():
+    """Arm out to the side: both branches are feasible; the one nearest to the
+    seeded (measured) joints must win, not the first candidate."""
+    u = np.array([0.0, -1.0, -0.1])
+    f = np.array([1.0, -0.2, 0.0])
+    ready = np.deg2rad([15, -10, -15, -115])
+    q = solve_shoulder_elbow(u, f, "right", q_prev=ready)
+    assert abs(q[0]) < math.radians(40) and -math.radians(120) < q[1] < 0
+    assert _dir_error_deg(q, "right", u) < 1e-3
+
+
+def test_retargeter_seed_starts_at_measured_joints():
+    r = ArmPostureRetargeter("right", smoothing=1.0, max_vel=1.0, hold_s=1.0)
+    seed = np.array([0.26, -0.17, -0.26, -2.0, 0.0, 0.0, 0.0])
+    S, E, W = forward_points(np.array([0.3, -0.4, 0.2, -1.2]), "right")
+    h = r.update(S, E, W, np.eye(3), t=0.0, dt=0.02, seed=seed)
+    assert np.all(np.abs(h - seed[:4]) <= 0.02 + 1e-9)  # one velocity-limited step from the seed

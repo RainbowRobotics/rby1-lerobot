@@ -164,6 +164,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._abs_last_body_t: dict[str, float | None] = {"right": None, "left": None}
         self._posture: dict[str, ArmPostureRetargeter] = {}
         self._hints: dict[str, np.ndarray | None] = {"right": None, "left": None}
+        self._last_snapshot: RobotSnapshot | None = None
         self._needs_offset_latch = True
         self._last_tick_t: float | None = None
         # Neck mode: smoothed headset pose driving the torso.
@@ -415,6 +416,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
             mapper.reset_shoulder()
         for retargeter in self._posture.values():
             retargeter.reset()
+        # Hints derived from the old frame must not be emitted any more.
+        self._hints = {side: None for side in self._hints}
         self._needs_offset_latch = True
 
     def _wait_for_tracking(self) -> None:
@@ -481,6 +484,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         # One robot read per tick: engage edges latch from it and disengaged
         # components are re-synchronised to it when the robot moved on its own.
         snap = self._reader.read()
+        self._last_snapshot = snap
 
         def get_snap() -> RobotSnapshot:
             return snap
@@ -607,6 +611,11 @@ class Rby1XR(IsaacTeleopTeleoperator):
         for clutch in self._clutch.values():
             if clutch is not None:
                 clutch.disengage()
+        # The arms go back to the start pose: drop the teleop posture hints so
+        # the solver's nullspace target is not fighting the return motion.
+        for retargeter in self._posture.values():
+            retargeter.reset()
+        self._hints = {side: None for side in self._hints}
         cfg = self.config
         goal = self._start_snapshot
         self._return_motion = _ReturnMotion(
@@ -805,7 +814,12 @@ class Rby1XR(IsaacTeleopTeleoperator):
         """Retarget the arm posture only while that arm is engaged (squeeze held).
 
         A released arm must not move at all, so its nullspace hint is frozen
-        at the last value together with its EE target.
+        at the last value together with its EE target. The retargeter is seeded
+        with the robot's measured ``arm_0..arm_3`` so the first hint starts at
+        the actual posture (and on the solver branch nearest to it) and ramps
+        towards the operator's posture instead of jumping. Body-tracking
+        dropouts while engaged keep the last hint (no fall-back to the robot's
+        default nullspace pose mid-motion).
         """
         if not self._posture or self._stopped or self._returning:
             return
@@ -816,7 +830,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
             S, E, Wb = self._body_points(frame, side)
             ctrl = frame.right if side == "right" else frame.left
             W = ctrl.position if (self.config.hint_wrist_source == "controller" and ctrl is not None) else Wb
-            self._hints[side] = retargeter.update(S, E, W, snap.torso, t, dt)
+            seed = snap.right_q if side == "right" else snap.left_q
+            h = retargeter.update(S, E, W, snap.torso, t, dt, seed=seed)
+            if h is not None:
+                self._hints[side] = h
 
     def _torso_engage_allowed(self) -> bool:
         """Apply ``torso_engage``: both / any enabled arm clutched, or always."""
@@ -1024,9 +1041,16 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 action[f"{n}{POS_SUFFIX}"] = float(head_q[i]) if head_q is not None else 0.0
         if cfg.arm_posture_hint:
             for side, h in self._hints.items():
-                if h is None and cfg.record_posture_hint and side in self._posture:
-                    h = np.zeros(4)  # recorded features must always be present
-                if h is not None and side in self._posture:
+                if side not in self._posture:
+                    continue
+                if h is None and cfg.record_posture_hint:
+                    # Recorded features must always be present. A neutral value
+                    # is the arm's measured posture (the solver holds what it
+                    # has) — never zeros, which would drag the arm to q = 0.
+                    snap = self._last_snapshot
+                    if snap is not None:
+                        h = (snap.right_q if side == "right" else snap.left_q)[:4]
+                if h is not None:
                     for i in range(4):
                         action[f"{side}_arm_{i}{NULL_SUFFIX}"] = float(h[i])
         return action

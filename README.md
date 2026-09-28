@@ -264,7 +264,7 @@ The process prints the host IP addresses and waits for the headset:
 | Headset orientation | `head_0` (pan) / `head_1` (tilt) from the headset yaw / pitch in the operator frame (`head_mode=absolute`; Right A sets straight-ahead) |
 | Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, while **both** arms are clutched (`torso_engage=both_arms`, default; `any_arm` / `always` available) |
 | Headset pose (`wear_mode=neck`) | Torso pose (the robot head stays at the ready pose) |
-| Body tracking shoulder / elbow (`arm_posture_hint=true`) | The arm posture (shoulder + elbow angles) is retargeted to `arm_0..arm_3` and sent as a **nullspace hint** to the Cartesian solver: the elbow follows yours while the EE pose keeps priority. Not recorded unless `record_posture_hint` (both sides) |
+| Body tracking shoulder / elbow (`arm_posture_hint=true`) | The arm posture (shoulder + elbow angles) is retargeted to `arm_0..arm_3` and sent as a **nullspace hint** to the Cartesian solver: the elbow follows yours while the EE pose keeps priority. On squeeze the hint starts at the arm's measured joints and ramps (`posture_hint_max_vel`) towards your posture; it is frozen while released, kept through body-tracking dropouts and dropped on Right A. An elbow inward of the shoulder (beyond the robot's `arm_1` limit) is clipped to the nearest reachable posture. Not recorded unless `record_posture_hint` (both sides) |
 
 ## Record Data and upload to HF
 
@@ -351,7 +351,7 @@ lerobot-record \
 | `arm_length_source`, `human_arm_length_m` | `"body"`, `0.62` | `ee_absolute`: human reach from body tracking (`|S-E|+|E-W|`) or from the config |
 | `ee_orientation_latch_on_a`, `ee_orientation_offset_rpy_deg` | `True`, `[0,0,0]` | `ee_absolute`: controller → gripper orientation offset, latched on Right A (and on the first action) or fixed |
 | `arm_posture_hint`, `record_posture_hint` | `False`, `False` | IOBT shoulder / elbow → nullspace hint (`<side>_arm_<i>.null`, i = 0..3); record them (adds 8 action dims; set `--robot.record_posture_hint=true` too) |
-| `posture_hint_smoothing`, `posture_hint_max_vel`, `posture_hint_hold_s`, `hint_wrist_source` | `0.3`, `2.0`, `1.0`, `"controller"` | Hint filtering; wrist point from the controller (default) or the IOBT wrist |
+| `posture_hint_smoothing`, `posture_hint_max_vel`, `posture_hint_hold_s`, `hint_wrist_source` | `0.3`, `2.0`, `1.0`, `"controller"` | Hint filtering (EMA weight, rad/s ramp from the measured joints on squeeze, re-seed after this long without body tracking); wrist point from the controller (default) or the IOBT wrist |
 | `clutch_threshold` | `0.5` | Squeeze value above which an arm follows |
 | `latch_orientation` | `"measured"` | Home orientation on engage: measured EE pose (`"commanded"` = upstream SO-101 behaviour) |
 | `thumbstick_deadzone`, `base_max_linear`, `base_max_angular` | `0.15`, `0.3`, `0.6` | Thumbstick → base velocity mapping |
