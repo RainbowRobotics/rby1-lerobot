@@ -24,8 +24,8 @@ from tests import fakes
 R_HEAD_FWD = np.array([[0, 0, -1], [-1, 0, 0], [0, 1, 0]], float)
 
 
-def _head_quat(yaw_deg=0.0):
-    R = R_HEAD_FWD @ Rotation.from_euler("y", yaw_deg, degrees=True).as_matrix()
+def _head_quat(yaw_deg=0.0, pitch_deg=0.0):
+    R = R_HEAD_FWD @ Rotation.from_euler("y", yaw_deg, degrees=True).as_matrix() @ Rotation.from_euler("x", pitch_deg, degrees=True).as_matrix()
     return Rotation.from_matrix(R).as_quat()
 
 
@@ -331,7 +331,9 @@ def test_right_a_returns_to_start_pose(stubbed_pipeline, monkeypatch):
     clock[0] += 1.5
     a = t.get_action()
     assert a["right_ee.x"] == pytest.approx(x_start)
-    assert a["head_1.pos"] == pytest.approx(head_start) and a["head_0.pos"] == pytest.approx(0.0)
+    # The head origin was latched when A was pressed (headset at 0 deg ↦ start
+    # pose); the headset is still at 30 deg, so after arrival the head follows.
+    assert a["head_1.pos"] == pytest.approx(head_start) and a["head_0.pos"] == pytest.approx(math.radians(30))
     # After arrival a squeeze re-engages from the measured pose (no jump).
     readers[0].right_ee[0, 3] = x_start
     session.push(_frame(right=fakes.controller((0.9, 0, 0), squeeze=0.9)))
@@ -735,7 +737,8 @@ def test_head_absolute_mode_follows_headset_orientation(stubbed_pipeline):
     session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(0))))
     readers: list = []
     readers_head = np.array([0.3, 0.85])  # robot head starts somewhere else (ready pitch)
-    t = make_teleop(session, readers, torso_source="none", use_torso=False, head_pitch_offset_deg=10.0)
+    t = make_teleop(session, readers, torso_source="none", use_torso=False, head_pitch_offset_deg=10.0,
+                    head_latch_on_a=False)  # legacy: pure absolute mapping with the fixed offsets
     t.connect()
     readers[0].head_q = readers_head
     a = t.get_action()  # first frame: latch marks only; the held (measured) value is emitted
@@ -752,3 +755,57 @@ def test_head_absolute_mode_follows_headset_orientation(stubbed_pipeline):
     t.get_action()
     session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(-40))))
     assert abs(t.get_action()["head_0.pos"]) <= math.radians(40) + 1e-6
+
+
+def test_head_absolute_latches_look_direction_on_first_action_and_right_a(stubbed_pipeline, monkeypatch):
+    """Right A: the look direction of that moment ↦ the start-pose head joints (like the EE)."""
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    session = fakes.FakeSession()
+    # Not looking straight ahead at the first action: yaw 20 deg, pitch -15 deg (down).
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(20, -15))))
+    readers: list = []
+    head_start = np.array([0.1, 0.85])
+    t = make_teleop(session, readers, torso_source="none", use_torso=False, ready_return_duration_s=1.0,
+                    head_pitch_offset_deg=10.0)  # the fixed offsets are irrelevant once latched
+    t.connect()
+    readers[0].head_q = head_start
+    a = t.get_action()  # first action: latch (the operator frame is referenced from the gaze -> yaw 0)
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], head_start)
+    a = t.get_action()  # same view -> still the start joints, not sign*pitch + offset
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], head_start, atol=1e-6)
+    # Look 10 deg further up: pitch_sign=-1 -> head_1 decreases by 10 deg from the start value.
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(20, -5))))
+    a = t.get_action()
+    assert a["head_1.pos"] == pytest.approx(head_start[1] - math.radians(10), abs=1e-6)
+    assert a["head_0.pos"] == pytest.approx(head_start[0], abs=1e-6)
+    # Turn the head 30 deg left and pitch -25 deg, then press Right A there. The shoulder
+    # line (body) defines the operator frame: facing +X, so the gaze yaw does not cancel out.
+    body = _shoulders_body((0, -0.2), (0, 0.2))
+    session.push(_frame(right=fakes.controller(primary=True), head=fakes.head(quat=_head_quat(30, -25)), body=body))
+    t.get_action()
+    clock[0] += 1.5  # return finished
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(30, -25)), body=body))
+    a = t.get_action()
+    a = t.get_action()
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], head_start, atol=1e-6)
+    # From there, yaw +10 deg (left) -> head_0 = start + 10 deg (yaw_sign=+1).
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(40, -25)), body=body))
+    a = t.get_action()
+    assert a["head_0.pos"] == pytest.approx(head_start[0] + math.radians(10), abs=1e-6)
+
+
+def test_head_latch_waits_for_tracked_head(stubbed_pipeline):
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller()))  # no head yet
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", use_torso=False)
+    t.connect()
+    readers[0].head_q = np.array([0.2, 0.7])
+    a = t.get_action()
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], [0.2, 0.7])
+    assert t._head_latch_target is not None  # pending
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(35, 10))))
+    a = t.get_action()
+    assert t._head_latch_target is None
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], [0.2, 0.7], atol=1e-6)

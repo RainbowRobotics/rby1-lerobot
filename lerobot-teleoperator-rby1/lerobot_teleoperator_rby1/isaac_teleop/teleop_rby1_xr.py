@@ -166,6 +166,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._hints: dict[str, np.ndarray | None] = {"right": None, "left": None}
         self._last_snapshot: RobotSnapshot | None = None
         self._needs_offset_latch = True
+        # Head joints the current look direction must map onto (latched on the
+        # next tracked head frame; None = nothing pending).
+        self._head_latch_target: np.ndarray | None = None
         self._last_tick_t: float | None = None
         # Neck mode: smoothed headset pose driving the torso.
         self._neck_driver: np.ndarray | None = None
@@ -248,6 +251,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 layouts,
                 bus_frame_source,
                 lock_mode=cfg.viz_lock_mode,
+                follow_pitch=cfg.viz_follow_pitch,
                 openxr_composition=cfg.viz_openxr_composition,
                 viz_module=self._viz_module_override,
                 uploader=self._viz_uploader_override,
@@ -504,6 +508,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 logger.info("Right A — resuming.")
             self._stopped = False
             self._start_return_motion(snap)
+            if self.config.use_head and self.config.head_latch_on_a and self._start_snapshot is not None:
+                self._head_latch_target = self._start_snapshot.head_q.copy()
 
         now = time.monotonic()
         dt = 1.0 / 60.0 if self._last_tick_t is None else float(np.clip(now - self._last_tick_t, 1e-3, 0.1))
@@ -513,6 +519,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
             (events["right_a"] and self.config.ee_orientation_latch_on_a) or self._needs_offset_latch
         ):
             self._latch_orientation_offsets(frame, snap)
+        if self._head_latch_target is not None:
+            self._latch_head_offset(frame)
 
         self._advance_return_motion(frame, snap)
         if self.config.arm_mode == "ee_absolute":
@@ -590,6 +598,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 # re-latched on the next tracked head frame.
                 self._head = self._make_head_retargeter()
                 self._head.hold(snap.head_q)
+                if cfg.head_latch_on_a:
+                    # Current look direction ↦ the measured head joints.
+                    self._head_latch_target = snap.head_q.copy()
                 synced.append("head")
 
         if synced:
@@ -654,9 +665,14 @@ class Rby1XR(IsaacTeleopTeleoperator):
             motion.finished = True
             motion.t_done = time.monotonic()
             if motion.head is not None:
-                # Fresh head origin at the start pose: the current view becomes centre.
-                self._head = self._make_head_retargeter()
-                self._head.hold(np.asarray(motion.head[1]))
+                if self.config.head_latch_on_a:
+                    # Offsets were latched when A was pressed: keep them and
+                    # resume tracking from the start pose.
+                    self._head.hold(np.asarray(motion.head[1]))
+                else:
+                    # Fresh head origin at the start pose: the current view becomes centre.
+                    self._head = self._make_head_retargeter()
+                    self._head.hold(np.asarray(motion.head[1]))
             logger.info("Start pose reached — squeeze to follow again.")
 
     def _make_head_retargeter(self) -> HeadRetargeter:
@@ -742,6 +758,26 @@ class Rby1XR(IsaacTeleopTeleoperator):
         if latched:
             self._needs_offset_latch = False
             logger.info("Absolute EE orientation offset latched for %s (controller ↦ start-pose EE).", latched)
+
+    def _latch_head_offset(self, frame: XRFrame) -> None:
+        """Headset look direction now ↦ ``_head_latch_target`` (start / measured head joints).
+
+        The head counterpart of :meth:`_latch_orientation_offsets`: after Right
+        A the view at the moment of the press is the robot head's straight
+        ahead, whatever the operator-frame yaw reference (shoulder line) is.
+        Waits for a tracked head frame; nothing happens in neck mode.
+        """
+        target = self._head_latch_target
+        if target is None:
+            return
+        if not self.config.use_head or self.config.wear_mode == "neck":
+            self._head_latch_target = None
+            return
+        if frame.head is None:
+            return  # retry on the next tracked head frame
+        self._head.latch_offset(frame.head.pose, target)
+        self._head_latch_target = None
+        logger.info("Head offset latched (headset look direction ↦ head joints %s).", np.round(target, 3).tolist())
 
     def _update_arm_absolute(self, side: str, frame: XRFrame, snap: RobotSnapshot, t: float, dt: float) -> None:
         clutch = self._clutch[side]

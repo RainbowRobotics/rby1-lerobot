@@ -108,6 +108,25 @@ class HeadRetargeter:
             self._target = self._q0.copy()
         self._latched = True
 
+    def latch_offset(self, R_head_robot: np.ndarray, head_q_target: np.ndarray) -> None:  # noqa: N803
+        """Make the current look direction map onto ``head_q_target``.
+
+        absolute: the yaw / pitch offsets are recomputed so that
+        ``sign * gain * angle_now + offset == target``; relative: the target
+        becomes the latch origin joints. The held target is set to the target
+        (the robot head is there or on its way there).
+        """
+        target = np.asarray(head_q_target, dtype=float).copy()
+        if self.absolute:
+            yaw, pitch = head_yaw_pitch(R_head_robot)
+            self.yaw_offset = float(target[0] - self.yaw_sign * yaw * self.yaw_gain)
+            self.pitch_offset = float(target[1] - self.pitch_sign * pitch * self.pitch_gain)
+            self._q0 = target.copy()
+            self._target = target.copy()
+            self._latched = True
+        else:
+            self.latch(R_head_robot, target)
+
     def update(self, R_head_robot: np.ndarray | None) -> np.ndarray | None:  # noqa: N803
         """Return the smoothed joint target; holds the previous one when no head pose."""
         if R_head_robot is None or not self._latched:

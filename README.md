@@ -217,8 +217,9 @@ python -c "from cuda.bindings import driver as d; print(d.cuInit(0), d.cuDriverG
 The teleoperator runs a small upload check when the Televiz session is created and stops
 with this hint if no backend works.
 
-Panels follow your head position and yaw (`viz_lock_mode=gimbal`; `head` = full head
-lock, `world` = fixed in the room). On **Jetson Orin** keep `viz_openxr_composition=false`
+Panels follow your head position, yaw and pitch — never roll — (`viz_lock_mode=gimbal`;
+`viz_follow_pitch=false` for yaw only, `head` = full head lock including roll, `world` =
+fixed in the room). On **Jetson Orin** keep `viz_openxr_composition=false`
 (default) and set the **Video Codec to H.264** in the CloudXR web client, otherwise the
 panels stay black. Run the preflight `--only V_viz --viz-seconds 15` first: three colour
 bars must be visible.
@@ -261,7 +262,7 @@ The process prints the host IP addresses and waits for the headset:
 | Right thumbstick / left thumbstick | Base linear velocity / yaw rate |
 | Right **B** | Stop: freeze every target, zero the base |
 | Right **A** | Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; re-reference the operator frame so the direction you are facing becomes robot +X; also resumes after a stop and re-centres the head origin. The base is not moved |
-| Headset orientation | `head_0` (pan) / `head_1` (tilt) from the headset yaw / pitch in the operator frame (`head_mode=absolute`; Right A sets straight-ahead) |
+| Headset orientation | `head_0` (pan) / `head_1` (tilt) from the headset yaw / pitch in the operator frame (`head_mode=absolute`). Like the EE offsets, the look direction at the moment of Right A (and of the first action) is latched onto the start-pose head joints (`head_latch_on_a`), so after a return the robot head is straight where you were looking |
 | Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, while **both** arms are clutched (`torso_engage=both_arms`, default; `any_arm` / `always` available) |
 | Headset pose (`wear_mode=neck`) | Torso pose (the robot head stays at the ready pose) |
 | Body tracking shoulder / elbow (`arm_posture_hint=true`) | The arm posture (shoulder + elbow angles) is retargeted to `arm_0..arm_3` and sent as a **nullspace hint** to the Cartesian solver: the elbow follows yours while the EE pose keeps priority. On squeeze the hint starts at the arm's measured joints and ramps (`posture_hint_max_vel`) towards your posture; it is frozen while released, kept through body-tracking dropouts and dropped on Right A. An elbow inward of the shoulder (beyond the robot's `arm_1` limit) is clipped to the nearest reachable posture. Not recorded unless `record_posture_hint` (both sides) |
@@ -344,7 +345,7 @@ lerobot-record \
 | `wear_mode` | `"head"` | `head` (worn) or `neck` (hanging from the neck: head joints held at the ready pose, headset pose → torso, headset-based operator frame / shoulder estimate) |
 | `neck_torso_smoothing`, `neck_shoulder_offset`, `shoulder_source` | `0.3`, `[-0.05,0.20,-0.15]`, `"auto"` | Neck mode: EMA on the headset pose driving the torso; shoulder position relative to the headset (left side, mirrored for right); absolute-EE shoulder from `body` / `headset` / `auto` |
 | `viz_enabled`, `viz_cameras`, `viz_offsets_x`, `viz_offset_y`, `viz_distance_m`, `viz_width_m` | `False`, `[front,left,right]`, `[0,-1.1,1.1]`, `0`, `1.5`, `1.0` | Televiz camera panels: robot camera names and their placement (m) |
-| `viz_lock_mode`, `viz_openxr_composition`, `viz_wait_headset_s` | `"gimbal"`, `False`, `-1` | Panel lock mode; runtime vs Televiz compositing (keep False on Jetson Orin); wait for the headset when creating the XR session |
+| `viz_lock_mode`, `viz_follow_pitch`, `viz_openxr_composition`, `viz_wait_headset_s` | `"gimbal"`, `True`, `False`, `-1` | Panel lock mode; gimbal also follows the head pitch (never roll); runtime vs Televiz compositing (keep False on Jetson Orin); wait for the headset when creating the XR session |
 | `arm_mode` | `"ee_clutch"` | `ee_clutch` (delta from the squeeze moment) or `ee_absolute` (hand relative to the IOBT shoulder, scaled onto the robot shoulder; squeeze = dead-man) |
 | `engage_ramp_s`, `ee_max_linear_vel`, `ee_max_angular_vel` | `2.0`, `1.0`, `3.0` | `ee_absolute`: ramp to the target on engage; rate limits (m/s, rad/s) |
 | `ee_position_scale`, `ee_reach_max_ratio` | `1.0`, `0.98` | `ee_absolute`: extra multiplier on the robot/human reach ratio; clamp of the hand-to-shoulder distance |
@@ -356,6 +357,7 @@ lerobot-record \
 | `latch_orientation` | `"measured"` | Home orientation on engage: measured EE pose (`"commanded"` = upstream SO-101 behaviour) |
 | `thumbstick_deadzone`, `base_max_linear`, `base_max_angular` | `0.15`, `0.3`, `0.6` | Thumbstick → base velocity mapping |
 | `head_mode`, `head_yaw_offset_deg`, `head_pitch_offset_deg` | `"absolute"`, `0`, `0` | `absolute`: head joints = headset yaw / pitch in the operator frame (straight ahead = offsets); `relative`: deltas from the pose latched at start / Right A |
+| `head_latch_on_a` | `True` | Right A / first action / re-sync: the look direction of that moment ↦ the start (or measured) head joints, like `ee_orientation_latch_on_a`; `False` = pure absolute mapping with the fixed offsets |
 | `head_yaw_sign`, `head_pitch_sign` | `1.0`, `-1.0` | Flip if the head moves the wrong way |
 | `head_yaw_limit_deg`, `head_pitch_min_deg`, `head_pitch_max_deg` | `80`, `-45`, `80` | Head joint clamps |
 | `head_smoothing` | `0.3` | EMA weight of the new head sample (1.0 = no filtering) |

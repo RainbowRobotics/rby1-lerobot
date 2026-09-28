@@ -115,3 +115,26 @@ def test_se3_to_ee_action_keys_and_rotvec():
     assert list(a) == ["right_ee.x", "right_ee.y", "right_ee.z", "right_ee.wx", "right_ee.wy", "right_ee.wz"]
     assert (a["right_ee.x"], a["right_ee.y"], a["right_ee.z"]) == (1.0, 2.0, 3.0)
     np.testing.assert_allclose([a["right_ee.wx"], a["right_ee.wy"], a["right_ee.wz"]], [0.1, 0.2, 0.3])
+
+
+def test_head_retargeter_latch_offset_absolute_and_relative():
+    from lerobot_teleoperator_rby1.isaac_teleop.retargeters import HeadRetargeter
+    from scipy.spatial.transform import Rotation
+
+    R_fwd = np.array([[0, 0, -1], [-1, 0, 0], [0, 1, 0]], float)  # headset -Z -> robot +X
+
+    def R(yaw_deg, pitch_deg):
+        return R_fwd @ Rotation.from_euler("y", yaw_deg, degrees=True).as_matrix() @ Rotation.from_euler("x", pitch_deg, degrees=True).as_matrix()
+
+    target = np.array([0.1, 0.8])
+    h = HeadRetargeter(absolute=True, smoothing=1.0, yaw_offset=0.5, pitch_offset=0.5)
+    h.latch_offset(R(30, -20), target)
+    np.testing.assert_allclose(h.update(R(30, -20)), target, atol=1e-9)
+    q = h.update(R(40, -20))  # +10 deg yaw -> head_0 + 10 deg
+    np.testing.assert_allclose(q, [target[0] + math.radians(10), target[1]], atol=1e-9)
+    q = h.update(R(40, -10))  # +10 deg pitch (up), pitch_sign -1 -> head_1 - 10 deg
+    np.testing.assert_allclose(q, [target[0] + math.radians(10), target[1] - math.radians(10)], atol=1e-9)
+    r = HeadRetargeter(absolute=False, smoothing=1.0)
+    r.latch_offset(R(30, -20), target)
+    np.testing.assert_allclose(r.update(R(30, -20)), target, atol=1e-9)
+    np.testing.assert_allclose(r.update(R(40, -20)), [target[0] + math.radians(10), target[1]], atol=1e-9)

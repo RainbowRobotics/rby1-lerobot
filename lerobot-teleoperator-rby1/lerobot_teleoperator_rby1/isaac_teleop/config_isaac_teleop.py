@@ -114,7 +114,8 @@ class Rby1XRConfig(IsaacTeleopConfig):
     viz_offset_y: float = 0.0
     viz_distance_m: float = 1.5
     viz_width_m: float = 1.0
-    viz_lock_mode: str = "gimbal"         # "gimbal" (position + yaw) | "head" | "world"
+    viz_lock_mode: str = "gimbal"         # "gimbal" (position + yaw [+ pitch]) | "head" | "world"
+    viz_follow_pitch: bool = True         # gimbal: panels also follow the head pitch (never roll)
     viz_openxr_composition: bool = False  # keep False on Jetson Orin (black quads otherwise)
     viz_wait_headset_s: int = -1          # VizSession.create waits for the headset (-1 = forever)
 
@@ -138,6 +139,11 @@ class Rby1XRConfig(IsaacTeleopConfig):
     ee_max_linear_vel: float = 1.0          # m/s rate limit of the absolute target
     ee_max_angular_vel: float = 3.0         # rad/s
     ee_orientation_latch_on_a: bool = True  # Right A: controller orientation ↦ measured EE
+    # Right A (and the first action / a re-sync): the headset look direction
+    # of that moment ↦ the start-pose head joints, exactly like the EE
+    # orientation offsets. False = pure absolute mapping with the fixed
+    # head_*_offset_deg (the head jumps to the gaze after Right A).
+    head_latch_on_a: bool = True
     ee_orientation_offset_rpy_deg: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     abs_hold_s: float = 1.0                 # keep following this long without body joints
     # Robot version selects the reach constants ("auto" = probe the robot).

@@ -188,11 +188,13 @@ def xr_panel_pose(
     head_orientation_wxyz: np.ndarray,
     layout: PanelLayout,
     lock_mode: str,
+    follow_pitch: bool = False,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
     """Panel pose (position, orientation wxyz) in OpenXR space (Y up, forward -Z).
 
-    ``gimbal``: follow the head position and yaw only (no pitch / roll).
-    ``head``: full head lock. (``world`` callers compute this once and keep it.)
+    ``gimbal``: follow the head position and yaw (plus pitch when
+    ``follow_pitch``; roll is never followed). ``head``: full head lock.
+    (``world`` callers compute this once and keep it.)
     """
     from scipy.spatial.transform import Rotation
 
@@ -204,6 +206,19 @@ def xr_panel_pose(
         pos = p + R @ local
         return tuple(pos.tolist()), (w, x, y, z)
     fwd = R @ np.array([0.0, 0.0, -1.0])
+    if lock_mode == "gimbal" and follow_pitch:
+        # Gaze direction including pitch; the basis is re-levelled so roll is
+        # dropped (right stays horizontal, up = right x forward).
+        up_world = np.array([0.0, 1.0, 0.0])
+        right = np.cross(fwd, up_world)
+        if np.linalg.norm(right) < 0.1:  # looking (almost) straight up / down
+            right = R @ np.array([1.0, 0.0, 0.0])
+            right[1] = 0.0
+        right = right / max(float(np.linalg.norm(right)), 1e-9)
+        up = np.cross(right, fwd)
+        pos = p + fwd * layout.distance + right * layout.offset_x + up * layout.offset_y
+        qx, qy, qz, qw = Rotation.from_matrix(np.column_stack([right, up, -fwd])).as_quat()
+        return tuple(pos.tolist()), (float(qw), float(qx), float(qy), float(qz))
     fwd[1] = 0.0
     n = float(np.linalg.norm(fwd))
     fwd = fwd / n if n > 1e-6 else np.array([0.0, 0.0, -1.0])
@@ -224,6 +239,7 @@ class CameraPanels:
         frame_source: FrameSource,
         *,
         lock_mode: str = "gimbal",
+        follow_pitch: bool = True,
         openxr_composition: bool = False,
         uploader: Uploader | None = None,
         viz_module: Any | None = None,
@@ -233,6 +249,7 @@ class CameraPanels:
         self.layouts = list(layouts)
         self._source = frame_source
         self.lock_mode = lock_mode
+        self.follow_pitch = follow_pitch
         self.openxr_composition = openxr_composition
         self._upload = uploader or rgb_to_rgba_cuda
         self._viz = viz_module
@@ -408,10 +425,10 @@ class CameraPanels:
                 continue
             if self.lock_mode == "world":
                 if layout.name not in self._world_pose:
-                    self._world_pose[layout.name] = xr_panel_pose(hp, hq, layout, "gimbal")
+                    self._world_pose[layout.name] = xr_panel_pose(hp, hq, layout, "gimbal", self.follow_pitch)
                 pos, q = self._world_pose[layout.name]
             else:
-                pos, q = xr_panel_pose(hp, hq, layout, self.lock_mode)
+                pos, q = xr_panel_pose(hp, hq, layout, self.lock_mode, self.follow_pitch)
             h, w = self._frame_hw(layout.name)
             layer.set_placement(tv.QuadLayerPlacement(tv.Pose3D(position=pos, orientation=q), size_meters=(layout.width, layout.width * h / w)))
 

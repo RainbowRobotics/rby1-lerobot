@@ -239,3 +239,26 @@ def test_driver_device_array_interface(monkeypatch):
     assert calls == [("alloc", 96), ("copy", 96)]
     vp._upload_cuda_driver(frame)  # buffer reused
     assert calls[-1] == ("copy", 96) and len([c for c in calls if c[0] == "alloc"]) == 1
+
+
+def test_xr_panel_pose_gimbal_follows_pitch_but_not_roll():
+    from scipy.spatial.transform import Rotation
+
+    lay = PanelLayout("front", offset_x=0.5, offset_y=0.1, distance=1.5)
+    head = np.array([0, 1.6, 0])
+    # Looking 30 deg down (OpenXR: -Z forward, rotate about +X by -30 deg).
+    x, y, z, w = Rotation.from_euler("x", -30, degrees=True).as_quat()
+    q_down = np.array([w, x, y, z])
+    pos, q = xr_panel_pose(head, q_down, lay, "gimbal", follow_pitch=True)
+    s, c = math.sin(math.radians(30)), math.cos(math.radians(30))
+    np.testing.assert_allclose(pos, [0.5, 1.6 - 1.5 * s + 0.1 * c, -1.5 * c - 0.1 * s], atol=1e-9)
+    np.testing.assert_allclose(q, q_down, atol=1e-9)
+    # Without pitch following the old yaw-only placement is kept.
+    pos0, q0 = xr_panel_pose(head, q_down, lay, "gimbal", follow_pitch=False)
+    np.testing.assert_allclose(pos0, [0.5, 1.7, -1.5], atol=1e-9)
+    np.testing.assert_allclose(q0, [1, 0, 0, 0], atol=1e-9)
+    # Add 60 deg of roll: same panel pose (roll is dropped).
+    x, y, z, w = (Rotation.from_euler("x", -30, degrees=True) * Rotation.from_euler("z", 60, degrees=True)).as_quat()
+    pos_r, q_r = xr_panel_pose(head, np.array([w, x, y, z]), lay, "gimbal", follow_pitch=True)
+    np.testing.assert_allclose(pos_r, pos, atol=1e-9)
+    np.testing.assert_allclose(q_r, q, atol=1e-9)
