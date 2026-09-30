@@ -185,11 +185,12 @@ lerobot-teleoperate \
   --teleop.robot_address=192.168.30.1:50051
 ```
 
-Absolute (non-clutch) arm mapping with the elbow following your own:
+The arms use the absolute mapping (hand relative to your body-tracked shoulder, scaled
+onto the robot shoulder) with the elbow following your own (`arm_posture_hint`, default
+on). To disable the elbow hint:
 
 ```bash
-lerobot-teleoperate ... --teleop.type=rby1_isaac \
-  --teleop.arm_mode=ee_absolute --teleop.arm_posture_hint=true
+lerobot-teleoperate ... --teleop.type=rby1_isaac --teleop.arm_posture_hint=false
 ```
 
 #### Camera panels in the headset (Televiz)
@@ -274,12 +275,12 @@ The process prints the host IP addresses and waits for the headset:
 
 | Input | Effect |
 |-------|--------|
-| Squeeze (grip) > `clutch_threshold` | `arm_mode=ee_clutch` (default): that arm follows the controller *delta* from the moment of the squeeze (clutch); release to hold. `arm_mode=ee_absolute`: dead-man switch — while held, the hand position **relative to your shoulder** (body tracking) is mapped onto the robot shoulder (scaled by the reach ratio) and the controller orientation (times the offset latched on Right A) becomes the gripper orientation; (re-)engaging ramps to the target over `engage_ramp_s` |
+| Squeeze (grip) > `clutch_threshold` | Dead-man switch — while held, the hand position **relative to your shoulder** (body tracking) is mapped onto the robot shoulder (scaled by the reach ratio) and the controller orientation (times the offset latched on Right A) becomes the gripper orientation; (re-)engaging ramps to the target over `engage_ramp_s` |
 | Trigger | Gripper (fully pressed = closed) |
 | Right thumbstick / left thumbstick | Base linear velocity / yaw rate |
 | Right **B** | Stop: freeze every target, zero the base |
 | Right **A** | Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; re-reference the operator frame so the direction you are facing becomes robot +X; also resumes after a stop and re-centres the head origin. The base is not moved |
-| Headset orientation | `head_0` (pan) / `head_1` (tilt) from the headset yaw / pitch in the operator frame (`head_mode=absolute`). The target is a look direction in the **robot base frame**: the joints are re-solved for the measured torso orientation every tick, so bending or turning the torso does not move the gaze (`head_gaze_frame`). Like the EE offsets, the look direction at the moment of Right A (and of the first action) is latched onto the start-pose head joints (`head_latch_on_a`), so after a return the robot head is straight where you were looking |
+| Headset orientation | `head_0` (pan) / `head_1` (tilt) from the headset yaw / pitch in the operator frame. The target is a look direction in the **robot base frame**: the joints are re-solved for the measured torso orientation every tick, so bending or turning the torso does not move the gaze (`head_gaze_frame`). Like the EE offsets, the look direction at the moment of Right A (and of the first action) is latched onto the start-pose head joints (`head_latch_on_a`), so after a return the robot head is straight where you were looking |
 | Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, while **both** arms are clutched (`torso_engage=both_arms`, default; `any_arm` / `always` available) |
 | Headset pose (`wear_mode=neck`) | Torso pose (the robot head stays at the ready pose) |
 | Body tracking shoulder / elbow (`arm_posture_hint=true`) | The arm posture (shoulder + elbow angles) is retargeted to `arm_0..arm_3` and sent as a **nullspace hint** to the Cartesian solver: the elbow follows yours while the EE pose keeps priority. On squeeze the hint starts at the arm's measured joints and ramps (`posture_hint_max_vel`) towards your posture; it is frozen while released, kept through body-tracking dropouts and dropped on Right A. An elbow inward of the shoulder (beyond the robot's `arm_1` limit) is clipped to the nearest reachable posture. Not recorded unless `record_posture_hint` (both sides) |
@@ -365,17 +366,15 @@ lerobot-record \
 | `viz_lock_mode`, `viz_follow_pitch`, `viz_openxr_composition`, `viz_wait_headset_s` | `"gimbal"`, `True`, `False`, `-1` | Panel lock mode; gimbal also follows the head pitch (never roll); runtime vs Televiz compositing (keep False on Jetson Orin); wait for the headset when creating the XR session |
 | `viz_grab_enabled`, `viz_grab_threshold`, `viz_grab_push_rate_mps`, `viz_face_head` | `True`, `0.7`, `0.5`, `True` | Grab bars above the panels (free hand + trigger drags, thumbstick pushes / pulls); trigger level that starts a grab (release < 0.3); panels turn to face the head |
 | `viz_frame_bridge`, `viz_layout_file`, `viz_layout_reset` | `"auto"`, `~/.cache/rby1_isaac/viz_layout.json`, `False` | Televiz ← tracking-space transform from simultaneous head poses (`identity` to skip); where moved panels are saved / restored (`""` = off); ignore the saved layout once |
-| `arm_mode` | `"ee_clutch"` | `ee_clutch` (delta from the squeeze moment) or `ee_absolute` (hand relative to the IOBT shoulder, scaled onto the robot shoulder; squeeze = dead-man) |
-| `engage_ramp_s`, `ee_max_linear_vel`, `ee_max_angular_vel` | `2.0`, `1.0`, `3.0` | `ee_absolute`: ramp to the target on engage; rate limits (m/s, rad/s) |
-| `ee_position_scale`, `ee_reach_max_ratio` | `1.0`, `0.98` | `ee_absolute`: extra multiplier on the robot/human reach ratio; clamp of the hand-to-shoulder distance |
-| `arm_length_source`, `human_arm_length_m` | `"body"`, `0.62` | `ee_absolute`: human reach from body tracking (`|S-E|+|E-W|`) or from the config |
-| `ee_orientation_latch_on_a`, `ee_orientation_offset_rpy_deg` | `True`, `[0,0,0]` | `ee_absolute`: controller → gripper orientation offset, latched on Right A (and on the first action) or fixed |
-| `arm_posture_hint`, `record_posture_hint` | `False`, `False` | IOBT shoulder / elbow → nullspace hint (`<side>_arm_<i>.null`, i = 0..3); record them (adds 8 action dims; set `--robot.record_posture_hint=true` too) |
+| `engage_ramp_s`, `ee_max_linear_vel`, `ee_max_angular_vel` | `2.0`, `1.0`, `3.0` | Ramp to the absolute target on engage; rate limits (m/s, rad/s) |
+| `ee_position_scale`, `ee_reach_max_ratio` | `1.0`, `0.98` | Extra multiplier on the robot/human reach ratio; clamp of the hand-to-shoulder distance |
+| `arm_length_source`, `human_arm_length_m` | `"body"`, `0.62` | Human reach from body tracking (`|S-E|+|E-W|`) or from the config |
+| `ee_orientation_latch_on_a`, `ee_orientation_offset_rpy_deg` | `True`, `[0,0,0]` | Controller → gripper orientation offset, latched on Right A (and on the first action) or fixed |
+| `arm_posture_hint`, `record_posture_hint` | `True`, `False` | IOBT shoulder / elbow → nullspace hint (`<side>_arm_<i>.null`, i = 0..3); record them (adds 8 action dims; set `--robot.record_posture_hint=true` too) |
 | `posture_hint_smoothing`, `posture_hint_max_vel`, `posture_hint_hold_s`, `hint_wrist_source` | `0.3`, `2.0`, `1.0`, `"controller"` | Hint filtering (EMA weight, rad/s ramp from the measured joints on squeeze, re-seed after this long without body tracking); wrist point from the controller (default) or the IOBT wrist |
 | `clutch_threshold` | `0.5` | Squeeze value above which an arm follows |
-| `latch_orientation` | `"measured"` | Home orientation on engage: measured EE pose (`"commanded"` = upstream SO-101 behaviour) |
 | `thumbstick_deadzone`, `base_max_linear`, `base_max_angular` | `0.15`, `0.3`, `0.6` | Thumbstick → base velocity mapping |
-| `head_mode`, `head_yaw_offset_deg`, `head_pitch_offset_deg` | `"absolute"`, `0`, `0` | `absolute`: head joints = headset yaw / pitch in the operator frame (straight ahead = offsets); `relative`: deltas from the pose latched at start / Right A |
+| `head_yaw_offset_deg`, `head_pitch_offset_deg` | `0`, `0` | Head joints = headset yaw / pitch in the operator frame + these offsets (only used without `head_latch_on_a`) |
 | `head_gaze_frame` | `"base"` | `base`: head joints compensate the measured torso orientation so the gaze stays put in the base frame while the torso moves (also for the held head in neck mode); `torso`: joints commanded directly |
 | `head_latch_on_a` | `True` | Right A / first action / re-sync: the look direction of that moment ↦ the start (or measured) head joints, like `ee_orientation_latch_on_a`; `False` = pure absolute mapping with the fixed offsets |
 | `head_yaw_sign`, `head_pitch_sign` | `1.0`, `-1.0` | Flip if the head moves the wrong way |
@@ -387,7 +386,7 @@ lerobot-record \
 | `ready_return_duration_s` | `4.0` | Duration of the Right-A return-to-start motion |
 | `resync_position_threshold_m`, `resync_rotation_threshold_deg` | `0.03`, `10` | Targets are re-seeded from the measured pose on the first action and whenever a component that is not clutched drifted past these (record reset, manual move) |
 | `status_log_period_s` | `5.0` | Log a one-line tracking / clutch status (controllers, head, body joints valid, why the torso holds); 0 = off |
-| `torso_max_rot_delta_deg`, `torso_max_z_delta_m`, `torso_use_xy` | `90`, `0.15`, `True` | Safety clamps on the torso delta since engage (rotation, height); `torso_use_xy` also passes the x/y translation of the chest through |
+| `torso_max_rot_delta_deg`, `torso_max_z_delta_m`, `torso_use_xy` | `70`, `0.15`, `True` | Safety clamps on the torso delta since engage (rotation, height); `torso_use_xy` also passes the x/y translation of the chest through |
 
 ### Observation / Action Keys
 

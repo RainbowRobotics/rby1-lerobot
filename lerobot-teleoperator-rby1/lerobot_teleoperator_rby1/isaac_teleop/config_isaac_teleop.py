@@ -27,15 +27,12 @@ DEFAULT_BASE_T_ANCHOR: list[list[float]] = [
 ]
 
 SESSION_START_CHOICES = ("connect", "first_action")
-LATCH_ORIENTATION_CHOICES = ("measured", "commanded")
 TORSO_SOURCE_CHOICES = ("body", "head", "none")
 TORSO_ENGAGE_CHOICES = ("both_arms", "any_arm", "always")
-ARM_MODE_CHOICES = ("ee_clutch", "ee_absolute")
 ARM_LENGTH_SOURCE_CHOICES = ("body", "config")
 HINT_WRIST_SOURCE_CHOICES = ("controller", "body")
 ROBOT_VERSION_CHOICES = ("auto", "1.2", "1.3")
 WEAR_MODE_CHOICES = ("head", "neck")
-HEAD_MODE_CHOICES = ("absolute", "relative")
 HEAD_GAZE_FRAME_CHOICES = ("base", "torso")
 SHOULDER_SOURCE_CHOICES = ("auto", "body", "headset")
 VIZ_LOCK_CHOICES = ("gimbal", "head", "world")
@@ -132,17 +129,13 @@ class Rby1XRConfig(IsaacTeleopConfig):
     viz_layout_file: str = "~/.cache/rby1_isaac/viz_layout.json"  # "" = do not persist moved panels
     viz_layout_reset: bool = False        # ignore the saved layout once (start from the config values)
 
-    # ── Arm mapping mode ──────────────────────────────────────────────
-    # "ee_clutch":   squeeze latches a clutch; the arm follows the controller
-    #                DELTA from that moment (re-anchorable, no calibration).
-    # "ee_absolute": the hand position RELATIVE TO THE OPERATOR'S SHOULDER
-    #                (IOBT body tracking) is scaled by the robot/human reach
-    #                ratio onto the robot shoulder; the orientation is the
-    #                controller orientation times an offset latched on Right A.
-    #                Squeeze is a dead-man switch (follow while held, hold
-    #                when released); (re-)engaging ramps to the absolute
-    #                target over `engage_ramp_s`. Needs body tracking.
-    arm_mode: str = "ee_clutch"
+    # ── Arm mapping (absolute) ────────────────────────────────────────
+    # The hand position RELATIVE TO THE OPERATOR'S SHOULDER (IOBT body
+    # tracking) is scaled by the robot/human reach ratio onto the robot
+    # shoulder; the orientation is the controller orientation times an offset
+    # latched on Right A. Squeeze is a dead-man switch (follow while held,
+    # hold when released); (re-)engaging ramps to the absolute target over
+    # `engage_ramp_s`. Needs body tracking.
     engage_ramp_s: float = 2.0
     ee_position_scale: float = 1.0          # extra multiplier on the reach ratio
     ee_reach_max_ratio: float = 0.98        # clamp |hand - shoulder| to this × robot reach
@@ -162,26 +155,21 @@ class Rby1XRConfig(IsaacTeleopConfig):
     # Robot version selects the reach constants ("auto" = probe the robot).
     robot_version: str = "auto"
 
-    # ── IOBT arm posture → nullspace hint (both arm modes) ────────────
+    # ── IOBT arm posture → nullspace hint ─────────────────────────────
     # Shoulder / elbow / hand positions are retargeted to arm_0..arm_3 and sent
     # as `<side>_arm_<i>.null` keys; the follower uses them as the Cartesian
     # solver's nullspace target (soft, EE has priority). Not recorded unless
     # record_posture_hint (then the dataset action gains 8 dims).
-    arm_posture_hint: bool = False
+    arm_posture_hint: bool = True
     record_posture_hint: bool = False
     posture_hint_smoothing: float = 0.3
     posture_hint_max_vel: float = 2.0       # rad/s per joint
     posture_hint_hold_s: float = 1.0
     hint_wrist_source: str = "controller"   # "controller" (grip position) | "body" (IOBT wrist)
 
-    # ── Clutch ────────────────────────────────────────────────────────
-    # Squeeze value above which an arm follows its controller (dead-man
-    # switch in ee_absolute mode).
+    # ── Dead-man switch / session ─────────────────────────────────────
+    # Squeeze value above which an arm follows its controller.
     clutch_threshold: float = 0.5
-    # "measured": on engage, latch both home position AND orientation from the
-    # measured EE pose (7-DOF arms track orientation, so no offset builds up).
-    # "commanded": upstream SO-101 behaviour (orientation from last command).
-    latch_orientation: str = "measured"
     # When to open the CloudXR/OpenXR session: at connect() (default) or lazily
     # on the first get_action(). "first_action" is a mitigation for Jetson Orin
     # hosts where creating Python threads after the CloudXR service starts can
@@ -197,12 +185,10 @@ class Rby1XRConfig(IsaacTeleopConfig):
     base_max_angular: float = 0.6  # rad/s at full deflection
 
     # ── Headset orientation -> head_0 (yaw) / head_1 (pitch) ─────────
-    # "absolute": joints follow the headset yaw / pitch measured in the
-    #             operator frame (Right A sets which direction is straight
-    #             ahead); looking straight ahead gives head_*_offset_deg.
-    # "relative": legacy — deltas from the pose latched at start / Right A,
-    #             added to the head joints measured then.
-    head_mode: str = "absolute"
+    # The gaze follows the headset yaw / pitch measured in the operator frame
+    # (Right A sets which direction is straight ahead and latches the look
+    # direction onto the start head joints; without the latch, looking
+    # straight ahead gives head_*_offset_deg).
     head_yaw_offset_deg: float = 0.0
     head_pitch_offset_deg: float = 0.0
     head_yaw_sign: float = 1.0      # +head_0 = look left; flip if reversed on HW
@@ -237,7 +223,7 @@ class Rby1XRConfig(IsaacTeleopConfig):
     torso_z_scale: float = 1.0
     torso_use_xy: bool = True
     # Safety clamps on the delta from the torso pose latched at engage.
-    torso_max_rot_delta_deg: float = 90.0
+    torso_max_rot_delta_deg: float = 70.0
     torso_max_z_delta_m: float = 0.15
 
     # ── Right A: return to the start pose ─────────────────────────────
@@ -268,11 +254,6 @@ class Rby1XRConfig(IsaacTeleopConfig):
             raise ValueError(
                 f"session_start must be one of {SESSION_START_CHOICES}, got {self.session_start!r}"
             )
-        if self.latch_orientation not in LATCH_ORIENTATION_CHOICES:
-            raise ValueError(
-                f"latch_orientation must be one of {LATCH_ORIENTATION_CHOICES}, "
-                f"got {self.latch_orientation!r}"
-            )
         if self.torso_source not in TORSO_SOURCE_CHOICES:
             raise ValueError(
                 f"torso_source must be one of {TORSO_SOURCE_CHOICES}, got {self.torso_source!r}"
@@ -283,12 +264,10 @@ class Rby1XRConfig(IsaacTeleopConfig):
             )
         for name, value, choices in (
             ("wear_mode", self.wear_mode, WEAR_MODE_CHOICES),
-            ("head_mode", self.head_mode, HEAD_MODE_CHOICES),
             ("head_gaze_frame", self.head_gaze_frame, HEAD_GAZE_FRAME_CHOICES),
             ("shoulder_source", self.shoulder_source, SHOULDER_SOURCE_CHOICES),
             ("viz_lock_mode", self.viz_lock_mode, VIZ_LOCK_CHOICES),
             ("viz_frame_bridge", self.viz_frame_bridge, VIZ_BRIDGE_CHOICES),
-            ("arm_mode", self.arm_mode, ARM_MODE_CHOICES),
             ("arm_length_source", self.arm_length_source, ARM_LENGTH_SOURCE_CHOICES),
             ("hint_wrist_source", self.hint_wrist_source, HINT_WRIST_SOURCE_CHOICES),
             ("robot_version", self.robot_version, ROBOT_VERSION_CHOICES),
@@ -321,4 +300,4 @@ class Rby1XRConfig(IsaacTeleopConfig):
     @property
     def needs_body(self) -> bool:
         """Whether the FullBodySource must be in the pipeline."""
-        return self.torso_source == "body" or self.arm_mode == "ee_absolute" or self.arm_posture_hint
+        return True  # the absolute arm mapping always needs the IOBT shoulder

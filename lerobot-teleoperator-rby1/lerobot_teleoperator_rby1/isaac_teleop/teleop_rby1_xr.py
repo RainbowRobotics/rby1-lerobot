@@ -3,7 +3,8 @@
 Control flow (one ``TeleopSession.step()`` per :meth:`get_action`)::
 
     controllers / head / body  ──►  XRFrame (robot base frame)
-        right / left controller  ──► Clutch ──► right_ee.* / left_ee.*
+        controller + IOBT shoulder ──► AbsoluteEeMapper ──► right_ee.* / left_ee.*
+        IOBT shoulder / elbow    ──► ArmPostureRetargeter ──► <side>_arm_<i>.null
         body chest (or head)     ──► Clutch + clamp ──► torso_ee.*
         headset look direction   ──► HeadRetargeter ──► head_0.pos / head_1.pos
         triggers                 ──► *_gripper_0.pos   (1.0 = open)
@@ -16,10 +17,9 @@ the paired ``lerobot_robot_rby1.Rby1`` follower (``action_mode="ee"``,
 
 Button mapping (Meta Quest naming)
 ----------------------------------
-    Squeeze (grip) > threshold   Arm follows its controller (clutch engaged; in
-                                 arm_mode="ee_absolute" a dead-man switch: the
-                                 hand position relative to the operator's IOBT
-                                 shoulder is mapped onto the robot shoulder)
+    Squeeze (grip) > threshold   Dead-man switch: while held the hand position
+                                 relative to the operator's IOBT shoulder is
+                                 mapped onto the robot shoulder; release = hold
     Trigger                      Gripper (1 = closed)
     Right thumbstick             Base linear velocity; left thumbstick: yaw
     Right B                      Stop: freeze every target, zero the base
@@ -336,19 +336,18 @@ class Rby1XR(IsaacTeleopTeleoperator):
         for side, enabled in (("right", cfg.use_right_arm), ("left", cfg.use_left_arm)):
             if not enabled:
                 continue
-            if cfg.arm_mode == "ee_absolute":
-                self._abs[side] = AbsoluteEeMapper(
-                    side,
-                    robot_reach=reach,
-                    human_reach=cfg.human_arm_length_m if cfg.arm_length_source == "config" else None,
-                    position_scale=cfg.ee_position_scale,
-                    reach_max_ratio=cfg.ee_reach_max_ratio,
-                    shoulder_smoothing=cfg.shoulder_smoothing,
-                    max_linear_vel=cfg.ee_max_linear_vel,
-                    max_angular_vel=cfg.ee_max_angular_vel,
-                    orientation_offset=offset,
-                    fallback_reach=cfg.human_arm_length_m,
-                )
+            self._abs[side] = AbsoluteEeMapper(
+                side,
+                robot_reach=reach,
+                human_reach=cfg.human_arm_length_m if cfg.arm_length_source == "config" else None,
+                position_scale=cfg.ee_position_scale,
+                reach_max_ratio=cfg.ee_reach_max_ratio,
+                shoulder_smoothing=cfg.shoulder_smoothing,
+                max_linear_vel=cfg.ee_max_linear_vel,
+                max_angular_vel=cfg.ee_max_angular_vel,
+                orientation_offset=offset,
+                fallback_reach=cfg.human_arm_length_m,
+            )
             if cfg.arm_posture_hint:
                 self._posture[side] = ArmPostureRetargeter(
                     side,
@@ -357,11 +356,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
                     max_vel=cfg.posture_hint_max_vel,
                     hold_s=cfg.posture_hint_hold_s,
                 )
-        if cfg.arm_mode == "ee_absolute" or cfg.arm_posture_hint:
-            logger.info(
-                "rby1_isaac: arm_mode=%s posture_hint=%s (robot version %s, reach %.3f m)",
-                cfg.arm_mode, cfg.arm_posture_hint, version, reach,
-            )
+        logger.info(
+            "rby1_isaac: absolute arm mapping, posture_hint=%s (robot version %s, reach %.3f m)",
+            cfg.arm_posture_hint, version, reach,
+        )
 
     def _build_pipeline(self) -> Any:
         pipeline, body_in_graph = build_pipeline(with_body=self.config.needs_body)
@@ -536,20 +534,14 @@ class Rby1XR(IsaacTeleopTeleoperator):
         dt = 1.0 / 60.0 if self._last_tick_t is None else float(np.clip(now - self._last_tick_t, 1e-3, 0.1))
         self._last_tick_t = now
 
-        if self.config.arm_mode == "ee_absolute" and (
-            (events["right_a"] and self.config.ee_orientation_latch_on_a) or self._needs_offset_latch
-        ):
+        if (events["right_a"] and self.config.ee_orientation_latch_on_a) or self._needs_offset_latch:
             self._latch_orientation_offsets(frame, snap)
         if self._head_latch_target is not None:
             self._latch_head_offset(frame)
 
         self._advance_return_motion(frame, snap)
-        if self.config.arm_mode == "ee_absolute":
-            self._update_arm_absolute("right", frame, snap, now, dt)
-            self._update_arm_absolute("left", frame, snap, now, dt)
-        else:
-            self._update_arm("right", frame.right, get_snap)
-            self._update_arm("left", frame.left, get_snap)
+        self._update_arm_absolute("right", frame, snap, now, dt)
+        self._update_arm_absolute("left", frame, snap, now, dt)
         self._update_posture_hints(frame, snap, now, dt)
         self._update_torso(frame, get_snap)
         self._update_head(frame, get_snap)
@@ -710,7 +702,6 @@ class Rby1XR(IsaacTeleopTeleoperator):
             pitch_min=math.radians(cfg.head_pitch_min_deg),
             pitch_max=math.radians(cfg.head_pitch_max_deg),
             smoothing=cfg.head_smoothing,
-            absolute=cfg.head_mode == "absolute",
             yaw_offset=math.radians(cfg.head_yaw_offset_deg),
             pitch_offset=math.radians(cfg.head_pitch_offset_deg),
             compensate_torso=cfg.head_gaze_frame == "base",
@@ -719,32 +710,6 @@ class Rby1XR(IsaacTeleopTeleoperator):
     @property
     def _returning(self) -> bool:
         return self._return_motion is not None and not self._return_motion.finished
-
-    def _update_arm(
-        self, side: str, ctrl: ControllerState | None, get_snap: Callable[[], RobotSnapshot]
-    ) -> None:
-        clutch = self._clutch[side]
-        if clutch is None:
-            return
-        if self._stopped or self._returning or ctrl is None:
-            clutch.disengage()
-            return
-        enabled = ctrl.squeeze > self.config.clutch_threshold
-        if enabled and not clutch.engaged:
-            snap = get_snap()
-            measured = snap.right_ee if side == "right" else snap.left_ee
-            clutch.engage(
-                ctrl.position,
-                ctrl.orientation,
-                measured,
-                latch_orientation=self.config.latch_orientation,
-            )
-            logger.debug("%s arm clutch engaged.", side)
-        elif enabled:
-            clutch.rebase(ctrl.position, ctrl.orientation)
-        elif clutch.engaged:
-            clutch.disengage()
-            logger.debug("%s arm clutch released — holding.", side)
 
     # ------------------------------------------------------------------
     # Absolute arm mode (dead-man) and IOBT posture hints
@@ -1085,9 +1050,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             c = self._clutch.get(side)
             if c is None:
                 return "n/a"
-            if self.config.arm_mode == "ee_absolute":
-                return self._abs_state[side].upper() if c.engaged else self._abs_state[side]
-            return "ENGAGED" if c.engaged else "hold"
+            return self._abs_state[side].upper() if c.engaged else self._abs_state[side]
 
         def hint(side: str) -> str:
             h = self._hints.get(side)

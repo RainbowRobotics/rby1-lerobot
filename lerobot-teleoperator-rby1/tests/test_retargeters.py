@@ -46,7 +46,7 @@ def test_wrap_pi():
 def test_head_retargeter_latch_update_and_limits():
     h = HeadRetargeter(yaw_sign=1.0, pitch_sign=-1.0, smoothing=1.0, yaw_limit=math.radians(40))
     assert h.update(_head_R()) is None  # not latched yet -> no target
-    h.latch(_head_R(yaw_deg=10), np.array([0.0, 0.85]))
+    h.latch_offset(_head_R(yaw_deg=10), np.array([0.0, 0.85]))  # looking 10 deg left = joints [0, 0.85]
     np.testing.assert_allclose(h.update(_head_R(yaw_deg=10)), [0.0, 0.85])
     q = h.update(_head_R(yaw_deg=40))  # +30 deg left of the latch
     assert q[0] == pytest.approx(math.radians(30))
@@ -117,7 +117,7 @@ def test_se3_to_ee_action_keys_and_rotvec():
     np.testing.assert_allclose([a["right_ee.wx"], a["right_ee.wy"], a["right_ee.wz"]], [0.1, 0.2, 0.3])
 
 
-def test_head_retargeter_latch_offset_absolute_and_relative():
+def test_head_retargeter_latch_offset():
     from lerobot_teleoperator_rby1.isaac_teleop.retargeters import HeadRetargeter
     from scipy.spatial.transform import Rotation
 
@@ -127,17 +127,13 @@ def test_head_retargeter_latch_offset_absolute_and_relative():
         return R_fwd @ Rotation.from_euler("y", yaw_deg, degrees=True).as_matrix() @ Rotation.from_euler("x", pitch_deg, degrees=True).as_matrix()
 
     target = np.array([0.1, 0.8])
-    h = HeadRetargeter(absolute=True, smoothing=1.0, yaw_offset=0.5, pitch_offset=0.5)
+    h = HeadRetargeter(smoothing=1.0, yaw_offset=0.5, pitch_offset=0.5)
     h.latch_offset(R(30, -20), target)
     np.testing.assert_allclose(h.update(R(30, -20)), target, atol=1e-9)
     q = h.update(R(40, -20))  # +10 deg yaw -> head_0 + 10 deg
     np.testing.assert_allclose(q, [target[0] + math.radians(10), target[1]], atol=1e-9)
     q = h.update(R(40, -10))  # +10 deg pitch (up), pitch_sign -1 -> head_1 - 10 deg
     np.testing.assert_allclose(q, [target[0] + math.radians(10), target[1] - math.radians(10)], atol=1e-9)
-    r = HeadRetargeter(absolute=False, smoothing=1.0)
-    r.latch_offset(R(30, -20), target)
-    np.testing.assert_allclose(r.update(R(30, -20)), target, atol=1e-9)
-    np.testing.assert_allclose(r.update(R(40, -20)), [target[0] + math.radians(10), target[1]], atol=1e-9)
 
 
 def test_head_gaze_joint_round_trip_and_sign():
@@ -158,7 +154,7 @@ def test_head_gaze_joint_round_trip_and_sign():
 def test_head_retargeter_compensates_torso_rotation():
     from lerobot_teleoperator_rby1.isaac_teleop.retargeters import head_joints_to_gaze
 
-    h = HeadRetargeter(absolute=True, smoothing=1.0, yaw_limit=math.radians(80))
+    h = HeadRetargeter(smoothing=1.0, yaw_limit=math.radians(80))
     R_up = np.eye(3)
     h.latch_offset(_head_R(), np.array([0.0, 0.85]), R_up)
     q_up = h.update(_head_R(), R_up)
@@ -177,7 +173,7 @@ def test_head_retargeter_compensates_torso_rotation():
     q = h.update(None, R_yaw)
     assert q[0] == pytest.approx(math.radians(-30))
     # Legacy behaviour: joints ride with the torso.
-    h2 = HeadRetargeter(absolute=True, smoothing=1.0, compensate_torso=False)
+    h2 = HeadRetargeter(smoothing=1.0, compensate_torso=False)
     h2.latch_offset(_head_R(), np.array([0.0, 0.85]), R_up)
     np.testing.assert_allclose(h2.update(_head_R(), R_yaw), [0.0, 0.85])
 
@@ -186,7 +182,7 @@ def test_head_hold_and_latch_offset_under_rotated_torso():
     # Joints measured under a yawed torso define a base gaze; back upright the
     # head must turn by the torso yaw to keep looking there.
     R_yaw = Rotation.from_euler("z", 30, degrees=True).as_matrix()
-    h = HeadRetargeter(absolute=True, smoothing=1.0)
+    h = HeadRetargeter(smoothing=1.0)
     h.hold(np.array([0.0, 0.5]), R_yaw)
     np.testing.assert_allclose(h.target_for(R_yaw), [0.0, 0.5], atol=1e-9)
     assert h.target_for(np.eye(3))[0] == pytest.approx(math.radians(30))

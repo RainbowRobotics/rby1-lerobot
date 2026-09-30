@@ -1,6 +1,6 @@
 """Controller pose → absolute RB-Y1 end-effector target, referenced to the shoulder.
 
-``arm_mode="ee_absolute"``: instead of a clutch (delta from the pose at
+Absolute arm mapping: instead of a clutch (delta from the pose at
 squeeze time), the hand position is taken **relative to the operator's
 shoulder** (IOBT) and scaled by the robot / human reach ratio onto the
 robot's shoulder. This keeps the commanded hand position and the IOBT-derived

@@ -80,10 +80,10 @@ class HeadRetargeter:
     means the robot's gaze does not move, whatever the torso does. With
     ``compensate_torso=False`` the joints are commanded directly (legacy).
 
-    On :meth:`latch` the current look direction becomes the origin and the
-    measured head joints become the offset, so the robot head does not move
-    at latch time. :meth:`update` then applies the signed, gained delta,
-    clips to the configured limits and low-pass filters the result.
+    gaze = sign * gain * (headset yaw / pitch in the operator frame) + offset;
+    :meth:`latch_offset` recomputes the offsets so that the current look
+    direction maps onto given head joints (Right A / first action). The
+    result is clipped to the configured limits and low-pass filtered.
     """
 
     def __init__(
@@ -97,17 +97,12 @@ class HeadRetargeter:
         pitch_min: float = math.radians(-45.0),
         pitch_max: float = math.radians(80.0),
         smoothing: float = 0.3,
-        absolute: bool = False,
         yaw_offset: float = 0.0,
         pitch_offset: float = 0.0,
         compensate_torso: bool = True,
     ) -> None:
-        # absolute: gaze = sign * gain * (headset yaw / pitch in the operator
-        # frame) + offset — no latch origin, looking straight ahead gives the
-        # offsets. relative (legacy): deltas from the pose at latch time added
-        # to the gaze of that moment. "gaze" is expressed as the head joints
-        # for an upright torso (so signs / offsets read like joint angles).
-        self.absolute = absolute
+        # "gaze" is expressed as the head joints for an upright torso (so
+        # signs / offsets read like joint angles).
         self.yaw_offset = yaw_offset
         self.pitch_offset = pitch_offset
         self.yaw_sign = yaw_sign
@@ -119,9 +114,6 @@ class HeadRetargeter:
         self.pitch_max = pitch_max
         self.smoothing = smoothing
         self.compensate_torso = compensate_torso
-        self._yaw0 = 0.0
-        self._pitch0 = 0.0
-        self._g0 = np.zeros(2)                  # relative mode: gaze at latch
         self._gaze: np.ndarray | None = None    # smoothed gaze (upright-torso joints)
         self._target: np.ndarray | None = None  # last emitted joints
         self._latched = False
@@ -174,12 +166,8 @@ class HeadRetargeter:
     def latch(
         self, R_head_robot: np.ndarray, head_q_measured: np.ndarray, R_torso: np.ndarray | None = None  # noqa: N803
     ) -> None:
-        g = self._gaze_from_joints(np.asarray(head_q_measured, dtype=float), R_torso)
+        """Start tracking; the measured joints are held until the first update."""
         if self._gaze is None:
-            self.hold(head_q_measured, R_torso)
-        if not self.absolute:
-            self._g0 = g
-            self._yaw0, self._pitch0 = head_yaw_pitch(R_head_robot)
             self.hold(head_q_measured, R_torso)
         self._latched = True
 
@@ -188,38 +176,29 @@ class HeadRetargeter:
     ) -> None:
         """Make the current look direction map onto the gaze of ``head_q_target`` (under ``R_torso``).
 
-        absolute: the yaw / pitch offsets are recomputed so that
-        ``sign * gain * angle_now + offset == gaze``; relative: that gaze
-        becomes the latch origin. The held gaze is set to it (the robot head
-        is there or on its way there).
+        The yaw / pitch offsets are recomputed so that
+        ``sign * gain * angle_now + offset == gaze``; the held gaze is set to
+        it (the robot head is there or on its way there).
         """
         target = np.asarray(head_q_target, dtype=float).copy()
-        if self.absolute:
-            g = self._gaze_from_joints(target, R_torso)
-            yaw, pitch = head_yaw_pitch(R_head_robot)
-            self.yaw_offset = float(g[0] - self.yaw_sign * yaw * self.yaw_gain)
-            self.pitch_offset = float(g[1] - self.pitch_sign * pitch * self.pitch_gain)
-            self.hold(target, R_torso)
-            self._latched = True
-        else:
-            self.latch(R_head_robot, target, R_torso)
+        g = self._gaze_from_joints(target, R_torso)
+        yaw, pitch = head_yaw_pitch(R_head_robot)
+        self.yaw_offset = float(g[0] - self.yaw_sign * yaw * self.yaw_gain)
+        self.pitch_offset = float(g[1] - self.pitch_sign * pitch * self.pitch_gain)
+        self.hold(target, R_torso)
+        self._latched = True
 
     def update(self, R_head_robot: np.ndarray | None, R_torso: np.ndarray | None = None) -> np.ndarray | None:  # noqa: N803
         """Return the joint target for ``R_torso``; the gaze holds when there is no head pose."""
         if R_head_robot is None or not self._latched:
             return self.target_for(R_torso)
         yaw, pitch = head_yaw_pitch(R_head_robot)
-        if self.absolute:
-            raw = np.array(
-                [
-                    self.yaw_sign * yaw * self.yaw_gain + self.yaw_offset,
-                    self.pitch_sign * pitch * self.pitch_gain + self.pitch_offset,
-                ]
-            )
-        else:
-            dyaw = wrap_pi(yaw - self._yaw0) * self.yaw_gain
-            dpitch = (pitch - self._pitch0) * self.pitch_gain
-            raw = np.array([self._g0[0] + self.yaw_sign * dyaw, self._g0[1] + self.pitch_sign * dpitch])
+        raw = np.array(
+            [
+                self.yaw_sign * yaw * self.yaw_gain + self.yaw_offset,
+                self.pitch_sign * pitch * self.pitch_gain + self.pitch_offset,
+            ]
+        )
         # Keep the gaze itself inside the joint range of an upright torso so
         # the smoothed state cannot wind up far beyond the limits.
         raw = np.array(
