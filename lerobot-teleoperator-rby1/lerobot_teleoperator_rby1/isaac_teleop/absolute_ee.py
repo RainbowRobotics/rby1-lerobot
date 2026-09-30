@@ -46,6 +46,7 @@ class AbsoluteEeMapper:
         self.max_linear_vel = max_linear_vel
         self.max_angular_vel = max_angular_vel
         self._R_offset = np.eye(3) if orientation_offset is None else np.asarray(orientation_offset, dtype=float)
+        self._p_offset_t = np.zeros(3)  # position offset, link_torso_5 frame
         self._shoulder: np.ndarray | None = None
         self._human_reach: float | None = None
         self._last_T: np.ndarray | None = None
@@ -72,6 +73,27 @@ class AbsoluteEeMapper:
     def latch_orientation_offset(self, R_ctrl: np.ndarray, R_ee_measured: np.ndarray) -> None:  # noqa: N803
         """Make the current controller orientation map onto the measured EE orientation."""
         self._R_offset = np.asarray(R_ctrl, dtype=float)[:3, :3].T @ np.asarray(R_ee_measured, dtype=float)[:3, :3]
+
+    @property
+    def position_offset(self) -> np.ndarray:
+        return self._p_offset_t.copy()
+
+    def latch_position_offset(self, ctrl_position: np.ndarray, T_torso: np.ndarray, p_ee_target: np.ndarray) -> bool:  # noqa: N803
+        """Make the current hand (relative to the shoulder) map onto ``p_ee_target``.
+
+        The offset is kept in the torso frame so it moves with the shoulder.
+        Returns False when the shoulder / reach are not known yet.
+        """
+        self._p_offset_t = np.zeros(3)
+        T = self.target(ctrl_position, np.array([0.0, 0.0, 0.0, 1.0]), T_torso)
+        if T is None:
+            return False
+        Rt = np.asarray(T_torso, dtype=float)[:3, :3]
+        self._p_offset_t = Rt.T @ (np.asarray(p_ee_target, dtype=float) - T[:3, 3])
+        return True
+
+    def reset_position_offset(self) -> None:
+        self._p_offset_t = np.zeros(3)
 
     def reset_shoulder(self) -> None:
         """Forget the smoothed shoulder (e.g. after the operator frame was re-referenced)."""
@@ -112,7 +134,7 @@ class AbsoluteEeMapper:
         n = float(np.linalg.norm(d_t))
         if n > max_len:
             d_t = d_t * (max_len / n)
-        p = robot_shoulder_position(T_torso, self.side) + Rt @ d_t
+        p = robot_shoulder_position(T_torso, self.side) + Rt @ (d_t + self._p_offset_t)
         R = Rotation.from_quat(np.asarray(ctrl_orientation_xyzw, dtype=float)).as_matrix() @ self._R_offset
         T = np.eye(4)
         T[:3, :3] = R

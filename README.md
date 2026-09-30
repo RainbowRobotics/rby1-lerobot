@@ -275,7 +275,7 @@ The process prints the host IP addresses and waits for the headset:
 
 | Input | Effect |
 |-------|--------|
-| Squeeze (grip) > `clutch_threshold` | Dead-man switch — while held, the hand position **relative to your shoulder** (body tracking) is mapped onto the robot shoulder (scaled by the reach ratio) and the controller orientation (times the offset latched on Right A) becomes the gripper orientation; (re-)engaging ramps to the target over `engage_ramp_s` |
+| Squeeze (grip) > `clutch_threshold` | Dead-man switch — while held, the hand position **relative to your shoulder** (body tracking) is mapped onto the robot shoulder (scaled by the reach ratio) and the controller orientation becomes the gripper orientation. The first squeeze after connect / Right A latches the position and orientation offsets so that the controller then ↦ the start-pose gripper (no motion on that squeeze); (re-)engaging ramps to the target over `engage_ramp_s` |
 | Trigger | Gripper (fully pressed = closed) |
 | Right thumbstick / left thumbstick | Base linear velocity / yaw rate |
 | Right **B** | Stop: freeze every target, zero the base |
@@ -369,7 +369,8 @@ lerobot-record \
 | `engage_ramp_s`, `ee_max_linear_vel`, `ee_max_angular_vel` | `2.0`, `1.0`, `3.0` | Ramp to the absolute target on engage; rate limits (m/s, rad/s) |
 | `ee_position_scale`, `ee_reach_max_ratio` | `1.0`, `0.98` | Extra multiplier on the robot/human reach ratio; clamp of the hand-to-shoulder distance |
 | `arm_length_source`, `human_arm_length_m` | `"body"`, `0.62` | Human reach from body tracking (`|S-E|+|E-W|`) or from the config |
-| `ee_orientation_latch_on_a`, `ee_orientation_offset_rpy_deg` | `True`, `[0,0,0]` | Controller → gripper orientation offset, latched on Right A (and on the first action) or fixed |
+| `ee_orientation_latch_on_a`, `ee_position_latch_on_a`, `ee_orientation_offset_rpy_deg` | `True`, `True`, `[0,0,0]` | Controller → gripper orientation / position offsets, latched at the **first squeeze** after connect and after Right A (the controller then ↦ the start-pose gripper, so squeezing without moving the hand does not move the arm; the posture used to press A is irrelevant); `[0,0,0]` fixed orientation offset when not latched |
+| `reference_source` | `"shoulders"` | Operator frame (+X) from the body-tracking shoulder line at the first action and on Right A alike (arms hold until both shoulders are valid; Right A without shoulders falls back to the gaze with a warning); `gaze` = headset look direction both times; `auto` = shoulder line when valid else gaze |
 | `arm_posture_hint`, `record_posture_hint` | `True`, `False` | IOBT shoulder / elbow → nullspace hint (`<side>_arm_<i>.null`, i = 0..3); record them (adds 8 action dims; set `--robot.record_posture_hint=true` too) |
 | `posture_hint_smoothing`, `posture_hint_max_vel`, `posture_hint_hold_s`, `hint_wrist_source` | `0.3`, `2.0`, `1.0`, `"controller"` | Hint filtering (EMA weight, rad/s ramp from the measured joints on squeeze, re-seed after this long without body tracking); wrist point from the controller (default) or the IOBT wrist |
 | `clutch_threshold` | `0.5` | Squeeze value above which an arm follows |

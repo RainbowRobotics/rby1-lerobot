@@ -153,6 +153,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._yaw_correction = 0.0
         self._needs_reference = True
         self._last_raw_frame: XRFrame | None = None
+        self._warned_waiting_shoulders = False
 
         self._torso_joint = int(BodyJointIndex[config.torso_body_joint])
         self._torso_required = [int(BodyJointIndex[n]) for n in config.body_required_joints]
@@ -166,7 +167,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._posture: dict[str, ArmPostureRetargeter] = {}
         self._hints: dict[str, np.ndarray | None] = {"right": None, "left": None}
         self._last_snapshot: RobotSnapshot | None = None
-        self._needs_offset_latch = True
+        # Per arm: latch the controller↦gripper offsets at the next engage.
+        self._needs_offset_latch: dict[str, bool] = {"right": True, "left": True}
         # Head joints the current look direction must map onto (latched on the
         # next tracked head frame; None = nothing pending).
         # (head joints, base->torso_5 pose those joints were measured / defined under)
@@ -385,7 +387,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._tracking = raw.any_controller
         return rotate_frame_about_z(raw, self._yaw_correction)
 
-    def _set_reference_from_head(self, raw: XRFrame) -> bool:
+    def _set_reference_from_head(self, raw: XRFrame, on_button: bool = False) -> bool:
         """Make the operator's current facing direction robot +X. Returns True if taken.
 
         The facing direction is taken from the body-tracking shoulder line
@@ -394,7 +396,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         """
         yaw: float | None = None
         source = ""
-        if raw.body is not None:
+        src = self.config.reference_source
+        if src != "gaze" and raw.body is not None:
             ls, rs = int(BodyJointIndex.LEFT_SHOULDER), int(BodyJointIndex.RIGHT_SHOULDER)
             if bool(raw.body.valid[ls]) and bool(raw.body.valid[rs]):
                 across = raw.body.positions[ls] - raw.body.positions[rs]  # right -> left
@@ -402,6 +405,14 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 if np.linalg.norm(fwd[:2]) > 1e-3:
                     yaw = math.atan2(fwd[1], fwd[0])
                     source = "shoulder line"
+        if yaw is None and src == "shoulders" and self.config.wear_mode != "neck":
+            if not on_button:
+                # First reference: wait for the shoulders (the arms hold meanwhile).
+                if not self._warned_waiting_shoulders:
+                    logger.info("Waiting for body tracking (both shoulders) to reference the operator frame …")
+                    self._warned_waiting_shoulders = True
+                return False
+            logger.warning("Right A without valid shoulders: operator frame referenced from the head gaze instead.")
         if yaw is None and self.config.wear_mode == "neck" and raw.head is not None:
             # Both controllers are needed: a single hand sits ~0.2 m off-centre
             # and would bias the facing direction by tens of degrees.
@@ -424,7 +435,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             source,
             math.degrees(yaw),
         )
-        if abs(_wrap_angle(self._yaw_correction - old)) > 1e-6 or self._needs_offset_latch:
+        if abs(_wrap_angle(self._yaw_correction - old)) > 1e-6 or on_button:
             self._on_reference_changed()
         return True
 
@@ -436,7 +447,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             retargeter.reset()
         # Hints derived from the old frame must not be emitted any more.
         self._hints = {side: None for side in self._hints}
-        self._needs_offset_latch = True
+        self._needs_offset_latch = {side: True for side in self._needs_offset_latch}
 
     def _wait_for_tracking(self) -> None:
         """Block until a controller is tracked (user-paced; Ctrl-C aborts)."""
@@ -496,7 +507,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
 
         # Operator frame: reference on the first tracked head frame and on Right A.
         if raw is not None and (events["right_a"] or self._needs_reference):
-            if self._set_reference_from_head(raw):
+            if self._set_reference_from_head(raw, on_button=bool(events["right_a"])):
                 frame = rotate_frame_about_z(raw, self._yaw_correction)
 
         # One robot read per tick: engage edges latch from it and disengaged
@@ -534,8 +545,6 @@ class Rby1XR(IsaacTeleopTeleoperator):
         dt = 1.0 / 60.0 if self._last_tick_t is None else float(np.clip(now - self._last_tick_t, 1e-3, 0.1))
         self._last_tick_t = now
 
-        if (events["right_a"] and self.config.ee_orientation_latch_on_a) or self._needs_offset_latch:
-            self._latch_orientation_offsets(frame, snap)
         if self._head_latch_target is not None:
             self._latch_head_offset(frame)
 
@@ -730,24 +739,33 @@ class Rby1XR(IsaacTeleopTeleoperator):
             out.append(body.positions[int(i)].copy() if bool(body.valid[int(i)]) else None)
         return out[0], out[1], out[2]
 
-    def _latch_orientation_offsets(self, frame: XRFrame, snap: RobotSnapshot) -> None:
-        """Controller orientation now ↦ the START pose gripper orientation.
+    def _latch_ee_offsets(self, side: str, ctrl: ControllerState, snap: RobotSnapshot) -> None:
+        """Controller now ↦ the START pose gripper (orientation and position offsets).
 
-        Right A returns the arms to the start pose, so the offset must map the
-        controller onto that pose (not onto wherever the arm happens to be
-        when A is pressed); on the first action the two coincide.
+        Called at the first engage after connect / Right A, so the offsets come
+        from the hand posture the operator actually works with, not from the
+        posture used to press the button. Right A returns the arms to the
+        start pose, so the controller is mapped onto that pose: squeezing
+        without moving the hand leaves the arm where it is.
         """
+        cfg = self.config
+        mapper = self._abs.get(side)
+        if mapper is None:
+            return
         ref = self._start_snapshot if self._start_snapshot is not None else snap
-        latched = []
-        for side, ctrl, target in (("right", frame.right, ref.right_ee), ("left", frame.left, ref.left_ee)):
-            mapper = self._abs.get(side)
-            if mapper is None or ctrl is None:
-                continue
+        target = ref.right_ee if side == "right" else ref.left_ee
+        what = []
+        if cfg.ee_orientation_latch_on_a:
             mapper.latch_orientation_offset(ctrl.pose[:3, :3], target[:3, :3])
-            latched.append(side)
-        if latched:
-            self._needs_offset_latch = False
-            logger.info("Absolute EE orientation offset latched for %s (controller ↦ start-pose EE).", latched)
+            what.append("orientation")
+        if cfg.ee_position_latch_on_a:
+            if mapper.latch_position_offset(ctrl.position, snap.torso, target[:3, 3]):
+                what.append("position")
+            else:
+                return  # shoulder not known yet: retry at the next engage
+        self._needs_offset_latch[side] = False
+        if what:
+            logger.info("%s arm: controller ↦ start-pose gripper %s offset latched at engage.", side, " + ".join(what))
 
     # ------------------------------------------------------------------
     # Camera-panel grab (Televiz)
@@ -838,12 +856,17 @@ class Rby1XR(IsaacTeleopTeleoperator):
         if self._stopped or self._returning or ctrl is None:
             release("hold")
             return
+        if self._needs_reference and cfg.reference_source == "shoulders":
+            release("hold (waiting for shoulders)")
+            return
         if ctrl.squeeze <= cfg.clutch_threshold:
             release("hold")
             return
         if not body_ok:
             release("hold (no body)")
             return
+        if not clutch.engaged and self._needs_offset_latch[side]:
+            self._latch_ee_offsets(side, ctrl, snap)
         target = mapper.target(ctrl.position, ctrl.orientation, snap.torso)
         if target is None:
             release("hold (no shoulder)")

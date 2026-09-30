@@ -56,3 +56,27 @@ def test_rate_limit_and_rpy():
     assert out[0, 3] == pytest.approx(0.1)
     assert Rotation.from_matrix(out[:3, :3]).magnitude() == pytest.approx(0.1)
     np.testing.assert_allclose(rpy_deg_to_matrix([0, 0, 90]), Rotation.from_euler("z", 90, degrees=True).as_matrix())
+
+
+def test_position_offset_latch_moves_with_torso():
+    from lerobot_teleoperator_rby1.isaac_teleop.absolute_ee import AbsoluteEeMapper
+    from scipy.spatial.transform import Rotation
+
+    m = AbsoluteEeMapper("right", robot_reach=0.6, human_reach=0.6, shoulder_smoothing=1.0)
+    m.observe_body(np.array([0, -0.3, 1.5]), np.array([0, -0.3, 1.2]), np.array([0, -0.3, 0.9]))
+    T_torso = np.eye(4)
+    T_torso[:3, 3] = [0, 0, 1.0]
+    hand = np.array([0.2, -0.3, 1.5])
+    ident = np.array([0.0, 0.0, 0.0, 1.0])
+    p_nominal = m.target(hand, ident, T_torso)[:3, 3]
+    target_p = np.array([0.5, -0.1, 0.8])
+    assert m.latch_position_offset(hand, T_torso, target_p)
+    np.testing.assert_allclose(m.target(hand, ident, T_torso)[:3, 3], target_p, atol=1e-12)
+    np.testing.assert_allclose(m.position_offset, target_p - p_nominal, atol=1e-12)
+    # The offset lives in the torso frame: a torso yaw rotates it along.
+    T2 = T_torso.copy()
+    T2[:3, :3] = Rotation.from_euler("z", 90, degrees=True).as_matrix()
+    p2 = m.target(hand, ident, T2)[:3, 3]
+    m.reset_position_offset()
+    p2_nominal = m.target(hand, ident, T2)[:3, 3]
+    np.testing.assert_allclose(p2 - p2_nominal, T2[:3, :3] @ (target_p - p_nominal), atol=1e-12)

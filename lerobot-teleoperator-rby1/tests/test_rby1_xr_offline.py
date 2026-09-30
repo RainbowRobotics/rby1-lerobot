@@ -46,6 +46,11 @@ def stubbed_pipeline(monkeypatch):
 
 
 def make_teleop(session, reader_holder, **cfg_overrides):
+    # Most scenarios pre-date the shoulder-line reference and the engage-time
+    # position offset; they opt back into the legacy behaviour (dedicated
+    # tests cover the defaults).
+    cfg_overrides.setdefault("reference_source", "auto")
+    cfg_overrides.setdefault("ee_position_latch_on_a", False)
     cfg = Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **cfg_overrides)
 
     def reader_factory(address, model):
@@ -981,3 +986,81 @@ def test_neck_mode_head_holds_gaze_against_torso(stubbed_pipeline):
     readers[0].torso = fakes.se3((0, 0, 1.0), Rotation.from_euler("z", -15, degrees=True).as_matrix())
     a = t.get_action()
     assert a["head_0.pos"] == pytest.approx(0.1 + math.radians(15), abs=1e-6)
+
+
+def test_reference_shoulders_waits_for_body_then_uses_shoulder_line(stubbed_pipeline, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    session = fakes.FakeSession()
+    # Head looks 60 deg left, no body yet: with reference_source="shoulders" the frame is not referenced.
+    session.push(_frame(right=fakes.controller(_abs_hand(), squeeze=0.9), head=fakes.head(quat=_head_quat(60))))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", use_torso=False, use_head=False, use_left_arm=False,
+                    reference_source="shoulders", **ABS_KW)
+    t.connect()
+    a = t.get_action()
+    assert t._needs_reference and t._yaw_correction == 0.0
+    assert a["right_ee.x"] == pytest.approx(readers[0].right_ee[0, 3])
+    assert t._abs_state["right"] == "hold (waiting for shoulders)"
+    # Shoulders appear (facing +X while the head still looks 60 deg left): shoulder line wins.
+    body = _shoulders_body((0, -0.2), (0, 0.2))
+    session.push(_frame(right=fakes.controller(_abs_hand(), squeeze=0.9), head=fakes.head(quat=_head_quat(60)), body=body))
+    t.get_action()
+    assert not t._needs_reference and t._yaw_correction == pytest.approx(0.0)
+    # Right A without shoulders falls back to the gaze (with a warning) instead of waiting.
+    session.push(_frame(right=fakes.controller(_abs_hand(), primary=True), head=fakes.head(quat=_head_quat(60))))
+    t.get_action()
+    assert t._yaw_correction == pytest.approx(-math.radians(60))
+
+
+def test_ee_offsets_latched_at_first_engage_not_at_button(stubbed_pipeline, monkeypatch):
+    """Squeezing without moving the hand leaves the arm at the start pose; the
+    hand posture used to press Right A does not enter the mapping."""
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    body = _abs_body()
+    q_tilt = Rotation.from_euler("x", 40, degrees=True).as_quat()
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(_abs_hand(0.2, 0.1, -0.1), quat=q_tilt), body=body))
+    readers: list = []
+    r_start = fakes.se3((0.4, -0.2, 0.9), Rotation.from_euler("z", 30, degrees=True).as_matrix())
+    t = make_teleop(session, readers, torso_source="none", use_torso=False, use_head=False, use_left_arm=False,
+                    ready_return_duration_s=0.5, ee_position_latch_on_a=True, **ABS_KW)
+    t.connect()
+    readers[0].right_ee = r_start.copy()
+    t.get_action()  # start pose recorded
+    # First squeeze with the hand somewhere and the controller tilted: offsets latch -> target == start pose.
+    session.push(_frame(right=fakes.controller(_abs_hand(0.2, 0.1, -0.1), quat=q_tilt, squeeze=0.9), body=body))
+    a = t.get_action()
+    clock[0] += 0.1
+    session.push(_frame(right=fakes.controller(_abs_hand(0.2, 0.1, -0.1), quat=q_tilt, squeeze=0.9), body=body))
+    a = t.get_action()
+    np.testing.assert_allclose([a["right_ee.x"], a["right_ee.y"], a["right_ee.z"]], r_start[:3, 3], atol=1e-9)
+    np.testing.assert_allclose([a["right_ee.wx"], a["right_ee.wy"], a["right_ee.wz"]],
+                               Rotation.from_matrix(r_start[:3, :3]).as_rotvec(), atol=1e-6)
+    # Move the hand 0.1 m forward and yaw the controller 20 deg: start + k*0.1, orientation + 20 deg.
+    k = mod.robot_reach("1.3") / 0.6
+    q2 = (Rotation.from_euler("z", 20, degrees=True) * Rotation.from_quat(q_tilt)).as_quat()
+    session.push(_frame(right=fakes.controller(_abs_hand(0.3, 0.1, -0.1), quat=q2, squeeze=0.9), body=body))
+    a = t.get_action()
+    assert a["right_ee.x"] == pytest.approx(r_start[0, 3] + 0.1 * k)
+    R_out = Rotation.from_rotvec([a["right_ee.wx"], a["right_ee.wy"], a["right_ee.wz"]]).as_matrix()
+    np.testing.assert_allclose(R_out, Rotation.from_euler("z", 50, degrees=True).as_matrix(), atol=1e-6)
+    # Right A pressed with a weird posture (hand far away, controller upside down) -> return.
+    q_weird = Rotation.from_euler("y", 170, degrees=True).as_quat()
+    session.push(_frame(right=fakes.controller(_abs_hand(0.5, -0.3, 0.3), quat=q_weird, squeeze=0.9, primary=True), body=body))
+    t.get_action()
+    clock[0] += 1.0
+    t.get_action()
+    assert t._needs_offset_latch["right"]
+    # Squeeze again from yet another posture: the arm stays at the start pose (offsets from THIS posture).
+    q3 = Rotation.from_euler("y", -30, degrees=True).as_quat()
+    session.push(_frame(right=fakes.controller(_abs_hand(-0.1, 0.2, 0.0), quat=q3, squeeze=0.9), body=body))
+    t.get_action()
+    clock[0] += 0.1
+    session.push(_frame(right=fakes.controller(_abs_hand(-0.1, 0.2, 0.0), quat=q3, squeeze=0.9), body=body))
+    a = t.get_action()
+    np.testing.assert_allclose([a["right_ee.x"], a["right_ee.y"], a["right_ee.z"]], r_start[:3, 3], atol=1e-9)
+    np.testing.assert_allclose([a["right_ee.wx"], a["right_ee.wy"], a["right_ee.wz"]],
+                               Rotation.from_matrix(r_start[:3, :3]).as_rotvec(), atol=1e-6)
+    assert not t._needs_offset_latch["right"]

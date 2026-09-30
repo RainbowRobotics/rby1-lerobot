@@ -34,6 +34,7 @@ HINT_WRIST_SOURCE_CHOICES = ("controller", "body")
 ROBOT_VERSION_CHOICES = ("auto", "1.2", "1.3")
 WEAR_MODE_CHOICES = ("head", "neck")
 HEAD_GAZE_FRAME_CHOICES = ("base", "torso")
+REFERENCE_SOURCE_CHOICES = ("shoulders", "gaze", "auto")
 SHOULDER_SOURCE_CHOICES = ("auto", "body", "headset")
 VIZ_LOCK_CHOICES = ("gimbal", "head", "world")
 VIZ_BRIDGE_CHOICES = ("auto", "identity")
@@ -144,7 +145,15 @@ class Rby1XRConfig(IsaacTeleopConfig):
     shoulder_smoothing: float = 0.2         # EMA on the IOBT shoulder position
     ee_max_linear_vel: float = 1.0          # m/s rate limit of the absolute target
     ee_max_angular_vel: float = 3.0         # rad/s
-    ee_orientation_latch_on_a: bool = True  # Right A: controller orientation ↦ measured EE
+    # Offsets between the controller and the gripper, latched at the FIRST
+    # SQUEEZE after Right A (and after connect) — not at the button press, so
+    # the hand posture used to press A does not leak into the mapping:
+    #   orientation: controller orientation then ↦ start-pose gripper orientation
+    #   position:    hand-relative-to-shoulder then ↦ start-pose gripper position
+    # so the arm does not move when you squeeze without moving your hand. The
+    # mapping stays absolute (constant offsets) so the IOBT elbow hint agrees.
+    ee_orientation_latch_on_a: bool = True
+    ee_position_latch_on_a: bool = True
     # Right A (and the first action / a re-sync): the headset look direction
     # of that moment ↦ the start-pose head joints, exactly like the EE
     # orientation offsets. False = pure absolute mapping with the fixed
@@ -166,6 +175,17 @@ class Rby1XRConfig(IsaacTeleopConfig):
     posture_hint_max_vel: float = 2.0       # rad/s per joint
     posture_hint_hold_s: float = 1.0
     hint_wrist_source: str = "controller"   # "controller" (grip position) | "body" (IOBT wrist)
+
+    # ── Operator frame (which direction is robot +X) ──────────────────
+    # "shoulders": the body-tracking shoulder line, at the first action and on
+    #              Right A alike (the arms hold until both shoulders are valid;
+    #              on Right A without valid shoulders the gaze is used with a
+    #              warning). Consistent between the two reference events.
+    # "gaze":      the headset look direction, both times.
+    # "auto":      shoulder line when valid, otherwise gaze (legacy).
+    # Neck mode: after the shoulder line, the headset→controllers direction is
+    # tried before the gaze (the head is not looking along the body).
+    reference_source: str = "shoulders"
 
     # ── Dead-man switch / session ─────────────────────────────────────
     # Squeeze value above which an arm follows its controller.
@@ -265,6 +285,7 @@ class Rby1XRConfig(IsaacTeleopConfig):
         for name, value, choices in (
             ("wear_mode", self.wear_mode, WEAR_MODE_CHOICES),
             ("head_gaze_frame", self.head_gaze_frame, HEAD_GAZE_FRAME_CHOICES),
+            ("reference_source", self.reference_source, REFERENCE_SOURCE_CHOICES),
             ("shoulder_source", self.shoulder_source, SHOULDER_SOURCE_CHOICES),
             ("viz_lock_mode", self.viz_lock_mode, VIZ_LOCK_CHOICES),
             ("viz_frame_bridge", self.viz_frame_bridge, VIZ_BRIDGE_CHOICES),
