@@ -890,3 +890,53 @@ def test_camera_panel_grab_holds_gripper_and_blocks_clutch(stubbed_pipeline, mon
         assert abs(t2._viz.layout("front").offset_x - 0.3) < 0.03
     finally:
         t2.disconnect()
+
+
+def test_head_gaze_fixed_in_base_frame_when_torso_moves(stubbed_pipeline):
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(0))))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", use_torso=False)
+    t.connect()
+    readers[0].head_q = np.array([0.0, 0.85])
+    t.get_action()  # latch
+    a = t.get_action()
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], [0.0, 0.85], atol=1e-6)
+    # The torso turns 25 deg left (measured) while the headset stays still.
+    readers[0].torso = fakes.se3((0, 0, 1.0), Rotation.from_euler("z", 25, degrees=True).as_matrix())
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(0))))
+    a = t.get_action()
+    assert a["head_0.pos"] == pytest.approx(math.radians(-25), abs=1e-6)
+    assert a["head_1.pos"] == pytest.approx(0.85, abs=1e-6)
+    # Headset lost: the held gaze is still compensated for a further torso motion.
+    readers[0].torso = fakes.se3((0, 0, 1.0), Rotation.from_euler("z", 40, degrees=True).as_matrix())
+    session.push(_frame(right=fakes.controller()))
+    a = t.get_action()
+    assert a["head_0.pos"] == pytest.approx(math.radians(-40), abs=1e-6)
+    # Legacy frame: joints do not react to the torso.
+    session2 = fakes.FakeSession()
+    session2.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(0))))
+    readers2: list = []
+    t2 = make_teleop(session2, readers2, torso_source="none", use_torso=False, head_gaze_frame="torso")
+    t2.connect()
+    readers2[0].head_q = np.array([0.0, 0.85])
+    t2.get_action()
+    readers2[0].torso = fakes.se3((0, 0, 1.0), Rotation.from_euler("z", 25, degrees=True).as_matrix())
+    session2.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(0))))
+    a = t2.get_action()
+    assert a["head_0.pos"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_neck_mode_head_holds_gaze_against_torso(stubbed_pipeline):
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(0))))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", use_torso=False, wear_mode="neck")
+    t.connect()
+    readers[0].head_q = np.array([0.1, 0.85])
+    a = t.get_action()
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], [0.1, 0.85])
+    session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(40))))  # headset turns: ignored
+    readers[0].torso = fakes.se3((0, 0, 1.0), Rotation.from_euler("z", -15, degrees=True).as_matrix())
+    a = t.get_action()
+    assert a["head_0.pos"] == pytest.approx(0.1 + math.radians(15), abs=1e-6)

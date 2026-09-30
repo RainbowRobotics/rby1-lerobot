@@ -169,7 +169,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._needs_offset_latch = True
         # Head joints the current look direction must map onto (latched on the
         # next tracked head frame; None = nothing pending).
-        self._head_latch_target: np.ndarray | None = None
+        # (head joints, base->torso_5 pose those joints were measured / defined under)
+        self._head_latch_target: tuple[np.ndarray, np.ndarray] | None = None
         self._last_tick_t: float | None = None
         # Neck mode: smoothed headset pose driving the torso.
         self._neck_driver: np.ndarray | None = None
@@ -471,7 +472,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._clutch["left"] = Clutch(snap.left_ee) if cfg.use_left_arm else None
         self._clutch["torso"] = Clutch(snap.torso) if cfg.use_torso else None
         self._torso_target = snap.torso.copy()
-        self._head.hold(snap.head_q)
+        self._head.hold(snap.head_q, snap.torso)
         self._gripper = {"right": 1.0, "left": 1.0}
         self._base_vel = (0.0, 0.0, 0.0)
         self._stopped = False
@@ -528,7 +529,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
             self._stopped = False
             self._start_return_motion(snap)
             if self.config.use_head and self.config.head_latch_on_a and self._start_snapshot is not None:
-                self._head_latch_target = self._start_snapshot.head_q.copy()
+                start = self._start_snapshot
+                self._head_latch_target = (start.head_q.copy(), start.torso.copy())
 
         now = time.monotonic()
         dt = 1.0 / 60.0 if self._last_tick_t is None else float(np.clip(now - self._last_tick_t, 1e-3, 0.1))
@@ -616,10 +618,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 # Hold the measured head joints; the look-direction origin is
                 # re-latched on the next tracked head frame.
                 self._head = self._make_head_retargeter()
-                self._head.hold(snap.head_q)
+                self._head.hold(snap.head_q, snap.torso)
                 if cfg.head_latch_on_a:
                     # Current look direction ↦ the measured head joints.
-                    self._head_latch_target = snap.head_q.copy()
+                    self._head_latch_target = (snap.head_q.copy(), snap.torso.copy())
                 synced.append("head")
 
         if synced:
@@ -679,19 +681,22 @@ class Rby1XR(IsaacTeleopTeleoperator):
             self._clutch["torso"].hold_at(T)
         if motion.head is not None:
             q0, q1 = motion.head
-            self._head.hold((1.0 - a) * np.asarray(q0) + a * np.asarray(q1))
+            # Joint-space interpolation (the torso interpolates alongside); the
+            # gaze is expressed under the torso pose of this tick.
+            self._head.hold((1.0 - a) * np.asarray(q0) + a * np.asarray(q1), snap.torso)
         if a >= 1.0:
             motion.finished = True
             motion.t_done = time.monotonic()
             if motion.head is not None:
+                goal_torso = self._start_snapshot.torso if self._start_snapshot is not None else snap.torso
                 if self.config.head_latch_on_a:
                     # Offsets were latched when A was pressed: keep them and
-                    # resume tracking from the start pose.
-                    self._head.hold(np.asarray(motion.head[1]))
+                    # resume tracking from the start pose (its gaze, base frame).
+                    self._head.hold(np.asarray(motion.head[1]), goal_torso)
                 else:
                     # Fresh head origin at the start pose: the current view becomes centre.
                     self._head = self._make_head_retargeter()
-                    self._head.hold(np.asarray(motion.head[1]))
+                    self._head.hold(np.asarray(motion.head[1]), goal_torso)
             logger.info("Start pose reached — squeeze to follow again.")
 
     def _make_head_retargeter(self) -> HeadRetargeter:
@@ -708,6 +713,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             absolute=cfg.head_mode == "absolute",
             yaw_offset=math.radians(cfg.head_yaw_offset_deg),
             pitch_offset=math.radians(cfg.head_pitch_offset_deg),
+            compensate_torso=cfg.head_gaze_frame == "base",
         )
 
     @property
@@ -827,9 +833,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
             return
         if frame.head is None:
             return  # retry on the next tracked head frame
-        self._head.latch_offset(frame.head.pose, target)
+        head_q, torso = target
+        self._head.latch_offset(frame.head.pose, head_q, torso)
         self._head_latch_target = None
-        logger.info("Head offset latched (headset look direction ↦ head joints %s).", np.round(target, 3).tolist())
+        logger.info("Head offset latched (headset look direction ↦ head joints %s).", np.round(head_q, 3).tolist())
 
     def _update_arm_absolute(self, side: str, frame: XRFrame, snap: RobotSnapshot, t: float, dt: float) -> None:
         clutch = self._clutch[side]
@@ -1018,14 +1025,15 @@ class Rby1XR(IsaacTeleopTeleoperator):
         if not self.config.use_head or self._stopped or self._returning:
             return
         if self.config.wear_mode == "neck":
-            return  # head joints stay at the held (start / ready) pose
+            return  # the held (start / ready) gaze stays; torso compensation happens in _build_action
         if frame.head is None:
             return
+        snap = get_snap()
         if not self._head.latched:
-            self._head.latch(frame.head.pose, get_snap().head_q)
+            self._head.latch(frame.head.pose, snap.head_q, snap.torso)
             logger.info("Head origin latched.")
             return
-        self._head.update(frame.head.pose)
+        self._head.update(frame.head.pose, snap.torso)
 
     def _update_grippers(self, frame: XRFrame) -> None:
         # Trigger 1 (squeezed) -> closed. Dataset convention: 1.0 = open. A free
@@ -1131,7 +1139,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
             vx, vy, wz = self._base_vel
             action["x.vel"], action["y.vel"], action["theta.vel"] = vx, vy, wz
         if cfg.use_head:
-            head_q = self._head.target
+            # Re-solve the held / tracked gaze for the torso orientation of this tick.
+            snap = self._last_snapshot
+            head_q = self._head.target_for(None if snap is None else snap.torso)
             for i, n in enumerate(HEAD_NAMES):
                 action[f"{n}{POS_SUFFIX}"] = float(head_q[i]) if head_q is not None else 0.0
         if cfg.arm_posture_hint:

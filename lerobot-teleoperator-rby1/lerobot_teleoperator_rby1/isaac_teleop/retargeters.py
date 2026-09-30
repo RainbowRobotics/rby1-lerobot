@@ -42,8 +42,43 @@ def head_yaw_pitch(R_head_robot: np.ndarray) -> tuple[float, float]:  # noqa: N8
     return yaw, pitch
 
 
+def head_joints_to_gaze(head_q: np.ndarray, R_torso: np.ndarray | None = None) -> np.ndarray:  # noqa: N803
+    """Unit look direction in the robot base frame for ``[head_0, head_1]``.
+
+    URDF: ``link_torso_5 -> head_0 (pan, +z) -> head_1 (tilt, +y)``; the head
+    looks along +x of the last link, so ``d_t5 = R_z(q0) R_y(q1) x̂``.
+    ``R_torso`` is base->link_torso_5 (identity when omitted).
+    """
+    q0, q1 = float(head_q[0]), float(head_q[1])
+    d = np.array([math.cos(q1) * math.cos(q0), math.cos(q1) * math.sin(q0), -math.sin(q1)])
+    if R_torso is None:
+        return d
+    return np.asarray(R_torso, dtype=float)[:3, :3] @ d
+
+
+def gaze_to_head_joints(d_base: np.ndarray, R_torso: np.ndarray | None = None) -> np.ndarray:  # noqa: N803
+    """``[head_0, head_1]`` that point the head along ``d_base`` (base frame).
+
+    Inverse of :func:`head_joints_to_gaze`; the 2-DoF head cannot roll, so
+    only the direction is matched. Unclipped (callers apply the limits).
+    """
+    d = np.asarray(d_base, dtype=float)
+    if R_torso is not None:
+        d = np.asarray(R_torso, dtype=float)[:3, :3].T @ d
+    n = float(np.linalg.norm(d))
+    d = d / n if n > 1e-9 else np.array([1.0, 0.0, 0.0])
+    return np.array([math.atan2(d[1], d[0]), -math.asin(float(np.clip(d[2], -1.0, 1.0)))])
+
+
 class HeadRetargeter:
     """Headset orientation -> ``[head_0 (yaw), head_1 (pitch)]`` joint targets.
+
+    The target is a **look direction in the robot base frame**: the headset
+    yaw / pitch (operator frame) map onto "the joints the head would need with
+    an upright torso", and every emitted target is re-solved for the torso's
+    actual orientation (:meth:`target_for`). The headset not moving therefore
+    means the robot's gaze does not move, whatever the torso does. With
+    ``compensate_torso=False`` the joints are commanded directly (legacy).
 
     On :meth:`latch` the current look direction becomes the origin and the
     measured head joints become the offset, so the robot head does not move
@@ -65,11 +100,13 @@ class HeadRetargeter:
         absolute: bool = False,
         yaw_offset: float = 0.0,
         pitch_offset: float = 0.0,
+        compensate_torso: bool = True,
     ) -> None:
-        # absolute: joints = sign * gain * (headset yaw / pitch in the operator
+        # absolute: gaze = sign * gain * (headset yaw / pitch in the operator
         # frame) + offset — no latch origin, looking straight ahead gives the
         # offsets. relative (legacy): deltas from the pose at latch time added
-        # to the measured joints of that moment.
+        # to the gaze of that moment. "gaze" is expressed as the head joints
+        # for an upright torso (so signs / offsets read like joint angles).
         self.absolute = absolute
         self.yaw_offset = yaw_offset
         self.pitch_offset = pitch_offset
@@ -81,78 +118,118 @@ class HeadRetargeter:
         self.pitch_min = pitch_min
         self.pitch_max = pitch_max
         self.smoothing = smoothing
+        self.compensate_torso = compensate_torso
         self._yaw0 = 0.0
         self._pitch0 = 0.0
-        self._q0 = np.zeros(2)
-        self._target: np.ndarray | None = None
+        self._g0 = np.zeros(2)                  # relative mode: gaze at latch
+        self._gaze: np.ndarray | None = None    # smoothed gaze (upright-torso joints)
+        self._target: np.ndarray | None = None  # last emitted joints
         self._latched = False
 
+    # -- frame helpers -------------------------------------------------
+    def _R(self, R_torso: np.ndarray | None) -> np.ndarray | None:  # noqa: N802,N803
+        return R_torso if self.compensate_torso else None
+
+    def _gaze_from_joints(self, head_q: np.ndarray, R_torso: np.ndarray | None) -> np.ndarray:  # noqa: N803
+        """Measured joints under ``R_torso`` -> upright-torso joints (base gaze)."""
+        return gaze_to_head_joints(head_joints_to_gaze(head_q, self._R(R_torso)))
+
+    def _joints_from_gaze(self, gaze: np.ndarray, R_torso: np.ndarray | None) -> np.ndarray:  # noqa: N803
+        q = gaze_to_head_joints(head_joints_to_gaze(gaze), self._R(R_torso))
+        return np.array(
+            [
+                np.clip(q[0], -self.yaw_limit, self.yaw_limit),
+                np.clip(q[1], self.pitch_min, self.pitch_max),
+            ]
+        )
+
+    # -- state ---------------------------------------------------------
     @property
     def latched(self) -> bool:
         return self._latched
 
     @property
     def target(self) -> np.ndarray | None:
+        """Last emitted joint target (see :meth:`target_for` for the current torso)."""
         return None if self._target is None else self._target.copy()
 
-    def hold(self, head_q: np.ndarray) -> None:
-        """Set the held target (e.g. the measured head joints before any latch)."""
-        self._target = np.asarray(head_q, dtype=float).copy()
+    @property
+    def gaze(self) -> np.ndarray | None:
+        """Current base-frame gaze as upright-torso head joints."""
+        return None if self._gaze is None else self._gaze.copy()
 
-    def latch(self, R_head_robot: np.ndarray, head_q_measured: np.ndarray) -> None:  # noqa: N803
-        self._q0 = np.asarray(head_q_measured, dtype=float).copy()
-        if self._target is None:
-            self._target = self._q0.copy()
+    def target_for(self, R_torso: np.ndarray | None) -> np.ndarray | None:  # noqa: N803
+        """Joint target that keeps the current gaze for the given torso orientation."""
+        if self._gaze is None:
+            return self.target
+        self._target = self._joints_from_gaze(self._gaze, R_torso)
+        return self.target
+
+    def hold(self, head_q: np.ndarray, R_torso: np.ndarray | None = None) -> None:  # noqa: N803
+        """Hold the gaze given by ``head_q`` under ``R_torso`` (e.g. the measured joints)."""
+        q = np.asarray(head_q, dtype=float).copy()
+        self._gaze = self._gaze_from_joints(q, R_torso)
+        self._target = q
+
+    def latch(
+        self, R_head_robot: np.ndarray, head_q_measured: np.ndarray, R_torso: np.ndarray | None = None  # noqa: N803
+    ) -> None:
+        g = self._gaze_from_joints(np.asarray(head_q_measured, dtype=float), R_torso)
+        if self._gaze is None:
+            self.hold(head_q_measured, R_torso)
         if not self.absolute:
+            self._g0 = g
             self._yaw0, self._pitch0 = head_yaw_pitch(R_head_robot)
-            self._target = self._q0.copy()
+            self.hold(head_q_measured, R_torso)
         self._latched = True
 
-    def latch_offset(self, R_head_robot: np.ndarray, head_q_target: np.ndarray) -> None:  # noqa: N803
-        """Make the current look direction map onto ``head_q_target``.
+    def latch_offset(
+        self, R_head_robot: np.ndarray, head_q_target: np.ndarray, R_torso: np.ndarray | None = None  # noqa: N803
+    ) -> None:
+        """Make the current look direction map onto the gaze of ``head_q_target`` (under ``R_torso``).
 
         absolute: the yaw / pitch offsets are recomputed so that
-        ``sign * gain * angle_now + offset == target``; relative: the target
-        becomes the latch origin joints. The held target is set to the target
-        (the robot head is there or on its way there).
+        ``sign * gain * angle_now + offset == gaze``; relative: that gaze
+        becomes the latch origin. The held gaze is set to it (the robot head
+        is there or on its way there).
         """
         target = np.asarray(head_q_target, dtype=float).copy()
         if self.absolute:
+            g = self._gaze_from_joints(target, R_torso)
             yaw, pitch = head_yaw_pitch(R_head_robot)
-            self.yaw_offset = float(target[0] - self.yaw_sign * yaw * self.yaw_gain)
-            self.pitch_offset = float(target[1] - self.pitch_sign * pitch * self.pitch_gain)
-            self._q0 = target.copy()
-            self._target = target.copy()
+            self.yaw_offset = float(g[0] - self.yaw_sign * yaw * self.yaw_gain)
+            self.pitch_offset = float(g[1] - self.pitch_sign * pitch * self.pitch_gain)
+            self.hold(target, R_torso)
             self._latched = True
         else:
-            self.latch(R_head_robot, target)
+            self.latch(R_head_robot, target, R_torso)
 
-    def update(self, R_head_robot: np.ndarray | None) -> np.ndarray | None:  # noqa: N803
-        """Return the smoothed joint target; holds the previous one when no head pose."""
+    def update(self, R_head_robot: np.ndarray | None, R_torso: np.ndarray | None = None) -> np.ndarray | None:  # noqa: N803
+        """Return the joint target for ``R_torso``; the gaze holds when there is no head pose."""
         if R_head_robot is None or not self._latched:
-            return self.target
+            return self.target_for(R_torso)
         yaw, pitch = head_yaw_pitch(R_head_robot)
         if self.absolute:
             raw = np.array(
                 [
-                    np.clip(self.yaw_sign * yaw * self.yaw_gain + self.yaw_offset, -self.yaw_limit, self.yaw_limit),
-                    np.clip(self.pitch_sign * pitch * self.pitch_gain + self.pitch_offset, self.pitch_min, self.pitch_max),
+                    self.yaw_sign * yaw * self.yaw_gain + self.yaw_offset,
+                    self.pitch_sign * pitch * self.pitch_gain + self.pitch_offset,
                 ]
             )
         else:
             dyaw = wrap_pi(yaw - self._yaw0) * self.yaw_gain
             dpitch = (pitch - self._pitch0) * self.pitch_gain
-            raw = np.array(
-                [
-                    np.clip(self._q0[0] + self.yaw_sign * dyaw, -self.yaw_limit, self.yaw_limit),
-                    np.clip(self._q0[1] + self.pitch_sign * dpitch, self.pitch_min, self.pitch_max),
-                ]
-            )
-        if self._target is None:
-            self._target = raw
+            raw = np.array([self._g0[0] + self.yaw_sign * dyaw, self._g0[1] + self.pitch_sign * dpitch])
+        # Keep the gaze itself inside the joint range of an upright torso so
+        # the smoothed state cannot wind up far beyond the limits.
+        raw = np.array(
+            [np.clip(raw[0], -self.yaw_limit, self.yaw_limit), np.clip(raw[1], self.pitch_min, self.pitch_max)]
+        )
+        if self._gaze is None:
+            self._gaze = raw
         else:
-            self._target = self.smoothing * raw + (1.0 - self.smoothing) * self._target
-        return self.target
+            self._gaze = self.smoothing * raw + (1.0 - self.smoothing) * self._gaze
+        return self.target_for(R_torso)
 
 
 # ---------------------------------------------------------------------------

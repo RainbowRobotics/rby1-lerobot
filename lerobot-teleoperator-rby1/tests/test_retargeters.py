@@ -138,3 +138,58 @@ def test_head_retargeter_latch_offset_absolute_and_relative():
     r.latch_offset(R(30, -20), target)
     np.testing.assert_allclose(r.update(R(30, -20)), target, atol=1e-9)
     np.testing.assert_allclose(r.update(R(40, -20)), [target[0] + math.radians(10), target[1]], atol=1e-9)
+
+
+def test_head_gaze_joint_round_trip_and_sign():
+    from lerobot_teleoperator_rby1.isaac_teleop.retargeters import gaze_to_head_joints, head_joints_to_gaze
+
+    # Upright torso: head_1 > 0 looks down (READY_HEAD pitch +49 deg), head_0 > 0 looks left.
+    d = head_joints_to_gaze(np.array([0.0, math.radians(49)]))
+    assert d[2] < 0 and d[0] > 0
+    d = head_joints_to_gaze(np.array([math.radians(30), 0.0]))
+    assert d[1] > 0
+    rng = np.random.default_rng(3)
+    for _ in range(50):
+        q = np.array([rng.uniform(-1.4, 1.4), rng.uniform(-1.2, 1.2)])
+        R = Rotation.random(random_state=int(rng.integers(1 << 30))).as_matrix()
+        np.testing.assert_allclose(gaze_to_head_joints(head_joints_to_gaze(q, R), R), q, atol=1e-9)
+
+
+def test_head_retargeter_compensates_torso_rotation():
+    from lerobot_teleoperator_rby1.isaac_teleop.retargeters import head_joints_to_gaze
+
+    h = HeadRetargeter(absolute=True, smoothing=1.0, yaw_limit=math.radians(80))
+    R_up = np.eye(3)
+    h.latch_offset(_head_R(), np.array([0.0, 0.85]), R_up)
+    q_up = h.update(_head_R(), R_up)
+    np.testing.assert_allclose(q_up, [0.0, 0.85])
+    # Torso yawed 30 deg left: the headset did not move, so the base gaze must not.
+    R_yaw = Rotation.from_euler("z", 30, degrees=True).as_matrix()
+    q = h.update(_head_R(), R_yaw)
+    assert q[0] == pytest.approx(math.radians(-30))
+    assert q[1] == pytest.approx(0.85)
+    np.testing.assert_allclose(head_joints_to_gaze(q, R_yaw), head_joints_to_gaze(q_up, R_up), atol=1e-9)
+    # Torso pitched 20 deg forward (about +y): the head tilts back up by 20 deg.
+    R_pitch = Rotation.from_euler("y", 20, degrees=True).as_matrix()
+    q = h.update(_head_R(), R_pitch)
+    assert q[1] == pytest.approx(0.85 - math.radians(20))
+    # Held gaze (no headset) is compensated as well.
+    q = h.update(None, R_yaw)
+    assert q[0] == pytest.approx(math.radians(-30))
+    # Legacy behaviour: joints ride with the torso.
+    h2 = HeadRetargeter(absolute=True, smoothing=1.0, compensate_torso=False)
+    h2.latch_offset(_head_R(), np.array([0.0, 0.85]), R_up)
+    np.testing.assert_allclose(h2.update(_head_R(), R_yaw), [0.0, 0.85])
+
+
+def test_head_hold_and_latch_offset_under_rotated_torso():
+    # Joints measured under a yawed torso define a base gaze; back upright the
+    # head must turn by the torso yaw to keep looking there.
+    R_yaw = Rotation.from_euler("z", 30, degrees=True).as_matrix()
+    h = HeadRetargeter(absolute=True, smoothing=1.0)
+    h.hold(np.array([0.0, 0.5]), R_yaw)
+    np.testing.assert_allclose(h.target_for(R_yaw), [0.0, 0.5], atol=1e-9)
+    assert h.target_for(np.eye(3))[0] == pytest.approx(math.radians(30))
+    h.latch_offset(_head_R(), np.array([0.0, 0.5]), R_yaw)
+    np.testing.assert_allclose(h.update(_head_R(), R_yaw), [0.0, 0.5], atol=1e-9)
+    assert h.update(_head_R(), np.eye(3))[0] == pytest.approx(math.radians(30))

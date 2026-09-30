@@ -36,6 +36,7 @@ HINT_WRIST_SOURCE_CHOICES = ("controller", "body")
 ROBOT_VERSION_CHOICES = ("auto", "1.2", "1.3")
 WEAR_MODE_CHOICES = ("head", "neck")
 HEAD_MODE_CHOICES = ("absolute", "relative")
+HEAD_GAZE_FRAME_CHOICES = ("base", "torso")
 SHOULDER_SOURCE_CHOICES = ("auto", "body", "headset")
 VIZ_LOCK_CHOICES = ("gimbal", "head", "world")
 VIZ_BRIDGE_CHOICES = ("auto", "identity")
@@ -212,6 +213,11 @@ class Rby1XRConfig(IsaacTeleopConfig):
     head_pitch_min_deg: float = -45.0
     head_pitch_max_deg: float = 80.0
     head_smoothing: float = 0.3     # EMA weight of the new sample (1.0 = none)
+    # "base": the head target is a look direction in the robot base frame and
+    # the joints are re-solved for the measured torso orientation every tick —
+    # the torso bending / turning does not move the gaze (the headset did not
+    # move). "torso": joints commanded directly (gaze rides with the torso).
+    head_gaze_frame: str = "base"
 
     # ── Torso driver ──────────────────────────────────────────────────
     # "body": Isaac Teleop FullBodySource (Quest 3 IOBT / Pico trackers),
@@ -278,6 +284,7 @@ class Rby1XRConfig(IsaacTeleopConfig):
         for name, value, choices in (
             ("wear_mode", self.wear_mode, WEAR_MODE_CHOICES),
             ("head_mode", self.head_mode, HEAD_MODE_CHOICES),
+            ("head_gaze_frame", self.head_gaze_frame, HEAD_GAZE_FRAME_CHOICES),
             ("shoulder_source", self.shoulder_source, SHOULDER_SOURCE_CHOICES),
             ("viz_lock_mode", self.viz_lock_mode, VIZ_LOCK_CHOICES),
             ("viz_frame_bridge", self.viz_frame_bridge, VIZ_BRIDGE_CHOICES),
