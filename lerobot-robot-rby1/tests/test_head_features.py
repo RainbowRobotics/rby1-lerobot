@@ -100,3 +100,13 @@ def test_reset_cmd_triggers_joint_ready_motion_instead_of_ee_command():
     r._dispatch_action(None, {"reset.cmd": 0.0})
     assert calls == [3.0, "ee"]
     assert "reset.cmd" not in r.action_features
+
+
+def test_ee_impedance_defaults_symmetric_and_damped():
+    cfg = Rby1Config(action_mode="ee")
+    assert cfg.right_arm_stiffness == cfg.left_arm_stiffness == [80.0, 80.0, 80.0, 60.0, 60.0, 60.0, 60.0]
+    assert cfg.right_arm_torque_limit == cfg.left_arm_torque_limit
+    for name in ("impedance_damping_ratio", "torso_damping_ratio", "right_arm_damping_ratio",
+                 "left_arm_damping_ratio", "nullspace_damping_ratio"):
+        assert getattr(cfg, name) == 0.7, name
+    assert cfg.ee_hold_time == 1.0

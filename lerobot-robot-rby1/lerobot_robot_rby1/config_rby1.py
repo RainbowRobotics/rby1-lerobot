@@ -242,7 +242,7 @@ class Rby1Config(RobotConfig):
     min_time_factor_pc: float = 1.02
 
     # Cartesian commands keep holding for this long (s) if the stream stalls.
-    ee_hold_time: float = 30.0
+    ee_hold_time: float = 1.0
 
     # ── Reference reset (jump) detection ──────────────────────────────
     # When a new EE target jumps further than these thresholds from the
@@ -274,23 +274,23 @@ class Rby1Config(RobotConfig):
     )
 
     right_arm_stiffness: List[float] = field(
-        default_factory=lambda: [90.0, 90.0, 90.0, 70.0, 70.0, 70.0, 70.0]
+        default_factory=lambda: [80.0, 80.0, 80.0, 60.0, 60.0, 60.0, 60.0]
     )
     right_arm_torque_limit: List[float] = field(
         default_factory=lambda: [40.0, 40.0, 40.0, 30.0, 30.0, 30.0, 30.0]
     )
-    right_arm_damping_ratio: float = 0.6
+    right_arm_damping_ratio: float = 0.7
     right_arm_joint_limits: JointLimits = field(
         default_factory=lambda: dict(DEFAULT_RIGHT_ARM_JOINT_LIMITS)
     )
 
     left_arm_stiffness: List[float] = field(
-        default_factory=lambda: [60.0, 60.0, 60.0, 50.0, 50.0, 50.0, 50.0]
+        default_factory=lambda: [80.0, 80.0, 80.0, 60.0, 60.0, 60.0, 60.0]
     )
     left_arm_torque_limit: List[float] = field(
         default_factory=lambda: [40.0, 40.0, 40.0, 30.0, 30.0, 30.0, 30.0]
     )
-    left_arm_damping_ratio: float = 0.4
+    left_arm_damping_ratio: float = 0.7
     left_arm_joint_limits: JointLimits = field(
         default_factory=lambda: dict(DEFAULT_LEFT_ARM_JOINT_LIMITS)
     )
@@ -322,7 +322,7 @@ class Rby1Config(RobotConfig):
         default_factory=lambda: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]
     )
     nullspace_stiffness: float = 0.2
-    nullspace_damping_ratio: float = 0.3
+    nullspace_damping_ratio: float = 0.7
 
     # ------------------------------------------------------------------ #
 
