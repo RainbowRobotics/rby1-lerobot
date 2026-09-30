@@ -384,8 +384,7 @@ lerobot-record \
 | `torso_source` | `"body"` | `"body"` (Isaac Teleop body tracking), `"head"` or `"none"` |
 | `torso_engage` | `"both_arms"` | When the torso follows: `both_arms` (both grips squeezed), `any_arm`, or `always` |
 | `torso_body_joint` | `"SPINE3"` | Body joint driving the torso (XR_BD 24-joint names) |
-| `ready_return_duration_s` | `4.0` | Duration of the Right-A return-to-start motion |
-| `ready_return_mode` | `"joint"` | Right A return: `joint` = one `reset.cmd` action makes the follower run its joint-position ready-pose motion (same as at connect; `lerobot-record`/`teleoperate` block for the duration, base excluded); `ee` = the teleoperator interpolates the EE / head targets |
+| `ready_return_duration_s` | `4.0` | Minimum time of the Right-A return: one `reset.cmd` action makes the follower run its joint-position ready-pose motion (as at connect; the loop blocks for the duration, base excluded) |
 | `resync_position_threshold_m`, `resync_rotation_threshold_deg` | `0.03`, `10` | Targets are re-seeded from the measured pose on the first action and whenever a component that is not clutched drifted past these (record reset, manual move) |
 | `status_log_period_s` | `5.0` | Log a one-line tracking / clutch status (controllers, head, body joints valid, why the torso holds); 0 = off |
 | `torso_max_rot_delta_deg`, `torso_max_z_delta_m`, `torso_use_xy` | `70`, `0.15`, `True` | Safety clamps on the torso delta since engage (rotation, height); `torso_use_xy` also passes the x/y translation of the chest through |

@@ -51,7 +51,6 @@ def make_teleop(session, reader_holder, **cfg_overrides):
     # tests cover the defaults).
     cfg_overrides.setdefault("reference_source", "auto")
     cfg_overrides.setdefault("ee_position_latch_on_a", False)
-    cfg_overrides.setdefault("ready_return_mode", "ee")
     cfg = Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **cfg_overrides)
 
     def reader_factory(address, model):
@@ -360,23 +359,21 @@ def test_right_a_returns_to_start_pose(stubbed_pipeline, monkeypatch):
     x_fwd = _abs_goal(readers[0], 0.3)[0]
     assert a["right_ee.x"] == pytest.approx(x_fwd)
     assert a["head_0.pos"] == pytest.approx(math.radians(30))
-    # Right A: the dead-man is released and the targets interpolate back. (The
-    # operator faces forward again here so the yaw reference stays unchanged.)
+    # Right A: the dead-man is released, one reset.cmd goes to the follower and
+    # every target is already the start pose (the follower moves there itself).
     session.push(_frame(right=fakes.controller(_abs_hand(0.3), squeeze=0.9, primary=True), head=fakes.head(quat=_head_quat(0)), body=body))
     a = t.get_action()
-    assert a["right_ee.x"] == pytest.approx(x_fwd)  # alpha = 0
-    clock[0] += 1.0  # halfway (smoothstep(0.5) = 0.5)
-    session.push(_frame(right=fakes.controller(_abs_hand(0.9), squeeze=0.9), head=fakes.head(quat=_head_quat(30)), body=body))
+    assert a["reset.cmd"] == pytest.approx(2.0)
+    assert a["right_ee.x"] == pytest.approx(x_start) and a["head_1.pos"] == pytest.approx(head_start)
+    clock[0] += 2.0  # the follower blocked for its motion
+    session.push(_frame(right=fakes.controller(_abs_hand(0.9), squeeze=0.0), head=fakes.head(quat=_head_quat(30)), body=body))
     a = t.get_action()
-    assert a["right_ee.x"] == pytest.approx(x_start + 0.5 * (x_fwd - x_start))  # squeeze is ignored while returning
-    assert a["head_0.pos"] == pytest.approx(math.radians(15))
-    clock[0] += 1.5
-    a = t.get_action()
+    assert "reset.cmd" not in a and not t._returning
     assert a["right_ee.x"] == pytest.approx(x_start)
     # The head origin was latched when A was pressed (headset at 0 deg ↦ start
-    # pose); the headset is still at 30 deg, so after arrival the head follows.
+    # pose); the headset is now at 30 deg, so after arrival the head follows.
     assert a["head_1.pos"] == pytest.approx(head_start) and a["head_0.pos"] == pytest.approx(math.radians(30))
-    # After arrival a squeeze re-engages with a ramp from the start pose (no jump).
+    # A squeeze re-engages with a ramp from the start pose (no jump).
     readers[0].right_ee[0, 3] = x_start
     session.push(_frame(right=fakes.controller(_abs_hand(0.5), squeeze=0.9), body=body))
     assert t.get_action()["right_ee.x"] == pytest.approx(x_start)
@@ -1075,7 +1072,7 @@ def test_right_a_joint_return_emits_reset_cmd_and_holds_start_pose(stubbed_pipel
     session = fakes.FakeSession()
     session.push(_frame(right=fakes.controller(_abs_hand(), squeeze=0.9, thumb=(0, 1.0)), head=fakes.head(quat=_head_quat(0)), body=body))
     readers: list = []
-    t = make_teleop(session, readers, torso_source="none", ready_return_duration_s=3.0, ready_return_mode="joint", **ABS_KW)
+    t = make_teleop(session, readers, torso_source="none", ready_return_duration_s=3.0, **ABS_KW)
     t.connect()
     a0 = t.get_action()  # start pose recorded; dead-man engaged (ramp)
     assert "reset.cmd" not in a0 and "reset.cmd" not in t.action_features
