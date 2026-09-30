@@ -51,6 +51,7 @@ def make_teleop(session, reader_holder, **cfg_overrides):
     # tests cover the defaults).
     cfg_overrides.setdefault("reference_source", "auto")
     cfg_overrides.setdefault("ee_position_latch_on_a", False)
+    cfg_overrides.setdefault("ready_return_mode", "ee")
     cfg = Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **cfg_overrides)
 
     def reader_factory(address, model):
@@ -1065,3 +1066,33 @@ def test_ee_offsets_latched_at_first_engage_not_at_button(stubbed_pipeline, monk
     np.testing.assert_allclose([a["right_ee.wx"], a["right_ee.wy"], a["right_ee.wz"]],
                                Rotation.from_matrix(r_start[:3, :3]).as_rotvec(), atol=1e-6)
     assert not t._needs_offset_latch["right"]
+
+
+def test_right_a_joint_return_emits_reset_cmd_and_holds_start_pose(stubbed_pipeline, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    body = _abs_body()
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(_abs_hand(), squeeze=0.9, thumb=(0, 1.0)), head=fakes.head(quat=_head_quat(0)), body=body))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="none", ready_return_duration_s=3.0, ready_return_mode="joint", **ABS_KW)
+    t.connect()
+    a0 = t.get_action()  # start pose recorded; dead-man engaged (ramp)
+    assert "reset.cmd" not in a0 and "reset.cmd" not in t.action_features
+    x_start, head_start = a0["right_ee.x"], a0["head_1.pos"]
+    clock[0] += 0.1
+    session.push(_frame(right=fakes.controller(_abs_hand(0.3), squeeze=0.9, thumb=(0, 1.0)), head=fakes.head(quat=_head_quat(30)), body=body))
+    a = t.get_action()
+    assert a["right_ee.x"] != pytest.approx(x_start) and a["x.vel"] == pytest.approx(0.3)
+    # Right A: one reset.cmd tick, every target already at the start pose, base zeroed.
+    session.push(_frame(right=fakes.controller(_abs_hand(0.3), squeeze=0.9, thumb=(0, 1.0), primary=True), head=fakes.head(quat=_head_quat(0)), body=body))
+    a = t.get_action()
+    assert a["reset.cmd"] == pytest.approx(3.0)
+    assert a["right_ee.x"] == pytest.approx(x_start) and a["head_1.pos"] == pytest.approx(head_start)
+    assert a["x.vel"] == 0.0 and t._returning
+    # Next tick (the follower blocked for the motion): finished, no reset key, targets still at start.
+    clock[0] += 3.0
+    session.push(_frame(right=fakes.controller(_abs_hand(0.3), squeeze=0.0, thumb=(0, 1.0)), head=fakes.head(quat=_head_quat(0)), body=body))
+    a = t.get_action()
+    assert "reset.cmd" not in a and not t._returning
+    assert a["right_ee.x"] == pytest.approx(x_start) and a["x.vel"] == pytest.approx(0.3)

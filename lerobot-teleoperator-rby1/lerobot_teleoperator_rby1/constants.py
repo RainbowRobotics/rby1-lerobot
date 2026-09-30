@@ -34,6 +34,9 @@ POS_SUFFIX = ".pos"
 # Nullspace-hint keys emitted by the Isaac Teleop device (`<joint>.null`, rad);
 # consumed by the follower's Cartesian solver, recorded only on request.
 NULL_SUFFIX = ".null"
+# One-shot joint-space "return to the ready pose" request to the follower
+# (value = minimum motion time, s); matches lerobot_robot_rby1.constants.
+RESET_CMD_KEY = "reset.cmd"
 
 # Mobile-base velocity action keys (body frame), matching the follower robot
 # and the LeRobot LeKiwi convention: linear x / y (m/s) and yaw rate (rad/s).

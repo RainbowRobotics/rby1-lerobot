@@ -88,3 +88,15 @@ def test_record_posture_hint_adds_action_features():
     r = _robot(action_mode="ee", record_posture_hint=True, use_left_arm=False)
     assert "right_arm_3.null" in r.action_features and "left_arm_0.null" not in r.action_features
     assert "right_arm_0.null" not in _robot(action_mode="ee").action_features
+
+
+def test_reset_cmd_triggers_joint_ready_motion_instead_of_ee_command():
+    r = _robot(action_mode="ee")
+    calls = []
+    r.move_to_ready_pose = lambda minimum_time=5.0, **kw: calls.append(minimum_time)  # type: ignore[method-assign]
+    r._send_ee_action = lambda rby, action: calls.append("ee")  # type: ignore[method-assign]
+    r._dispatch_action(None, {"reset.cmd": 3.0})
+    assert calls == [3.0]
+    r._dispatch_action(None, {"reset.cmd": 0.0})
+    assert calls == [3.0, "ee"]
+    assert "reset.cmd" not in r.action_features

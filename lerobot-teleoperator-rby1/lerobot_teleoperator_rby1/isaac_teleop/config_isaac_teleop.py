@@ -35,6 +35,7 @@ ROBOT_VERSION_CHOICES = ("auto", "1.2", "1.3")
 WEAR_MODE_CHOICES = ("head", "neck")
 HEAD_GAZE_FRAME_CHOICES = ("base", "torso")
 REFERENCE_SOURCE_CHOICES = ("shoulders", "gaze", "auto")
+READY_RETURN_MODE_CHOICES = ("joint", "ee")
 SHOULDER_SOURCE_CHOICES = ("auto", "body", "headset")
 VIZ_LOCK_CHOICES = ("gimbal", "head", "world")
 VIZ_BRIDGE_CHOICES = ("auto", "identity")
@@ -251,6 +252,11 @@ class Rby1XRConfig(IsaacTeleopConfig):
     # its ready pose) is remembered; Right A releases every clutch and moves
     # arms, torso and head back to it over this many seconds (base excluded).
     ready_return_duration_s: float = 4.0
+    # "joint": one `reset.cmd` action asks the follower for a joint-position
+    #          motion to its ready pose (same as at connect; the follower
+    #          blocks for the duration, then re-references the EE solver).
+    # "ee":    the teleoperator interpolates the EE / head targets itself.
+    ready_return_mode: str = "joint"
 
     # ── Re-synchronisation with the robot ─────────────────────────────
     # The targets are re-seeded from the measured robot pose on the first
@@ -286,6 +292,7 @@ class Rby1XRConfig(IsaacTeleopConfig):
             ("wear_mode", self.wear_mode, WEAR_MODE_CHOICES),
             ("head_gaze_frame", self.head_gaze_frame, HEAD_GAZE_FRAME_CHOICES),
             ("reference_source", self.reference_source, REFERENCE_SOURCE_CHOICES),
+            ("ready_return_mode", self.ready_return_mode, READY_RETURN_MODE_CHOICES),
             ("shoulder_source", self.shoulder_source, SHOULDER_SOURCE_CHOICES),
             ("viz_lock_mode", self.viz_lock_mode, VIZ_LOCK_CHOICES),
             ("viz_frame_bridge", self.viz_frame_bridge, VIZ_BRIDGE_CHOICES),

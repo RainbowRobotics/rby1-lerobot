@@ -59,6 +59,7 @@ from .constants import (
     HEAD_NAMES,
     NULL_SUFFIX,
     POSTURE_HINT_JOINTS,
+    RESET_CMD_KEY,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
     POS_SUFFIX,
@@ -746,6 +747,15 @@ class Rby1(Robot):
         return action
 
     def _dispatch_action(self, rby: Any, action: dict[str, Any]) -> None:
+        reset_s = action.get(RESET_CMD_KEY)
+        if reset_s is not None and float(reset_s) > 0.0:
+            # Teleoperator asked for a joint-space return to the ready pose
+            # (e.g. Right A on the XR device): blocking joint-position motion
+            # of body + head, then a fresh command stream (the next EE command
+            # re-references the solver at the reached pose).
+            logger.info(f"Reset requested by the teleoperator: joint-space ready-pose motion ({float(reset_s):.1f}s).")
+            self.move_to_ready_pose(minimum_time=max(float(reset_s), 0.5))
+            return
         if self._config.action_mode == "ee":
             self._send_ee_action(rby, action)
         else:

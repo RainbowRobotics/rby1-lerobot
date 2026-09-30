@@ -49,6 +49,10 @@ POS_SUFFIX = ".pos"
 # Nullspace posture-hint keys (`<side>_arm_<i>.null`, rad, i < POSTURE_HINT_JOINTS)
 # sent by the rby1_isaac teleoperator; see Rby1Config.posture_hint_weight.
 NULL_SUFFIX = ".null"
+# One-shot "go to the ready pose with a joint-position command" request from
+# a teleoperator (value > 0 = minimum motion time in seconds). Not part of
+# action_features (never recorded); consumed by Rby1.send_action.
+RESET_CMD_KEY = "reset.cmd"
 POSTURE_HINT_JOINTS = 4  # arm_0..arm_3 (shoulder + elbow)
 
 # Mobile-base velocity action keys (body frame), following the LeRobot

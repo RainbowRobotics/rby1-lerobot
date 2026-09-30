@@ -60,6 +60,7 @@ from ..constants import (
     HEAD_NAMES,
     LEFT_EE_NAMES,
     NULL_SUFFIX,
+    RESET_CMD_KEY,
     POS_SUFFIX,
     RIGHT_EE_NAMES,
     TORSO_EE_NAMES,
@@ -654,6 +655,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._return_motion = _ReturnMotion(
             t0=time.monotonic(),
             duration=max(cfg.ready_return_duration_s, 0.1),
+            joint=cfg.ready_return_mode == "joint",
             right=(self._clutch["right"].last_commanded, goal.right_ee) if cfg.use_right_arm else None,
             left=(self._clutch["left"].last_commanded, goal.left_ee) if cfg.use_left_arm else None,
             torso=(self._torso_target, goal.torso) if cfg.use_torso else None,
@@ -662,14 +664,40 @@ class Rby1XR(IsaacTeleopTeleoperator):
             else None,
         )
         logger.info(
-            "Right A — returning arms / torso / head to the start pose over %.1fs "
-            "(clutches released; squeeze again afterwards to follow).",
+            "Right A — returning arms / torso / head to the start pose over %.1fs (%s; "
+            "clutches released; squeeze again afterwards to follow).",
             self._return_motion.duration,
+            "follower joint-position motion" if self._return_motion.joint else "EE interpolation",
         )
 
     def _advance_return_motion(self, frame: XRFrame, snap: RobotSnapshot) -> None:
         motion = self._return_motion
         if motion is None or motion.finished:
+            return
+        if motion.joint:
+            # The follower performs the motion itself (blocking inside its
+            # send_action for `duration`): emit `reset.cmd` once and hold every
+            # target at the start pose, so the first EE command afterwards is
+            # the pose the robot has just reached.
+            goal = self._start_snapshot if self._start_snapshot is not None else snap
+            for side in ("right", "left"):
+                clutch = self._clutch.get(side)
+                if clutch is not None:
+                    clutch.hold_at(goal.right_ee if side == "right" else goal.left_ee)
+            if self._clutch.get("torso") is not None:
+                self._torso_target = goal.torso.copy()
+                self._clutch["torso"].hold_at(goal.torso)
+            if motion.head is not None:
+                self._head.hold(np.asarray(motion.head[1]), goal.torso)
+            if not motion.reset_emitted:
+                motion.reset_emitted = True  # _build_action adds reset.cmd this tick
+                return
+            motion.finished = True
+            motion.t_done = time.monotonic()
+            if motion.head is not None and not self.config.head_latch_on_a:
+                self._head = self._make_head_retargeter()
+                self._head.hold(np.asarray(motion.head[1]), goal.torso)
+            logger.info("Start pose reached (joint-space) — squeeze to follow again.")
             return
         a = smoothstep((time.monotonic() - motion.t0) / motion.duration)
         if motion.right is not None:
@@ -1039,7 +1067,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
 
     def _update_base(self, frame: XRFrame) -> None:
         cfg = self.config
-        if not cfg.use_mobile_base or self._stopped:
+        if not cfg.use_mobile_base or self._stopped or self._returning:
             self._base_vel = (0.0, 0.0, 0.0)
             return
         self._base_vel = thumbsticks_to_base_vel(
@@ -1110,6 +1138,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
     def _build_action(self) -> dict[str, Any]:
         cfg = self.config
         action: dict[str, Any] = {}
+        motion = self._return_motion
+        if motion is not None and motion.joint and motion.reset_emitted and not motion.finished:
+            # One-shot request; not an action feature, so never recorded.
+            action[RESET_CMD_KEY] = float(motion.duration)
         if cfg.use_torso:
             action.update(se3_to_ee_action(self._torso_target, "torso_ee"))
         if cfg.use_right_arm:
@@ -1168,13 +1200,15 @@ class _ReturnMotion:
 
     SETTLE_S = 2.0  # drift re-sync stays suppressed this long after arrival
 
-    def __init__(self, *, t0: float, duration: float, right, left, torso, head) -> None:
+    def __init__(self, *, t0: float, duration: float, right, left, torso, head, joint: bool = False) -> None:
         self.t0 = t0
         self.duration = duration
         self.right = right
         self.left = left
         self.torso = torso
         self.head = head
+        self.joint = joint            # follower joint-space motion (reset.cmd) vs EE interpolation
+        self.reset_emitted = False
         self.finished = False
         self.t_done: float | None = None
 
