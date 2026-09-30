@@ -8,7 +8,6 @@ from lerobot_teleoperator_rby1.isaac_teleop.retargeters import (
     HeadRetargeter,
     chest_pose_from_body,
     head_yaw_pitch,
-    scale_clamp_delta,
     se3_to_ee_action,
     thumbsticks_to_base_vel,
     wrap_pi,
@@ -82,21 +81,6 @@ def test_chest_pose_requires_valid_joints():
     valid[BodyJointIndex.PELVIS] = False
     assert chest_pose_from_body(_body(valid), BodyJointIndex.SPINE3, req) is None
     assert chest_pose_from_body(None, BodyJointIndex.SPINE3, req) is None
-
-
-def test_scale_clamp_delta_rotation_and_z():
-    home = np.eye(4)
-    home[:3, 3] = [0, 0, 1.0]
-    target = np.eye(4)
-    target[:3, :3] = Rotation.from_euler("y", 60, degrees=True).as_matrix()
-    target[:3, 3] = [0.3, 0.2, 0.5]  # dx, dy ignored; dz = -0.5 clamped to -0.15
-    out = scale_clamp_delta(home, target, max_rot=math.radians(35), max_z=0.15)
-    ang = Rotation.from_matrix(out[:3, :3]).magnitude()
-    assert ang == pytest.approx(math.radians(35))
-    np.testing.assert_allclose(out[:3, 3], [0.0, 0.0, 0.85])
-    out_xy = scale_clamp_delta(home, target, use_xy=True, rot_scale=0.5, z_scale=0.2, max_z=1.0)
-    np.testing.assert_allclose(out_xy[:3, 3], [0.3, 0.2, 0.9])
-    assert Rotation.from_matrix(out_xy[:3, :3]).magnitude() == pytest.approx(math.radians(30))
 
 
 def test_thumbsticks_deadzone_and_signs():

@@ -2,7 +2,7 @@
 
 Everything here is free of ``isaacteleop`` and ``rby1_sdk`` so it can be unit
 tested offline: headset orientation -> head joints, body tracking -> torso
-delta clamping, thumbsticks -> base velocity, SE3 -> LeRobot EE action keys.
+workspace clamping, thumbsticks -> base velocity, SE3 -> LeRobot EE action keys.
 """
 
 from __future__ import annotations
@@ -259,7 +259,7 @@ def clamp_pose_box(
 
 
 # ---------------------------------------------------------------------------
-# Torso delta clamp
+# Torso driver from body tracking
 # ---------------------------------------------------------------------------
 
 
@@ -275,40 +275,6 @@ def chest_pose_from_body(
     if not all(bool(body.valid[i]) for i in needed):
         return None
     return body.joint_pose(joint_index)
-
-
-def scale_clamp_delta(
-    home_T: np.ndarray,  # noqa: N803
-    target_T: np.ndarray,  # noqa: N803
-    *,
-    rot_scale: float = 1.0,
-    z_scale: float = 1.0,
-    use_xy: bool = False,
-    max_rot: float = math.radians(35.0),
-    max_z: float = 0.15,
-) -> np.ndarray:
-    """Scale and clamp the delta ``home -> target`` and return the clamped target.
-
-    Rotation: the base-frame rotation vector of ``R_target R_home^T`` is scaled
-    by ``rot_scale`` and its norm clamped to ``max_rot``. Translation: only the
-    z component is kept (scaled by ``z_scale``, clamped to ``±max_z``) unless
-    ``use_xy`` also passes x/y through unclamped-scaled.
-    """
-    home = np.asarray(home_T, dtype=float)
-    target = np.asarray(target_T, dtype=float)
-    dR = Rotation.from_matrix(target[:3, :3]) * Rotation.from_matrix(home[:3, :3]).inv()
-    rotvec = dR.as_rotvec() * rot_scale
-    norm = float(np.linalg.norm(rotvec))
-    if norm > max_rot > 0.0:
-        rotvec = rotvec * (max_rot / norm)
-    dp = target[:3, 3] - home[:3, 3]
-    if not use_xy:
-        dp[:2] = 0.0
-    dp[2] = float(np.clip(dp[2] * z_scale, -abs(max_z), abs(max_z)))
-    out = np.eye(4)
-    out[:3, :3] = (Rotation.from_rotvec(rotvec) * Rotation.from_matrix(home[:3, :3])).as_matrix()
-    out[:3, 3] = home[:3, 3] + dp
-    return out
 
 
 def interpolate_pose(T0: np.ndarray, T1: np.ndarray, alpha: float) -> np.ndarray:  # noqa: N803

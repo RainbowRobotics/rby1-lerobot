@@ -202,42 +202,43 @@ def test_torso_follows_body_only_when_both_arms_clutched(stubbed_pipeline):
     session = fakes.FakeSession()
     session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.9), body=body0))
     readers: list = []
-    t = make_teleop(session, readers, torso_source="body", torso_max_z_delta_m=0.15, torso_max_rot_delta_deg=35.0, torso_use_xy=False)
+    t = make_teleop(session, readers, torso_source="body")
     t.connect()
     a = t.get_action()  # both arms engage; torso engages on the same tick
     z0 = readers[0].torso[2, 3]
     assert a["torso_ee.z"] == pytest.approx(z0)
 
     pos2 = pos.copy()
-    pos2[BodyJointIndex.SPINE3] = [0.3, 0.0, 0.9]  # squat 0.3 m (clamped to 0.15), xy ignored
+    pos2[BodyJointIndex.SPINE3] = [0.3, 0.0, 0.9]  # squat 0.3 m -> z 0.7, clipped to the box (z >= 0.8); x follows 1:1
     quat2 = np.tile(Rotation.from_euler("y", 10, degrees=True).as_quat().astype(np.float32), (24, 1))
     session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.9), body=fakes.body(positions=pos2, orientations=quat2)))
     a = t.get_action()
-    assert a["torso_ee.z"] == pytest.approx(z0 - 0.15)
-    assert a["torso_ee.x"] == pytest.approx(readers[0].torso[0, 3])
+    assert a["torso_ee.z"] == pytest.approx(0.8)
+    assert a["torso_ee.x"] == pytest.approx(readers[0].torso[0, 3] + 0.3)
     assert abs(a["torso_ee.wy"]) == pytest.approx(math.radians(10))
+    assert "clamped[z-]" in t._torso_hold_reason
 
     # Release one arm -> torso freezes even though the body keeps moving.
-    readers[0].torso[2, 3] = z0 - 0.15  # robot has reached the commanded height
+    readers[0].torso[:3, 3] = [0.3, 0.0, 0.8]  # robot has reached the commanded pose
     pos3 = pos2.copy()
     pos3[BodyJointIndex.SPINE3] = [0.0, 0.0, 1.2]
     session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.0), body=fakes.body(positions=pos3, orientations=quat2)))
     a = t.get_action()
-    assert a["torso_ee.z"] == pytest.approx(z0 - 0.15)
+    assert a["torso_ee.z"] == pytest.approx(0.8)
 
     # Invalid body -> torso holds; valid again -> re-latches without a jump.
     # (The fake robot does not move by itself; emulate it having reached the
     # commanded torso height, otherwise the drift re-sync would snap the held
     # target back to the measured pose.)
-    readers[0].torso[2, 3] = z0 - 0.15
+    readers[0].torso[:3, 3] = [0.3, 0.0, 0.8]
     valid = np.ones(24, np.uint8)
     valid[BodyJointIndex.PELVIS] = 0
     session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.9), body=fakes.body(positions=pos3, orientations=quat2, valid=valid)))
     a = t.get_action()
-    assert a["torso_ee.z"] == pytest.approx(z0 - 0.15)
+    assert a["torso_ee.z"] == pytest.approx(0.8)
     session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.9), body=fakes.body(positions=pos3, orientations=quat2)))
     a = t.get_action()
-    assert a["torso_ee.z"] == pytest.approx(z0 - 0.15)
+    assert a["torso_ee.z"] == pytest.approx(0.8)
 
 
 def test_first_action_session_start(stubbed_pipeline):
@@ -649,7 +650,7 @@ def test_neck_mode_head_fixed_and_torso_follows_headset(stubbed_pipeline):
     session.push(_frame(right=fakes.controller(squeeze=0.9), head=fakes.head((0.0, 0.0, 1.5), quat=_head_quat(0))))
     readers: list = []
     t = make_teleop(session, readers, wear_mode="neck", torso_source="body", torso_engage="any_arm",
-                    neck_torso_smoothing=1.0, use_left_arm=False, torso_use_xy=True, torso_max_rot_delta_deg=35.0)
+                    neck_torso_smoothing=1.0, use_left_arm=False)
     t.connect()
     a = t.get_action()  # torso engages on the headset pose
     head_q = readers[0].head_q.copy()
@@ -1096,7 +1097,7 @@ def test_right_a_joint_return_emits_reset_cmd_and_holds_start_pose(stubbed_pipel
 
 
 def test_torso_target_clamped_to_workspace_box(stubbed_pipeline):
-    """Torso target: delta clamp first, then the absolute base-frame box (x / pitch here).
+    """Torso target: chest delta 1:1, clipped by the absolute base-frame box (x / pitch here).
 
     Fake frames are already in the robot frame (the pipeline rebases in-graph),
     so head poses are given directly in base coordinates.
@@ -1105,7 +1106,7 @@ def test_torso_target_clamped_to_workspace_box(stubbed_pipeline):
     session = fakes.FakeSession()
     session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.9), head=fakes.head(quat=q0)))
     readers: list = []
-    t = make_teleop(session, readers, torso_source="head", torso_engage="always", torso_max_rot_delta_deg=90.0, torso_use_xy=True, use_head=False)
+    t = make_teleop(session, readers, torso_source="head", torso_engage="always", use_head=False)
     t.connect()
     a = t.get_action()  # engage; torso at (0, 0, 1.0), rpy 0 -> inside the box
     assert a["torso_ee.x"] == pytest.approx(0.0) and "clamped" not in t._torso_hold_reason

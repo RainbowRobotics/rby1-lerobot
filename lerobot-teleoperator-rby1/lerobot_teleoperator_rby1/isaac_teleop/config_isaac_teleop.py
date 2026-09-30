@@ -239,18 +239,13 @@ class Rby1XRConfig(IsaacTeleopConfig):
     body_required_joints: list[str] = field(
         default_factory=lambda: ["PELVIS", "SPINE3", "NECK"]
     )
-    torso_rot_scale: float = 1.0
-    torso_z_scale: float = 1.0
-    torso_use_xy: bool = True
-    # Safety clamps on the delta from the torso pose latched at engage.
-    torso_max_rot_delta_deg: float = 70.0
-    torso_max_z_delta_m: float = 0.15
     # Absolute workspace box of the torso target (link_torso_5 in the robot
     # base frame): position [x, y, z] (m) and fixed-axis XYZ roll / pitch /
     # yaw (deg, pitch + = leaning forward). Derived from the reachable range
     # computed by scripts/torso_workspace.py (ready pose: x = y = 0,
     # z = 1.10 m, rpy = 0) with margins that keep the chest above the knees
-    # and rule out folded postures. Applied after the delta clamps.
+    # and rule out folded postures. The chest pose delta since engage is
+    # applied 1:1 (no extra delta clamps); this box is the only limit.
     torso_pos_min: list[float] = field(default_factory=lambda: [-0.15, -0.20, 0.80])
     torso_pos_max: list[float] = field(default_factory=lambda: [0.45, 0.20, 1.20])
     torso_rpy_min_deg: list[float] = field(default_factory=lambda: [-15.0, -20.0, -45.0])

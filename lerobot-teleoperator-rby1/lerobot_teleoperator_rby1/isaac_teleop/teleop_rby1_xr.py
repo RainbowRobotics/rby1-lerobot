@@ -76,7 +76,6 @@ from .retargeters import (
     clamp_pose_box,
     head_yaw_pitch,
     interpolate_pose,
-    scale_clamp_delta,
     se3_to_ee_action,
     smoothstep,
     thumbsticks_to_base_vel,
@@ -997,17 +996,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
             clutch.engage(pos, quat, get_snap().torso, latch_orientation="measured")
         else:
             clutch.rebase(pos, quat)
-        cfg = self.config
-        target = scale_clamp_delta(
-            clutch.home,
-            clutch.last_commanded,
-            rot_scale=cfg.torso_rot_scale,
-            z_scale=cfg.torso_z_scale,
-            use_xy=cfg.torso_use_xy,
-            max_rot=math.radians(cfg.torso_max_rot_delta_deg),
-            max_z=cfg.torso_max_z_delta_m,
-        )
-        self._torso_target, clipped = self._clamp_torso_box(target)
+        # Chest delta since engage applied 1:1, then the absolute workspace box.
+        self._torso_target, clipped = self._clamp_torso_box(clutch.last_commanded)
         if clipped:
             self._torso_hold_reason = f"following, clamped[{','.join(clipped)}]"
 

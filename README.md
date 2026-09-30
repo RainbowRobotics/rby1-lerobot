@@ -387,8 +387,7 @@ lerobot-record \
 | `ready_return_duration_s` | `4.0` | Minimum time of the Right-A return: one `reset.cmd` action makes the follower run its joint-position ready-pose motion (as at connect; the loop blocks for the duration, base excluded) |
 | `resync_position_threshold_m`, `resync_rotation_threshold_deg` | `0.03`, `10` | Targets are re-seeded from the measured pose on the first action and whenever a component that is not clutched drifted past these (record reset, manual move) |
 | `status_log_period_s` | `5.0` | Log a one-line tracking / clutch status (controllers, head, body joints valid, why the torso holds); 0 = off |
-| `torso_max_rot_delta_deg`, `torso_max_z_delta_m`, `torso_use_xy` | `70`, `0.15`, `True` | Safety clamps on the torso delta since engage (rotation, height); `torso_use_xy` also passes the x/y translation of the chest through |
-| `torso_pos_min`, `torso_pos_max` | `[-0.15,-0.20,0.80]`, `[0.45,0.20,1.20]` | Absolute box (m, base frame) for the torso target `link_torso_5`; applied after the delta clamps. Ready pose is x = y = 0, z = 1.10 |
+| `torso_pos_min`, `torso_pos_max` | `[-0.15,-0.20,0.80]`, `[0.45,0.20,1.20]` | Absolute box (m, base frame) for the torso target `link_torso_5` (the chest delta since engage is applied 1:1; this box is the only limit). Ready pose is x = y = 0, z = 1.10 |
 | `torso_rpy_min_deg`, `torso_rpy_max_deg` | `[-15,-20,-45]`, `[15,50,45]` | Absolute roll / pitch / yaw box (fixed-axis XYZ, deg; pitch + = leaning forward). Both boxes come from `scripts/torso_workspace.py` (reachable range with the chest above the knees, folded postures excluded); clipped axes show in the status log as `clamped[...]` |
 
 ### Observation / Action Keys
