@@ -153,6 +153,8 @@ thumbsticks drive the mobile base.
 
 ```bash
 pip install -e "lerobot-teleoperator-rby1[isaac]"   # isaacteleop[cloudxr,retargeters-lite]
+# with the headset camera panels (Televiz) — adds the CUDA driver-API upload backend:
+pip install -e "lerobot-teleoperator-rby1[isaac-viz]"
 python -m isaacteleop.cloudxr --accept-eula          # once: downloads the CloudXR runtime
 ```
 
@@ -207,7 +209,8 @@ Frames are uploaded to the GPU with the first working backend: PyTorch, then the
 driver API (`cuda-python`), then CuPy. **On Jetson (JetPack 6.x = CUDA 12.6) the PyPI
 `torch` wheel is built for CUDA 12.8+ ("The NVIDIA driver on your system is too old
 (found version 12060)") and NVIDIA's JetPack torch wheels exist only for Python 3.10**, so
-in the Python 3.12 LeRobot environment install the driver-API backend:
+in the Python 3.12 LeRobot environment install the driver-API backend (included in the
+`isaac-viz` extra):
 
 ```bash
 pip install "cuda-bindings>=12.6,<13"   # CUDA 12.x driver-API bindings (cp312 aarch64 wheels); only libcuda is needed

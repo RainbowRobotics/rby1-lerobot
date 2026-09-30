@@ -36,6 +36,11 @@ dependencies = [
 # NVIDIA Isaac Teleop device (--teleop.type=rby1_isaac). retargeters-lite is
 # the aarch64-friendly extra (scipy only); cloudxr adds the runtime launcher.
 isaac = ["isaacteleop[cloudxr,retargeters-lite]==1.4.142"]
+# Headset camera panels (Televiz, --teleop.viz_enabled / preflight V_viz): frames
+# must be CUDA arrays. The driver-API backend only needs libcuda (works with the
+# CUDA 12.x driver of JetPack 6 in a Python 3.12 environment, where no CUDA torch
+# wheel exists); torch (CUDA build) or cupy are picked up automatically instead.
+isaac-viz = ["isaacteleop[cloudxr,retargeters-lite]==1.4.142", "cuda-bindings>=12.6,<13"]
 test = ["pytest"]
 
 [project.urls]
