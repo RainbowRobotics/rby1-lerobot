@@ -1093,3 +1093,32 @@ def test_right_a_joint_return_emits_reset_cmd_and_holds_start_pose(stubbed_pipel
     a = t.get_action()
     assert "reset.cmd" not in a and not t._returning
     assert a["right_ee.x"] == pytest.approx(x_start) and a["x.vel"] == pytest.approx(0.3)
+
+
+def test_torso_target_clamped_to_workspace_box(stubbed_pipeline):
+    """Torso target: delta clamp first, then the absolute base-frame box (x / pitch here).
+
+    Fake frames are already in the robot frame (the pipeline rebases in-graph),
+    so head poses are given directly in base coordinates.
+    """
+    q0 = Rotation.identity().as_quat()
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.9), head=fakes.head(quat=q0)))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="head", torso_engage="always", torso_max_rot_delta_deg=90.0, torso_use_xy=True, use_head=False)
+    t.connect()
+    a = t.get_action()  # engage; torso at (0, 0, 1.0), rpy 0 -> inside the box
+    assert a["torso_ee.x"] == pytest.approx(0.0) and "clamped" not in t._torso_hold_reason
+    # Headset moves 0.7 m forward and pitches 70 deg forward (about base y): x -> 0.45, pitch -> 50 deg.
+    q1 = Rotation.from_euler("y", 70, degrees=True).as_quat()
+    session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.9), head=fakes.head(pos=(0.7, 0.0, 0.0), quat=q1)))
+    a = t.get_action()
+    assert a["torso_ee.x"] == pytest.approx(0.45, abs=1e-6)
+    rot = Rotation.from_rotvec([a["torso_ee.wx"], a["torso_ee.wy"], a["torso_ee.wz"]])
+    assert rot.as_euler("xyz", degrees=True)[1] == pytest.approx(50.0, abs=1e-6)
+    assert "clamped[x+,pitch+]" in t._torso_hold_reason
+    # Config validation.
+    with pytest.raises(ValueError):
+        Rby1XRConfig(torso_pos_min=[0.5, 0, 0], torso_pos_max=[0.4, 0, 0])
+    with pytest.raises(ValueError):
+        Rby1XRConfig(torso_rpy_max_deg=[0, 200, 0])

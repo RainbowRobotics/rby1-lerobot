@@ -216,6 +216,53 @@ class HeadRetargeter:
 # ---------------------------------------------------------------------------
 
 
+RPY_AXES = ("roll", "pitch", "yaw")
+
+
+def clamp_pose_box(
+    T: np.ndarray,  # noqa: N803
+    pos_min: Sequence[float],
+    pos_max: Sequence[float],
+    rpy_min: Sequence[float],
+    rpy_max: Sequence[float],
+) -> tuple[np.ndarray, list[str]]:
+    """Clip a base-frame pose into a position box and a fixed-axis XYZ RPY box.
+
+    ``rpy_*`` are radians (roll about base x, pitch about y, yaw about z,
+    extrinsic XYZ). Returns the clipped pose and the names of the clipped
+    components (``x+``, ``pitch-`` …), empty when the pose was inside.
+    """
+    T = np.asarray(T, dtype=float)
+    clipped: list[str] = []
+    p = T[:3, 3].copy()
+    for i, axis in enumerate("xyz"):
+        lo, hi = float(pos_min[i]), float(pos_max[i])
+        if p[i] < lo:
+            p[i] = lo
+            clipped.append(f"{axis}-")
+        elif p[i] > hi:
+            p[i] = hi
+            clipped.append(f"{axis}+")
+    rpy = Rotation.from_matrix(T[:3, :3]).as_euler("xyz")
+    for i, axis in enumerate(RPY_AXES):
+        lo, hi = float(rpy_min[i]), float(rpy_max[i])
+        if rpy[i] < lo:
+            rpy[i] = lo
+            clipped.append(f"{axis}-")
+        elif rpy[i] > hi:
+            rpy[i] = hi
+            clipped.append(f"{axis}+")
+    out = np.eye(4)
+    out[:3, :3] = Rotation.from_euler("xyz", rpy).as_matrix() if any(c[:-1] in RPY_AXES for c in clipped) else T[:3, :3]
+    out[:3, 3] = p
+    return out, clipped
+
+
+# ---------------------------------------------------------------------------
+# Torso delta clamp
+# ---------------------------------------------------------------------------
+
+
 def chest_pose_from_body(
     body: BodyState | None,
     joint_index: int,

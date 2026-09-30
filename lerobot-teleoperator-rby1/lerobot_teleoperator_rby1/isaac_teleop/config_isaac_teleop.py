@@ -245,6 +245,16 @@ class Rby1XRConfig(IsaacTeleopConfig):
     # Safety clamps on the delta from the torso pose latched at engage.
     torso_max_rot_delta_deg: float = 70.0
     torso_max_z_delta_m: float = 0.15
+    # Absolute workspace box of the torso target (link_torso_5 in the robot
+    # base frame): position [x, y, z] (m) and fixed-axis XYZ roll / pitch /
+    # yaw (deg, pitch + = leaning forward). Derived from the reachable range
+    # computed by scripts/torso_workspace.py (ready pose: x = y = 0,
+    # z = 1.10 m, rpy = 0) with margins that keep the chest above the knees
+    # and rule out folded postures. Applied after the delta clamps.
+    torso_pos_min: list[float] = field(default_factory=lambda: [-0.15, -0.20, 0.80])
+    torso_pos_max: list[float] = field(default_factory=lambda: [0.45, 0.20, 1.20])
+    torso_rpy_min_deg: list[float] = field(default_factory=lambda: [-15.0, -20.0, -45.0])
+    torso_rpy_max_deg: list[float] = field(default_factory=lambda: [15.0, 50.0, 45.0])
 
     # ── Right A: return to the start pose ─────────────────────────────
     # The pose measured on the first action (the follower has just reached
@@ -303,6 +313,14 @@ class Rby1XRConfig(IsaacTeleopConfig):
             raise ValueError("ee_orientation_offset_rpy_deg must have 3 values")
         if len(self.neck_shoulder_offset) != 3:
             raise ValueError("neck_shoulder_offset must have 3 values")
+        for lo_name, hi_name in (("torso_pos_min", "torso_pos_max"), ("torso_rpy_min_deg", "torso_rpy_max_deg")):
+            lo, hi = getattr(self, lo_name), getattr(self, hi_name)
+            if len(lo) != 3 or len(hi) != 3:
+                raise ValueError(f"{lo_name} / {hi_name} must have 3 values")
+            if any(a > b for a, b in zip(lo, hi)):
+                raise ValueError(f"{lo_name} must be <= {hi_name} component-wise")
+        if any(abs(v) >= 180.0 for v in self.torso_rpy_min_deg + self.torso_rpy_max_deg):
+            raise ValueError("torso_rpy_*_deg must be within (-180, 180)")
         if self.viz_enabled and len(self.viz_offsets_x) != len(self.viz_cameras):
             raise ValueError("viz_offsets_x must have one entry per viz_cameras entry")
         if not (0.0 < self.viz_grab_threshold <= 1.0):

@@ -73,6 +73,7 @@ from .config_isaac_teleop import Rby1XRConfig
 from .retargeters import (
     HeadRetargeter,
     chest_pose_from_body,
+    clamp_pose_box,
     head_yaw_pitch,
     interpolate_pose,
     scale_clamp_delta,
@@ -580,6 +581,14 @@ class Rby1XR(IsaacTeleopTeleoperator):
             # The follower has just reached its ready pose: remember it as the
             # start pose Right A returns to.
             self._start_snapshot = snap
+            if cfg.use_torso:
+                _, clipped = self._clamp_torso_box(snap.torso)
+                if clipped:
+                    logger.warning(
+                        "Start torso pose is outside torso_pos/rpy limits (%s): the torso will be "
+                        "pulled into the box as soon as it engages. Check torso_pos_min/max, torso_rpy_*_deg.",
+                        ",".join(clipped),
+                    )
         # While any clutch is engaged the robot is being driven by us: the
         # torso carries the free arm along and the solvers lag behind the
         # targets, so drift is expected and must not be "corrected". The same
@@ -989,7 +998,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         else:
             clutch.rebase(pos, quat)
         cfg = self.config
-        self._torso_target = scale_clamp_delta(
+        target = scale_clamp_delta(
             clutch.home,
             clutch.last_commanded,
             rot_scale=cfg.torso_rot_scale,
@@ -997,6 +1006,19 @@ class Rby1XR(IsaacTeleopTeleoperator):
             use_xy=cfg.torso_use_xy,
             max_rot=math.radians(cfg.torso_max_rot_delta_deg),
             max_z=cfg.torso_max_z_delta_m,
+        )
+        self._torso_target, clipped = self._clamp_torso_box(target)
+        if clipped:
+            self._torso_hold_reason = f"following, clamped[{','.join(clipped)}]"
+
+    def _clamp_torso_box(self, T: np.ndarray) -> tuple[np.ndarray, list[str]]:  # noqa: N803
+        cfg = self.config
+        return clamp_pose_box(
+            T,
+            cfg.torso_pos_min,
+            cfg.torso_pos_max,
+            np.radians(cfg.torso_rpy_min_deg),
+            np.radians(cfg.torso_rpy_max_deg),
         )
 
     def _update_head(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot]) -> None:

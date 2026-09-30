@@ -189,3 +189,24 @@ def test_head_hold_and_latch_offset_under_rotated_torso():
     h.latch_offset(_head_R(), np.array([0.0, 0.5]), R_yaw)
     np.testing.assert_allclose(h.update(_head_R(), R_yaw), [0.0, 0.5], atol=1e-9)
     assert h.update(_head_R(), np.eye(3))[0] == pytest.approx(math.radians(30))
+
+
+def test_clamp_pose_box_components():
+    from lerobot_teleoperator_rby1.isaac_teleop.retargeters import clamp_pose_box
+    from scipy.spatial.transform import Rotation
+
+    pos_min, pos_max = [-0.15, -0.2, 0.8], [0.45, 0.2, 1.2]
+    rpy_min, rpy_max = np.radians([-15, -20, -45]), np.radians([15, 50, 45])
+    T = np.eye(4)
+    T[:3, 3] = [0.1, 0.0, 1.0]
+    T[:3, :3] = Rotation.from_euler("xyz", [5, 30, -10], degrees=True).as_matrix()
+    out, clipped = clamp_pose_box(T, pos_min, pos_max, rpy_min, rpy_max)
+    assert clipped == [] and np.allclose(out, T)
+    # Outside in x (+), z (-), pitch (+) and yaw (-): only those components move.
+    T2 = np.eye(4)
+    T2[:3, 3] = [0.7, 0.1, 0.5]
+    T2[:3, :3] = Rotation.from_euler("xyz", [5, 70, -60], degrees=True).as_matrix()
+    out, clipped = clamp_pose_box(T2, pos_min, pos_max, rpy_min, rpy_max)
+    assert clipped == ["x+", "z-", "pitch+", "yaw-"]
+    np.testing.assert_allclose(out[:3, 3], [0.45, 0.1, 0.8])
+    np.testing.assert_allclose(Rotation.from_matrix(out[:3, :3]).as_euler("xyz", degrees=True), [5, 50, -45], atol=1e-9)
