@@ -1050,8 +1050,9 @@ def test_ee_offsets_latched_at_first_engage_not_at_button(stubbed_pipeline, monk
     q_weird = Rotation.from_euler("y", 170, degrees=True).as_quat()
     session.push(_frame(right=fakes.controller(_abs_hand(0.5, -0.3, 0.3), quat=q_weird, squeeze=0.9, primary=True), body=body))
     t.get_action()
+    session.push(_frame(right=fakes.controller(_abs_hand(0.5, -0.3, 0.3), quat=q_weird, squeeze=0.0), body=body))  # let go
     clock[0] += 1.0
-    t.get_action()
+    t.get_action()  # return finished, nothing engaged -> offsets still pending
     assert t._needs_offset_latch["right"]
     # Squeeze again from yet another posture: the arm stays at the start pose (offsets from THIS posture).
     q3 = Rotation.from_euler("y", -30, degrees=True).as_quat()
