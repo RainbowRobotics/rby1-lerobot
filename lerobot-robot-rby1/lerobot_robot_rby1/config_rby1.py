@@ -138,13 +138,6 @@ class Rby1Config(RobotConfig):
     # ("a" or "m"). Leave False for upper-body-only setups.
     use_mobile_base: bool = False
 
-    # ── Record reset selection ────────────────────────────────────────
-    # When lerobot-record calls robot.reset() between episodes, only the
-    # enabled arms are moved back to the ready pose. Disabled arms keep
-    # their current joint positions.
-    reset_right_arm_on_record: bool = False
-    reset_left_arm_on_record: bool = False
-
     # ── Impedance control ──────────────────────────────────────────────
     # When True, send_action uses JointImpedanceControlCommandBuilder
     # instead of JointPositionCommandBuilder, yielding compliant behaviour

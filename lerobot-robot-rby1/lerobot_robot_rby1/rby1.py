@@ -53,25 +53,20 @@ from .config_rby1 import (
     ready_pose_for_version,
 )
 from .constants import (
-    ARM_DOF,
     BASE_VEL_NAMES,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
     POS_SUFFIX,
     RIGHT_ARM_NAMES,
     RIGHT_EE_NAMES,
-    TORSO_DOF,
     TORSO_EE_NAMES,
     TORSO_NAMES,
-    TOTAL_BODY_DOF,
 )
 from .gripper import Rby1Gripper
 
 logger = logging.getLogger(__name__)
 
 # Body-position slices within the 20-DOF [torso | right arm | left arm] vector.
-_RIGHT_ARM_BODY_SLICE = slice(TORSO_DOF, TORSO_DOF + ARM_DOF)          # 6:13
-_LEFT_ARM_BODY_SLICE = slice(TORSO_DOF + ARM_DOF, TOTAL_BODY_DOF)      # 13:20
 
 # Link indices for forward kinematics, matching the order of the link list
 # passed to ``make_state`` in connect() (EE-pose observations, EE mode only).
@@ -441,22 +436,6 @@ class Rby1(Robot):
         self._robot.set_parameter("joint_position_command.cutoff_frequency", "5")
         logger.info("RB-Y1 configured: cutoff_frequency=5 Hz.")
 
-    def reset(self) -> None:
-        """Return the enabled arms to the ready pose between record episodes.
-
-        Called by ``lerobot-record``; mirrors ``unitree_g1.reset()``.  Arms whose
-        ``reset_*_arm_on_record`` flag is False keep their current position.
-        """
-        if (
-            not self._config.reset_right_arm_on_record
-            and not self._config.reset_left_arm_on_record
-        ):
-            logger.info("Record reset disabled for both arms; keeping current robot pose.")
-            return
-
-        body_position, head_position = self._build_record_reset_targets()
-        self.move_to_ready_pose(body_position=body_position, head_position=head_position)
-
     def move_to_ready_pose(
         self,
         minimum_time: float = 5.0,
@@ -520,32 +499,6 @@ class Rby1(Robot):
             self._last_ee_targets = None
         except Exception as exc:
             logger.error(f"move_to_ready_pose error: {exc}")
-
-    def _build_record_reset_targets(self) -> tuple[np.ndarray, np.ndarray]:
-        """Build (body, head) reset targets from the current state.
-
-        Enabled arms are overwritten with the ready pose; disabled arms and the
-        torso keep their measured positions.
-        """
-        state = self._robot.get_state()
-        position = np.asarray(state.position, dtype=np.float64)
-        model = self._model
-
-        body_position = np.concatenate(
-            [
-                position[model.torso_idx],
-                position[model.right_arm_idx],
-                position[model.left_arm_idx],
-            ]
-        ).copy()
-        head_position = np.asarray(position[model.head_idx], dtype=np.float64).copy()
-
-        if self._config.reset_right_arm_on_record:
-            body_position[_RIGHT_ARM_BODY_SLICE] = self._ready_right
-        if self._config.reset_left_arm_on_record:
-            body_position[_LEFT_ARM_BODY_SLICE] = self._ready_left
-
-        return body_position, head_position
 
     # ------------------------------------------------------------------ #
     #  Observation                                                         #

@@ -57,13 +57,6 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # Enable gripper control via trigger buttons on the leader arm.
     use_gripper: bool = True
 
-    # ── Record reset selection ────────────────────────────────────────
-    # When lerobot-record calls teleop.reset() between episodes, only the
-    # enabled arms are moved back to the init pose. Disabled arms keep
-    # their current joint positions.
-    reset_right_arm_on_record: bool = False
-    reset_left_arm_on_record: bool = False
-
     # ── Initialisation trajectory ─────────────────────────────────────
     # Duration (seconds) for the smooth cosine interpolation from the
     # current leader arm pose to the init pose on connect().

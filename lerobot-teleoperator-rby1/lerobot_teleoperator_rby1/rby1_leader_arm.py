@@ -81,16 +81,13 @@ class Rby1LeaderArm(Teleoperator):
         self._control_loop: LeaderArmControlLoop | None = None
 
         # Thread-safe shared state — written by the 100 Hz control loop,
-        # read by get_action() / is_reset_complete() on the main thread.
+        # read by get_action() on the main thread.
         self._lock = threading.Lock()
         self._right_q = np.zeros(ARM_DOF)
         self._left_q = np.zeros(ARM_DOF)
         self._right_trigger: float = 0.0
         self._left_trigger: float = 0.0
         self._init_done: bool = False
-        self._reset_requested: bool = False
-        self._reset_right_arm_requested: bool = True
-        self._reset_left_arm_requested: bool = True
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -214,53 +211,6 @@ class Rby1LeaderArm(Teleoperator):
 
     def configure(self) -> None:
         pass
-
-    # ------------------------------------------------------------------ #
-    # Reset (for lerobot-record)
-    # ------------------------------------------------------------------ #
-
-    def request_reset(self) -> None:
-        """Trigger a non-blocking reset back to the ready pose."""
-        if not self._is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
-
-        reset_right = bool(self._config.reset_right_arm_on_record)
-        reset_left = bool(self._config.reset_left_arm_on_record)
-        if not reset_right and not reset_left:
-            logger.info(
-                f"{self} record reset disabled for both arms; keeping current pose."
-            )
-            return
-
-        logger.info(f"{self} reset requested: moving leader arm to ready pose.")
-        with self._lock:
-            self._reset_right_arm_requested = reset_right
-            self._reset_left_arm_requested = reset_left
-            self._reset_requested = True
-            self._init_done = False
-
-    def is_reset_complete(self) -> bool:
-        """Return ``True`` once the requested reset trajectory has finished."""
-        if not self._is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
-        with self._lock:
-            return self._init_done and not self._reset_requested
-
-    def reset(self) -> None:
-        """Block until the leader arm has returned to the ready pose."""
-        self.request_reset()
-
-        timeout_s = max(float(self._config.init_duration) + 2.0, 2.0)
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            if self.is_reset_complete():
-                logger.info(f"{self} reset complete.")
-                return
-            time.sleep(0.05)
-
-        logger.warning(
-            f"{self} reset timed out after {timeout_s:.1f}s; continuing."
-        )
 
     # ------------------------------------------------------------------ #
     # get_action

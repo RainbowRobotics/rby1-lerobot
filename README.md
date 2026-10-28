@@ -188,8 +188,6 @@ lerobot-record \
 | `use_gripper` | `True` | Read gripper state from trigger buttons |
 | `control_frequency` | `100.0` | Leader arm control loop frequency (Hz) |
 | `init_duration` | `5.0` | Time (s) to reach ready pose on `connect()` |
-| `reset_right_arm_on_record` | `False` | Return right arm to init pose between episodes |
-| `reset_left_arm_on_record` | `False` | Return left arm to init pose between episodes |
 
 ### Observation / Action Keys
 
