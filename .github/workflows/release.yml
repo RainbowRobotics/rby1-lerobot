@@ -1,0 +1,67 @@
+name: Release
+
+# Push a vX.Y.Z tag on main to publish a GitHub Release. The tag must match the
+# version in all three pyproject.toml files; the release notes name the
+# LeRobot release the plugins were tested against.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      lerobot_spec: ${{ steps.info.outputs.lerobot_spec }}
+      lerobot_tested: ${{ steps.info.outputs.lerobot_tested }}
+      async_spec: ${{ steps.info.outputs.async_spec }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag must be on main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_REF_NAME is not on main"; exit 1; }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: info
+        name: Tag matches package versions
+        run: python .github/scripts/release_info.py "$GITHUB_REF_NAME"
+
+  test:
+    needs: check
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: [check, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          TESTED: ${{ needs.check.outputs.lerobot_tested }}
+          SPEC: ${{ needs.check.outputs.lerobot_spec }}
+          ASYNC_SPEC: ${{ needs.check.outputs.async_spec }}
+        run: |
+          cat > notes.md <<NOTES
+          **LeRobot ${TESTED}** — tested in CI with \`lerobot==${TESTED}\` (Python 3.12).
+
+          | Package | LeRobot requirement |
+          |---|---|
+          | lerobot-robot-rby1, lerobot-teleoperator-rby1 | \`${SPEC}\` |
+          | lerobot-async-rby1 | \`${ASYNC_SPEC}\` |
+
+          Install: \`pip install 'lerobot[core_scripts]==${TESTED}'\`, then
+          \`pip install -e lerobot-robot-rby1 -e lerobot-teleoperator-rby1\` from a checkout of \`${TAG}\`.
+          See the README "Compatibility" table for other versions.
+          NOTES
+          gh release create "$TAG" --title "$TAG — LeRobot $TESTED" \
+            --notes-file notes.md --generate-notes --verify-tag
