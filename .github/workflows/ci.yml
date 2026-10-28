@@ -61,7 +61,7 @@ jobs:
           SPEC: ${{ matrix.lerobot.spec }}
           WITH_ASYNC: ${{ matrix.lerobot.async }}
         run: |
-          uv venv
+          # setup-uv with python-version has already created and activated .venv.
           # --no-sources: lerobot's own uv sources pin CUDA torch wheels.
           uv pip install --no-sources "$SPEC" pytest
           uv pip install -e lerobot-robot-rby1 -e lerobot-teleoperator-rby1 \
