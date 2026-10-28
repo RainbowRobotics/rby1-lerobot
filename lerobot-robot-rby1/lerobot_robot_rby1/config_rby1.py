@@ -242,29 +242,30 @@ class Rby1Config(RobotConfig):
     # ── Per-component solver tuning (ee_whole_body=False) ───────────────
     torso_stiffness: List[float] = field(default_factory=lambda: [1700.0] * 6)
     torso_torque_limit: List[float] = field(default_factory=lambda: [600.0] * 6)
-    torso_damping_ratio: float = 0.7
+    torso_damping_ratio: float = 1.0
     torso_joint_limits: JointLimits = field(
         default_factory=lambda: dict(DEFAULT_TORSO_JOINT_LIMITS)
     )
 
+    # Both arms share the same gains so left/right behave identically.
     right_arm_stiffness: List[float] = field(
-        default_factory=lambda: [90.0, 90.0, 90.0, 70.0, 70.0, 70.0, 70.0]
+        default_factory=lambda: [80.0, 80.0, 80.0, 60.0, 60.0, 60.0, 60.0]
     )
     right_arm_torque_limit: List[float] = field(
         default_factory=lambda: [40.0, 40.0, 40.0, 30.0, 30.0, 30.0, 30.0]
     )
-    right_arm_damping_ratio: float = 0.6
+    right_arm_damping_ratio: float = 1.0
     right_arm_joint_limits: JointLimits = field(
         default_factory=lambda: dict(DEFAULT_RIGHT_ARM_JOINT_LIMITS)
     )
 
     left_arm_stiffness: List[float] = field(
-        default_factory=lambda: [60.0, 60.0, 60.0, 50.0, 50.0, 50.0, 50.0]
+        default_factory=lambda: [80.0, 80.0, 80.0, 60.0, 60.0, 60.0, 60.0]
     )
     left_arm_torque_limit: List[float] = field(
         default_factory=lambda: [40.0, 40.0, 40.0, 30.0, 30.0, 30.0, 30.0]
     )
-    left_arm_damping_ratio: float = 0.4
+    left_arm_damping_ratio: float = 1.0
     left_arm_joint_limits: JointLimits = field(
         default_factory=lambda: dict(DEFAULT_LEFT_ARM_JOINT_LIMITS)
     )
@@ -286,7 +287,7 @@ class Rby1Config(RobotConfig):
         default_factory=lambda: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]
     )
     nullspace_stiffness: float = 0.2
-    nullspace_damping_ratio: float = 0.3
+    nullspace_damping_ratio: float = 1.0
 
     # ------------------------------------------------------------------ #
 
