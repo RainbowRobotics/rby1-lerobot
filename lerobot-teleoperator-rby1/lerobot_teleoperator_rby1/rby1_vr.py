@@ -132,6 +132,8 @@ class Rby1VR(Teleoperator):
         self._is_initialized = False
         self._is_stopped = False
         self._following = _FollowingState()
+        # Last gripper command per key, held while a controller is absent.
+        self._last_gripper: dict[str, float] = {}
         self._poses = _LatchedPoses()
 
         # Mobile-base integrator.
@@ -254,6 +256,7 @@ class Rby1VR(Teleoperator):
             local_port=cfg.local_port,
             meta_quest_ip=cfg.meta_quest_ip,
             meta_quest_port=cfg.meta_quest_port,
+            stale_timeout_s=cfg.vr_timeout_s,
         )
         self._receiver.start()
 
@@ -505,12 +508,21 @@ class Rby1VR(Teleoperator):
 
         # Gripper: trigger 1 (squeezed) -> closed.  The follower uses the
         # dataset convention 1.0 = open, 0.0 = closed, so emit 1 - trigger.
+        # A controller that is absent (or whose link timed out) keeps its
+        # last gripper command instead of opening the gripper.
         if cfg.use_gripper:
+            hands = vr.get("hands", {})
             right_trigger, left_trigger = self._triggers_from_vr(vr)
-            if cfg.use_right_arm:
-                action[f"right_gripper_0{POS_SUFFIX}"] = 1.0 - right_trigger
-            if cfg.use_left_arm:
-                action[f"left_gripper_0{POS_SUFFIX}"] = 1.0 - left_trigger
+            for side, enabled, trigger in (
+                ("right", cfg.use_right_arm, right_trigger),
+                ("left", cfg.use_left_arm, left_trigger),
+            ):
+                if not enabled:
+                    continue
+                key = f"{side}_gripper_0{POS_SUFFIX}"
+                if hands.get(side):
+                    self._last_gripper[key] = 1.0 - trigger
+                action[key] = self._last_gripper.get(key, 1.0)
 
         # Mobile base: body-frame velocity from the thumbstick integrator.
         if cfg.use_mobile_base:

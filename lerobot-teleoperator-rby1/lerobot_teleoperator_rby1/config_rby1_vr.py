@@ -26,6 +26,9 @@ class Rby1VRConfig(TeleoperatorConfig):
     local_port: int = 5005                     # UDP port we listen on
     meta_quest_ip: str = "192.168.20.2"       # Quest headset IP
     meta_quest_port: int = 6000                # Quest UDP port for the handshake
+    # Controllers count as absent (arm following released, base input zero,
+    # grippers held) when no packet arrived for this long (s).
+    vr_timeout_s: float = 0.2
 
     # ── Joint group selection ─────────────────────────────────────────
     # Must match the corresponding flags in Rby1Config (action_mode="ee")
