@@ -17,3 +17,6 @@ env/
 # OS / editor
 .DS_Store
 *.swp
+
+# Runtime logs written by lerobot_async_inference
+logs/
