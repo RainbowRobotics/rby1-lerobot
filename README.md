@@ -189,6 +189,7 @@ lerobot-record \
 | `use_torque` | `False` | Add `.torque` channels to observations |
 | `cameras` | `{}` | Dict of camera name → `CameraConfig` |
 | `use_impedance` | `False` | Joint-impedance vs. joint-position control |
+| `impedance_damping_ratio` | `1.0` | Joint-impedance damping ratio ζ (1.0 = critical, < 1 overshoots) |
 
 ### Teleoperator (`Rby1LeaderArmConfig`)
 

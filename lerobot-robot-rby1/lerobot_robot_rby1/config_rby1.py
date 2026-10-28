@@ -156,9 +156,13 @@ class Rby1Config(RobotConfig):
         default_factory=lambda: [500.0] * 6 + [40.0] * 7 + [40.0] * 7
     )
 
-    # Damping ratio applied to all joints [0.0, 1.0].
-    # 0.7 gives critical damping; lower values allow faster motion.
-    impedance_damping_ratio: float = 0.7
+    # Damping ratio zeta (> 0) applied to all joints. The RB-Y1 controller
+    # computes D = zeta * (sqrt(M) sqrt(K) + sqrt(K) sqrt(M)) from the mass
+    # matrix M and stiffness K, i.e. 2 * zeta * sqrt(m * k) per joint, so
+    # 1.0 is critical damping (no overshoot); values below 1.0 respond faster
+    # but overshoot (about 5 % at 0.7), values above 1.0 are overdamped.
+    # The same convention applies to every *_damping_ratio below.
+    impedance_damping_ratio: float = 1.0
 
     # ── Velocity / acceleration limits ─────────────────────────────────
     # Limits are read from the URDF dynamics model at connect() time.
@@ -230,6 +234,7 @@ class Rby1Config(RobotConfig):
     wb_joint_torque_limit: List[float] = field(
         default_factory=lambda: [500.0] * 6 + [30.0] * 7 + [30.0] * 7
     )
+    wb_joint_damping_ratio: float = 1.0
     wb_joint_limits: JointLimits = field(
         default_factory=lambda: dict(DEFAULT_WB_JOINT_LIMITS)
     )
@@ -300,6 +305,13 @@ class Rby1Config(RobotConfig):
                 'Rby1Config.version must be "auto" or one of "1.0"/"1.1"/"1.2"/"1.3", '
                 f'got "{self.version}".'
             )
+        for name in (
+            "impedance_damping_ratio", "wb_joint_damping_ratio", "torso_damping_ratio",
+            "right_arm_damping_ratio", "left_arm_damping_ratio", "nullspace_damping_ratio",
+        ):
+            # The controller rejects commands with a non-positive damping ratio.
+            if not getattr(self, name) > 0:
+                raise ValueError(f"Rby1Config.{name} must be > 0, got {getattr(self, name)}.")
         body_dof = TORSO_DOF + 2 * ARM_DOF
         self._check_len("impedance_stiffness", self.impedance_stiffness, body_dof)
         self._check_len("impedance_torque_limit", self.impedance_torque_limit, body_dof)
