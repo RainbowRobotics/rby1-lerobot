@@ -18,6 +18,7 @@ from .constants import (
     GRIPPER_HOMING_STEPS,
     GRIPPER_HOMING_TORQUE,
     GRIPPER_IDS,
+    GRIPPER_PING_TIMEOUT_S,
     GRIPPER_POSITION_TORQUE,
 )
 
@@ -37,6 +38,9 @@ class Rby1Gripper:
         self._open_rad: np.ndarray = np.zeros(2)
         self._close_rad: np.ndarray = np.zeros(2)
         self._homed: bool = False
+        # Last successful normalised reading; returned when a bus read fails.
+        self._last_positions: np.ndarray = np.zeros(2)
+        self._read_failed_logged = False
 
     # ------------------------------------------------------------------ #
     #  Connection                                                          #
@@ -64,9 +68,19 @@ class Rby1Gripper:
             raise RuntimeError("Failed to set gripper baud rate.")
         self._bus.set_torque_constant([1.0, 1.0])
 
+        # The motors are powered from the tool-flange 12 V rail that the robot
+        # switched on moments ago; a Dynamixel needs up to ~2 s to boot, so
+        # retry the ping instead of failing on the first attempt.
+        deadline = time.monotonic() + GRIPPER_PING_TIMEOUT_S
         for dev_id in GRIPPER_IDS:
-            if not self._bus.ping(dev_id):
-                raise RuntimeError(f"Gripper motor {dev_id} did not respond to ping.")
+            while not self._bus.ping(dev_id):
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"Gripper motor {dev_id} did not respond to ping within "
+                        f"{GRIPPER_PING_TIMEOUT_S:.0f}s (check tool-flange 12 V, cable, motor ID; "
+                        "run lerobot-robot-rby1/test_gripper.py)."
+                    )
+                time.sleep(0.2)
 
         self._home()
         logger.info("Rby1Gripper connected and homed.")
@@ -194,17 +208,25 @@ class Rby1Gripper:
         Returns
         -------
         np.ndarray, shape (2,)
-            ``[right, left]`` in ``[0.0 = open, 1.0 = closed]``.
+            ``[right, left]`` in ``[0.0 = open, 1.0 = closed]``. When the bus
+            read fails (no reply or a missing motor) the last good reading is
+            returned, so callers that hold "the current position" do not
+            command the grippers open.
         """
         if not self._homed:
             return np.zeros(2)
         result = self._bus.group_fast_sync_read_encoder(GRIPPER_IDS)
-        if result is None:
-            return np.zeros(2)
-        enc_map = {dev_id: enc for dev_id, enc in result}
+        enc_map = {dev_id: enc for dev_id, enc in result} if result is not None else {}
+        if any(dev_id not in enc_map for dev_id in GRIPPER_IDS):
+            if not self._read_failed_logged:
+                logger.warning("Gripper encoder read failed; using the last good position.")
+                self._read_failed_logged = True
+            return self._last_positions.copy()
+        self._read_failed_logged = False
         current_rad = np.array([enc_map[dev_id] for dev_id in GRIPPER_IDS])
 
         span = self._close_rad - self._open_rad
         # Guard against a zero span if homing failed to find a range.
         safe_span = np.where(np.abs(span) > 1e-6, span, 1.0)
-        return np.clip((current_rad - self._open_rad) / safe_span, 0.0, 1.0)
+        self._last_positions = np.clip((current_rad - self._open_rad) / safe_span, 0.0, 1.0)
+        return self._last_positions.copy()
