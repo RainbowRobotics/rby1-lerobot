@@ -258,6 +258,28 @@ def build_limb_command(
     )
 
 
+def clip_arm_targets(
+    action: dict[str, Any],
+    names: list[str],
+    q_min: np.ndarray,
+    q_max: np.ndarray,
+) -> np.ndarray:
+    """Joint targets for one arm from ``<name>.pos`` keys, clipped to the URDF limits."""
+    return np.clip(np.array([action[f"{name}{POS_SUFFIX}"] for name in names]), q_min, q_max)
+
+
+def clipped_arm_action(cfg: Any, action: dict[str, Any]) -> dict[str, float]:
+    """The ``<arm joint>.pos`` targets ``build_body_command`` sends, after clipping."""
+    sent: dict[str, float] = {}
+    if cfg.use_right_arm:
+        q = clip_arm_targets(action, RIGHT_ARM_NAMES, RIGHT_ARM_Q_MIN, RIGHT_ARM_Q_MAX)
+        sent.update({f"{n}{POS_SUFFIX}": float(v) for n, v in zip(RIGHT_ARM_NAMES, q)})
+    if cfg.use_left_arm:
+        q = clip_arm_targets(action, LEFT_ARM_NAMES, LEFT_ARM_Q_MIN, LEFT_ARM_Q_MAX)
+        sent.update({f"{n}{POS_SUFFIX}": float(v) for n, v in zip(LEFT_ARM_NAMES, q)})
+    return sent
+
+
 def build_body_command(
     rby: Any,
     cfg: Any,
@@ -288,11 +310,7 @@ def build_body_command(
     has_command = False
 
     if cfg.use_right_arm:
-        right_q = np.clip(
-            np.array([action[f"{name}{POS_SUFFIX}"] for name in RIGHT_ARM_NAMES]),
-            RIGHT_ARM_Q_MIN,
-            RIGHT_ARM_Q_MAX,
-        )
+        right_q = clip_arm_targets(action, RIGHT_ARM_NAMES, RIGHT_ARM_Q_MIN, RIGHT_ARM_Q_MAX)
         body.set_right_arm_command(
             build_limb_command(
                 rby,
@@ -308,11 +326,7 @@ def build_body_command(
         has_command = True
 
     if cfg.use_left_arm:
-        left_q = np.clip(
-            np.array([action[f"{name}{POS_SUFFIX}"] for name in LEFT_ARM_NAMES]),
-            LEFT_ARM_Q_MIN,
-            LEFT_ARM_Q_MAX,
-        )
+        left_q = clip_arm_targets(action, LEFT_ARM_NAMES, LEFT_ARM_Q_MIN, LEFT_ARM_Q_MAX)
         body.set_left_arm_command(
             build_limb_command(
                 rby,
