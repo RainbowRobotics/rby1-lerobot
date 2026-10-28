@@ -9,6 +9,8 @@ on:
     # Weekly run against upstream lerobot main to catch breaking changes early.
     - cron: "17 3 * * 1"
   workflow_dispatch:
+  # Called by release.yml before a GitHub Release is created.
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}

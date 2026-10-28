@@ -251,6 +251,27 @@ Limitations:
 | 0.2.x | `main` (next release) | 3.12 | Robot/teleop tested weekly in CI. `lerobot-async-rby1` is not supported (upstream removed the AsyncInference gRPC service). |
 | 0.1.x | 0.4 – 0.6.0 | ≥ 3.10 | Bare joint keys (no `.pos` suffix), unmaintained. |
 
+### Versioning and releases
+
+The plugins use their own [semantic version](https://semver.org/) (all three packages
+share one version), and every [GitHub Release](https://github.com/RainbowRobotics/rby1-lerobot/releases)
+names the LeRobot release it was tested against, e.g. `v0.2.0 — LeRobot 0.6.1`.
+
+- **Minor** (`0.2.0 → 0.3.0`): support for a new LeRobot release, or a breaking change in
+  the plugins (config fields, observation/action keys).
+- **Patch** (`0.2.0 → 0.2.1`): fixes that keep the same LeRobot requirement and keys.
+
+To install the plugins for a given release, check out its tag:
+
+```bash
+git clone --branch v0.2.0 https://github.com/rainbowrobotics/rby1-lerobot.git
+```
+
+Releasing (maintainers): bump `version` in the three `pyproject.toml` files (and the
+teleoperator's `lerobot_robot_rby1>=` requirement), update the table above, merge to
+`main`, then push a `vX.Y.Z` tag on `main`. The release workflow checks that the tag
+matches the package versions, runs CI and publishes the GitHub Release.
+
 LeRobot commands that do not apply to RB-Y1:
 
 - `lerobot-find-joint-limits` and `lerobot-setup-motors` target LeRobot motor-bus arms
