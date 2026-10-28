@@ -58,7 +58,9 @@ from .leader_arm_controller import LeaderArmControlLoop
 
 logger = logging.getLogger(__name__)
 
-_FALLBACK_URDF_PATH = "/home/nvidia/rby1-sdk/models/leader_arm/model.urdf"
+_URDF_ENV_VAR = "RBY1_LEADER_ARM_MODEL"
+# Source checkout of rby1-sdk in the home directory (the UPC default layout).
+_HOME_SDK_URDF_PATH = "~/rby1-sdk/models/leader_arm/model.urdf"
 
 # Settle time after switching the 12V rail on, before the Dynamixel bus is
 # probed. Mirrors the capacitor-stabilisation sleep in Rby1.connect().
@@ -81,16 +83,13 @@ class Rby1LeaderArm(Teleoperator):
         self._control_loop: LeaderArmControlLoop | None = None
 
         # Thread-safe shared state — written by the 100 Hz control loop,
-        # read by get_action() / is_reset_complete() on the main thread.
+        # read by get_action() on the main thread.
         self._lock = threading.Lock()
         self._right_q = np.zeros(ARM_DOF)
         self._left_q = np.zeros(ARM_DOF)
         self._right_trigger: float = 0.0
         self._left_trigger: float = 0.0
         self._init_done: bool = False
-        self._reset_requested: bool = False
-        self._reset_right_arm_requested: bool = True
-        self._reset_left_arm_requested: bool = True
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -214,53 +213,6 @@ class Rby1LeaderArm(Teleoperator):
 
     def configure(self) -> None:
         pass
-
-    # ------------------------------------------------------------------ #
-    # Reset (for lerobot-record)
-    # ------------------------------------------------------------------ #
-
-    def request_reset(self) -> None:
-        """Trigger a non-blocking reset back to the ready pose."""
-        if not self._is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
-
-        reset_right = bool(self._config.reset_right_arm_on_record)
-        reset_left = bool(self._config.reset_left_arm_on_record)
-        if not reset_right and not reset_left:
-            logger.info(
-                f"{self} record reset disabled for both arms; keeping current pose."
-            )
-            return
-
-        logger.info(f"{self} reset requested: moving leader arm to ready pose.")
-        with self._lock:
-            self._reset_right_arm_requested = reset_right
-            self._reset_left_arm_requested = reset_left
-            self._reset_requested = True
-            self._init_done = False
-
-    def is_reset_complete(self) -> bool:
-        """Return ``True`` once the requested reset trajectory has finished."""
-        if not self._is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
-        with self._lock:
-            return self._init_done and not self._reset_requested
-
-    def reset(self) -> None:
-        """Block until the leader arm has returned to the ready pose."""
-        self.request_reset()
-
-        timeout_s = max(float(self._config.init_duration) + 2.0, 2.0)
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            if self.is_reset_complete():
-                logger.info(f"{self} reset complete.")
-                return
-            time.sleep(0.05)
-
-        logger.warning(
-            f"{self} reset timed out after {timeout_s:.1f}s; continuing."
-        )
 
     # ------------------------------------------------------------------ #
     # get_action
@@ -391,19 +343,31 @@ class Rby1LeaderArm(Teleoperator):
 
     @staticmethod
     def _resolve_urdf_path(cfg: Rby1LeaderArmConfig) -> str:
-        """Find the leader-arm URDF, honouring the user's override first."""
+        """Find the leader-arm URDF.
+
+        Order: ``leader_arm_model_path`` → ``$RBY1_LEADER_ARM_MODEL`` → the
+        ``models/`` directory next to an editable rby1_sdk install →
+        ``~/rby1-sdk``. The PyPI rby1-sdk wheel does not ship the model.
+        """
         if cfg.leader_arm_model_path is not None:
             return cfg.leader_arm_model_path
+        env_path = os.environ.get(_URDF_ENV_VAR)
+        if env_path:
+            return env_path
 
         import importlib.resources
 
         sdk_path = str(importlib.resources.files("rby1_sdk"))
-        candidate = f"{sdk_path}/../models/leader_arm/model.urdf"
-        if os.path.isfile(candidate):
-            return candidate
-        if os.path.isfile(_FALLBACK_URDF_PATH):
-            return _FALLBACK_URDF_PATH
+        candidates = [
+            os.path.normpath(f"{sdk_path}/../models/leader_arm/model.urdf"),
+            os.path.expanduser(_HOME_SDK_URDF_PATH),
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
         raise FileNotFoundError(
-            "Could not find leader arm URDF model. "
-            "Set leader_arm_model_path in Rby1LeaderArmConfig."
+            "Could not find the leader arm URDF (models/leader_arm/model.urdf from an "
+            "rby1-sdk source checkout; the PyPI wheel does not include it). Looked in: "
+            f"{', '.join(candidates)}. Pass --teleop.leader_arm_model_path=<path> or set "
+            f"{_URDF_ENV_VAR}."
         )

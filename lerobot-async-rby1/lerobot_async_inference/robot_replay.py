@@ -11,12 +11,12 @@ from lerobot.utils.import_utils import register_third_party_plugins
 
 """
 
-python -m lerobot.async_inference.robot_replay \
+rby1-robot-replay \
   --robot.type=rby1 \
-  --actions-file /home/nvidia/052_lerobot/lerobot-rby1/final_actions_20260624_224751.jsonl \
+  --actions_file=final_actions_20260624_224751.jsonl \
   --fps=30 \
-  --start-index=100 \
-  --max-steps=300
+  --start_index=100 \
+  --max_steps=300
 
 
 """
@@ -25,9 +25,10 @@ python -m lerobot.async_inference.robot_replay \
 @dataclass
 class ReplayConfig:
     robot: RobotConfig
-    actions_file: str = "/home/nvidia/052_lerobot/lerobot-rby1/final_actions_20260624_224751.jsonl"
+    # JSONL written by rby1-robot-client (final_actions_*.jsonl); required.
+    actions_file: str = ""
     fps: float = 30.0
-    start_index: int = 100
+    start_index: int = 0
     max_steps: int | None = None 
 
 def load_actions(path: Path, start_index: int = 0, max_steps: int | None = None):
@@ -52,7 +53,9 @@ def load_actions(path: Path, start_index: int = 0, max_steps: int | None = None)
 
 
 @draccus.wrap()
-def main(cfg: ReplayConfig):
+def _replay(cfg: ReplayConfig):
+    if not cfg.actions_file:
+        raise ValueError("--actions_file is required")
     actions_path = Path(cfg.actions_file)
 
     if not actions_path.exists():
@@ -98,7 +101,14 @@ def main(cfg: ReplayConfig):
         print("[INFO] Robot disconnected.")
 
 
-if __name__ == "__main__":
+def main():
+    # Plugins must be registered before draccus parses --robot.type, and the
+    # console script never runs the __main__ block.
     register_third_party_plugins()
-    sys.argv.append("--robot.type=rby1")
+    if not any(arg.startswith("--robot.type") for arg in sys.argv[1:]):
+        sys.argv.append("--robot.type=rby1")
+    _replay()
+
+
+if __name__ == "__main__":
     main()

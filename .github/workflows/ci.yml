@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  schedule:
+    # Weekly run against upstream lerobot main to catch breaking changes early.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    # Push/PR runs gate on the pinned release; the weekly / manual runs also
+    # try upstream lerobot main as an early warning for the next release.
+    runs-on: ubuntu-latest
+    outputs:
+      lerobot: ${{ steps.set.outputs.lerobot }}
+    steps:
+      - id: set
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          release='{"name":"0.6.1","spec":"lerobot[core_scripts,training]==0.6.1","async":true,"experimental":false}'
+          main='{"name":"main","spec":"lerobot[core_scripts,training] @ git+https://github.com/huggingface/lerobot@main","async":false,"experimental":true}'
+          if [ "$EVENT" = schedule ] || [ "$EVENT" = workflow_dispatch ]; then
+            echo "lerobot=[$release,$main]" >> "$GITHUB_OUTPUT"
+          else
+            echo "lerobot=[$release]" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    name: lerobot ${{ matrix.lerobot.name }} / py${{ matrix.python }}
+    needs: matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: ${{ matrix.lerobot.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12"]
+        lerobot: ${{ fromJSON(needs.matrix.outputs.lerobot) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install lerobot and the plugins
+        env:
+          UV_TORCH_BACKEND: cpu
+          SPEC: ${{ matrix.lerobot.spec }}
+          WITH_ASYNC: ${{ matrix.lerobot.async }}
+        run: |
+          # setup-uv with python-version has already created and activated .venv.
+          # --no-sources: lerobot's own uv sources pin CUDA torch wheels.
+          uv pip install --no-sources "$SPEC" pytest
+          uv pip install -e lerobot-robot-rby1 -e lerobot-teleoperator-rby1 \
+            -e tests/fakes/lerobot-camera-fakecam
+          if [ "$WITH_ASYNC" = "true" ]; then
+            uv pip install -e lerobot-async-rby1
+          fi
+          uv pip list | grep -iE "^(lerobot|torch|rby1)"
+
+      - name: pytest
+        run: uv run --no-sync pytest -v tests
+
+      - name: CLI smoke test
+        run: |
+          source .venv/bin/activate
+          tests/cli_smoke.sh "$RUNNER_TEMP/smoke"
+
+      - name: Upload smoke logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs-${{ matrix.lerobot.name }}
+          path: ${{ runner.temp }}/smoke/*.log

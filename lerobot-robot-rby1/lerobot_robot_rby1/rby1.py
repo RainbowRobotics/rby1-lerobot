@@ -53,25 +53,18 @@ from .config_rby1 import (
     ready_pose_for_version,
 )
 from .constants import (
-    ARM_DOF,
     BASE_VEL_NAMES,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
     POS_SUFFIX,
     RIGHT_ARM_NAMES,
     RIGHT_EE_NAMES,
-    TORSO_DOF,
     TORSO_EE_NAMES,
     TORSO_NAMES,
-    TOTAL_BODY_DOF,
 )
 from .gripper import Rby1Gripper
 
 logger = logging.getLogger(__name__)
-
-# Body-position slices within the 20-DOF [torso | right arm | left arm] vector.
-_RIGHT_ARM_BODY_SLICE = slice(TORSO_DOF, TORSO_DOF + ARM_DOF)          # 6:13
-_LEFT_ARM_BODY_SLICE = slice(TORSO_DOF + ARM_DOF, TOTAL_BODY_DOF)      # 13:20
 
 # Link indices for forward kinematics, matching the order of the link list
 # passed to ``make_state`` in connect() (EE-pose observations, EE mode only).
@@ -118,6 +111,11 @@ class Rby1(Robot):
     def __init__(self, config: Rby1Config) -> None:
         super().__init__(config)
         self._config = config
+        # Upstream rollout (lerobot > 0.6.1) only holds/retargets robots whose
+        # actions are all position targets; the EE and mobile-base modes are not.
+        self.supports_position_hold = (
+            config.action_mode == "joint" and not config.use_mobile_base
+        )
         self._robot = None
         self._model = None
         self._stream = None
@@ -441,22 +439,6 @@ class Rby1(Robot):
         self._robot.set_parameter("joint_position_command.cutoff_frequency", "5")
         logger.info("RB-Y1 configured: cutoff_frequency=5 Hz.")
 
-    def reset(self) -> None:
-        """Return the enabled arms to the ready pose between record episodes.
-
-        Called by ``lerobot-record``; mirrors ``unitree_g1.reset()``.  Arms whose
-        ``reset_*_arm_on_record`` flag is False keep their current position.
-        """
-        if (
-            not self._config.reset_right_arm_on_record
-            and not self._config.reset_left_arm_on_record
-        ):
-            logger.info("Record reset disabled for both arms; keeping current robot pose.")
-            return
-
-        body_position, head_position = self._build_record_reset_targets()
-        self.move_to_ready_pose(body_position=body_position, head_position=head_position)
-
     def move_to_ready_pose(
         self,
         minimum_time: float = 5.0,
@@ -520,32 +502,6 @@ class Rby1(Robot):
             self._last_ee_targets = None
         except Exception as exc:
             logger.error(f"move_to_ready_pose error: {exc}")
-
-    def _build_record_reset_targets(self) -> tuple[np.ndarray, np.ndarray]:
-        """Build (body, head) reset targets from the current state.
-
-        Enabled arms are overwritten with the ready pose; disabled arms and the
-        torso keep their measured positions.
-        """
-        state = self._robot.get_state()
-        position = np.asarray(state.position, dtype=np.float64)
-        model = self._model
-
-        body_position = np.concatenate(
-            [
-                position[model.torso_idx],
-                position[model.right_arm_idx],
-                position[model.left_arm_idx],
-            ]
-        ).copy()
-        head_position = np.asarray(position[model.head_idx], dtype=np.float64).copy()
-
-        if self._config.reset_right_arm_on_record:
-            body_position[_RIGHT_ARM_BODY_SLICE] = self._ready_right
-        if self._config.reset_left_arm_on_record:
-            body_position[_LEFT_ARM_BODY_SLICE] = self._ready_left
-
-        return body_position, head_position
 
     # ------------------------------------------------------------------ #
     #  Observation                                                         #
@@ -647,13 +603,19 @@ class Rby1(Robot):
 
         if self._config.action_mode == "ee":
             self._send_ee_action(rby, action)
+            sent = {key: action[key] for key in self._motors_ft}
         else:
-            self._send_joint_action(rby, action)
-        self._send_gripper_action(action)
-        return action
+            sent = self._send_joint_action(rby, action)
+        sent.update(self._send_gripper_action(action))
+        if self._config.use_mobile_base:
+            sent.update({key: float(action.get(key, 0.0)) for key in BASE_VEL_NAMES})
+        return sent
 
-    def _send_joint_action(self, rby: Any, action: dict[str, Any]) -> None:
-        """Execute a joint-position action (``action_mode="joint"``)."""
+    def _send_joint_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
+        """Execute a joint-position action (``action_mode="joint"``).
+
+        Returns the arm targets actually commanded (clipped to joint limits).
+        """
         # Start the startup ramp on the first command (after connect() and the
         # ready-pose motion are complete).
         now = time.monotonic()
@@ -697,6 +659,7 @@ class Rby1(Robot):
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
         )
+        return cb.clipped_arm_action(self._config, action)
 
     def _send_ee_action(self, rby: Any, action: dict[str, Any]) -> None:
         """Execute an end-effector pose action (``action_mode="ee"``).
@@ -771,27 +734,31 @@ class Rby1(Robot):
             or angle > cfg.ee_reset_rotation_threshold
         )
 
-    def _send_gripper_action(self, action: dict[str, Any]) -> None:
+    def _send_gripper_action(self, action: dict[str, Any]) -> dict[str, float]:
         """Drive the Dynamixel grippers from the action dict.
 
         Action uses the dataset convention (1=open, 0=closed);
         Rby1Gripper.set_positions() expects the hardware convention
-        (0=open, 1=closed).
+        (0=open, 1=closed). A gripper whose key is missing from the action
+        holds its current position. Returns the commanded targets in the
+        dataset convention, keyed like ``action_features``.
         """
         if not self._config.use_gripper or self._gripper is None:
-            return
-        current_gripper = self._gripper.get_positions()
-        gripper_target = np.array(
-            [
-                1.0 - action.get(f"right_gripper_0{POS_SUFFIX}", 1.0)
-                if self._config.use_right_arm
-                else current_gripper[0],
-                1.0 - action.get(f"left_gripper_0{POS_SUFFIX}", 1.0)
-                if self._config.use_left_arm
-                else current_gripper[1],
-            ]
-        )
+            return {}
+        current_gripper = np.asarray(self._gripper.get_positions(), dtype=np.float64)
+        gripper_target = current_gripper.copy()
+        sent: dict[str, float] = {}
+        for idx, (side, enabled) in enumerate(
+            (("right", self._config.use_right_arm), ("left", self._config.use_left_arm))
+        ):
+            if not enabled:
+                continue
+            key = f"{side}_gripper_0{POS_SUFFIX}"
+            if key in action:
+                gripper_target[idx] = 1.0 - float(action[key])
+            sent[key] = float(1.0 - gripper_target[idx])
         self._gripper.set_positions(gripper_target)
+        return sent
 
     @staticmethod
     def _base_velocity_from_action(action: dict[str, Any]) -> tuple[np.ndarray, float]:
