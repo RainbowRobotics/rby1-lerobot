@@ -66,8 +66,6 @@ from .gripper import Rby1Gripper
 
 logger = logging.getLogger(__name__)
 
-# Body-position slices within the 20-DOF [torso | right arm | left arm] vector.
-
 # Link indices for forward kinematics, matching the order of the link list
 # passed to ``make_state`` in connect() (EE-pose observations, EE mode only).
 _FK_LINKS = ["base", "link_torso_5", "link_right_arm_6", "link_left_arm_6"]
