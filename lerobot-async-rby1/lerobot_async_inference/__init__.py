@@ -15,7 +15,9 @@
 """
 Async inference server/client.
 
-Requires: ``pip install 'lerobot[async]'``
+Requires lerobot 0.6.x: upstream main removed the ``AsyncInference`` gRPC
+service this package is built on (migration to upstream remote inference is
+pending). Install with ``pip install -e lerobot-async-rby1``.
 
 Available modules (import directly)::
 
@@ -25,6 +27,15 @@ Available modules (import directly)::
 
 from lerobot.utils.import_utils import require_package
 
-require_package("grpcio", extra="async", import_name="grpc")
+require_package("grpcio", import_name="grpc")
+
+from lerobot.transport import services_pb2_grpc  # noqa: E402
+
+if not hasattr(services_pb2_grpc, "AsyncInferenceServicer"):
+    raise ImportError(
+        "lerobot_async_inference requires lerobot 0.6.x: the installed lerobot no longer "
+        "provides the AsyncInference gRPC service (removed upstream in favour of remote "
+        "inference). Install 'lerobot>=0.6.1,<0.6.2'."
+    )
 
 __all__: list[str] = []

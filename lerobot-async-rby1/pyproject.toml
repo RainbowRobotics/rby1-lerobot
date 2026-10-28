@@ -36,9 +36,9 @@ Repository = "https://github.com/RainbowRobotics/rby1-lerobot"
 Issues = "https://github.com/RainbowRobotics/rby1-lerobot/issues"
 
 [project.scripts]
-lerobot-policy-server = "lerobot_async_inference.policy_server:serve"
-lerobot-robot-client = "lerobot_async_inference.robot_client:async_client"
-lerobot-robot-replay = "lerobot_async_inference.robot_replay:main"
+rby1-policy-server = "lerobot_async_inference.policy_server:serve"
+rby1-robot-client = "lerobot_async_inference.robot_client:async_client"
+rby1-robot-replay = "lerobot_async_inference.robot_replay:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

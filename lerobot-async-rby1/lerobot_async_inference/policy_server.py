@@ -15,7 +15,7 @@
 """
 Example:
 ```shell
-python -m lerobot.async_inference.policy_server \
+rby1-policy-server \
      --host=127.0.0.1 \
      --port=8080 \
      --fps=30 \
@@ -45,7 +45,10 @@ from lerobot.transport import (
     services_pb2_grpc,  # type: ignore
 )
 from lerobot.transport.utils import receive_bytes_in_chunks
-from lerobot.types import PolicyAction
+try:
+    from lerobot.lerobot_types import PolicyAction  # lerobot >= 0.6.1
+except ImportError:  # lerobot 0.6.0
+    from lerobot.types import PolicyAction
 
 from .configs import PolicyServerConfig
 from .constants import SUPPORTED_POLICIES

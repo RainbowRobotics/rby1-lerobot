@@ -15,7 +15,7 @@
 """
 Example command:
 ```shell
-python src/lerobot/async_inference/robot_client.py \
+rby1-robot-client \
     --robot.type=so100_follower \
     --robot.port=/dev/tty.usbmodem58760431541 \
     --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30}}" \
@@ -34,7 +34,7 @@ python src/lerobot/async_inference/robot_client.py \
 
 GR00T ZMQ example:
 
-python -m lerobot.async_inference.robot_client \
+rby1-robot-client \
   --backend=groot_zmq \
   --robot.type=rby1 \
   --server_address=127.0.0.1:5555  \
@@ -46,7 +46,7 @@ python -m lerobot.async_inference.robot_client \
 
 Pi05 ZMQ example:
 
-python -m lerobot.async_inference.robot_client \
+rby1-robot-client \
   --backend=pi05_zmq \
   --robot.type=rby1 \
   --server_address=127.0.0.1:5556 \
