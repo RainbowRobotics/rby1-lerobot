@@ -1,7 +1,7 @@
 """100 Hz background control loop for the RB-Y1 leader arm.
 
 Encapsulates the cosine-interpolated init trajectory, gravity compensation,
-joint-limit barriers, viscous damping, and button-driven free/hold mode
+joint-limit barriers, viscous friction compensation, and button-driven free/hold mode
 switching that runs inside the rby1_sdk control callback.  State that used
 to be carried via one-element-list closures in ``rby1_leader_arm.connect()``
 is now plain instance attributes on this class.
@@ -125,7 +125,8 @@ class LeaderArmControlLoop:
             self.teleop._right_trigger = float(state.button_right.trigger)
             self.teleop._left_trigger = float(state.button_left.trigger)
 
-        # Joint torques: gravity + barrier + viscous damping.
+        # Joint torques: gravity + barrier + viscous friction compensation
+        # (+gain * qdot pushes along the motion; it is not damping).
         torque = (
             state.gravity_term
             + self.barrier * (

@@ -88,13 +88,15 @@ class Rby1Config(RobotConfig):
     # gRPC address of the robot (host:port)
     address: str = "192.168.30.1:50051"
 
-    # Robot model variant: "a" (24-DOF), "m" (26-DOF mecanum), "ub" (18-DOF,
-    # no base), or "auto" to detect it from the robot via rby1-sdk on connect().
+    # Robot model variant: "a" (24-DOF), "m" (26-DOF mecanum), or "auto" to
+    # detect it from the robot via rby1-sdk on connect(). The upper-body "ub"
+    # model is not supported: the ready pose, torso keys and whole-body gains
+    # assume the 6-DOF torso of Model A/M.
     model: str = "auto"
 
     # Firmware version: "auto" to detect via rby1-sdk, or one of "1.0"/"1.1"/
     # "1.2"/"1.3". The version selects the ready pose set (v1.3 differs from
-    # earlier versions near the wrist). Ignored for the "ub" model.
+    # earlier versions near the wrist).
     version: str = "auto"
 
     # Timeout (seconds) for the model/version auto-detection probe connection.
@@ -306,9 +308,10 @@ class Rby1Config(RobotConfig):
             raise ValueError(
                 f'Rby1Config.action_mode must be "joint" or "ee", got "{self.action_mode}".'
             )
-        if self.model.strip().lower() not in ("a", "m", "ub", "auto"):
+        if self.model.strip().lower() not in ("a", "m", "auto"):
             raise ValueError(
-                f'Rby1Config.model must be "a", "m", "ub" or "auto", got "{self.model}".'
+                f'Rby1Config.model must be "a", "m" or "auto", got "{self.model}" '
+                '(the upper-body "ub" model is not supported).'
             )
         if self.version.strip().lower() not in ("auto", "", "1.0", "1.1", "1.2", "1.3"):
             raise ValueError(

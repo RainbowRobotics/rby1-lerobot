@@ -50,7 +50,9 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # ── Joint group selection ─────────────────────────────────────────
     # Must match the corresponding flags in Rby1Config so that
     # action_features are consistent between teleoperator and robot.
-    use_torso: bool = False       # Leader arm has no torso DOFs
+    # The leader arm has no torso joints and the follower's joint-mode
+    # actions never include the torso, so this must stay False.
+    use_torso: bool = False
     use_right_arm: bool = True
     use_left_arm: bool = True
 
@@ -90,7 +92,10 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
         default_factory=lambda: [4.0, 4.0, 4.0, 4.0, 1.5, 1.5, 1.5] * 2
     )
 
-    # Viscous damping gain per joint.
+    # Viscous friction-compensation gain per joint (Nm per rad/s). The control
+    # loop adds +viscous_gain * qdot, i.e. torque in the direction of motion
+    # that cancels joint friction (as in rby1-sdk example 35). It is not
+    # damping: larger values make the arm feel lighter and eventually unstable.
     viscous_gain: List[float] = field(
         default_factory=lambda: [0.02, 0.02, 0.02, 0.02, 0.01, 0.01, 0.002] * 2
     )
@@ -121,6 +126,11 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # ------------------------------------------------------------------ #
 
     def __post_init__(self) -> None:
+        if self.use_torso:
+            raise ValueError(
+                "Rby1LeaderArmConfig.use_torso is not supported: the leader arm has no "
+                "torso joints and Rby1 joint-mode actions do not include the torso."
+            )
         version = self.version.strip()
         if version not in SUPPORTED_LEADER_VERSIONS:
             raise ValueError(

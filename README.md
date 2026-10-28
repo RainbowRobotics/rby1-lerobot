@@ -178,7 +178,7 @@ lerobot-record \
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `address` | `"192.168.30.1:50051"` | gRPC address of the robot |
-| `model` | `"auto"` | Model variant: `"m"`, `"a"`, `"ub"`, or `"auto"` to detect |
+| `model` | `"auto"` | Model variant: `"m"`, `"a"`, or `"auto"` to detect (`"ub"` is not supported) |
 | `version` | `"auto"` | Robot version: `"1.0"`–`"1.3"`, or `"auto"` to detect |
 | `use_right_arm` | `True` | Include right arm in observation / action |
 | `use_left_arm` | `True` | Include left arm in observation / action |

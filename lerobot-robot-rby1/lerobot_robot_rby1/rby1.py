@@ -301,6 +301,10 @@ class Rby1(Robot):
             self._ready_left,
             self._ready_head,
         ) = ready_pose_for_version(self._resolved_version)
+        if self._resolved_model not in ("a", "m"):
+            raise RuntimeError(
+                f"RB-Y1 model '{self._resolved_model}' is not supported (only Model A and M)."
+            )
         logger.info(
             f"Using RB-Y1 model='{self._resolved_model}' "
             f"version='{self._resolved_version}'."

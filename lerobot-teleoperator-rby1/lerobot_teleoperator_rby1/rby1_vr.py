@@ -23,7 +23,7 @@ follower (configured with ``action_mode="ee"``) executes them via
 ``send_action``, driving the onboard Cartesian impedance solver, the gripper
 bus and the mobile base.  The robot connection held by this class is
 read-only (state + forward kinematics for latching); ready-pose motions are
-also owned by the follower (``move_to_ready_on_connect`` / record resets).
+also owned by the follower (``move_to_ready_on_connect``).
 
 Button mapping
 --------------
@@ -237,7 +237,14 @@ class Rby1VR(Teleoperator):
         Power, servos, the control manager and all command streams are owned
         by the follower robot (``lerobot_robot_rby1.Rby1``).
         """
-        self._robot = rby.create_robot(cfg.robot_address, cfg.robot_model)
+        from lerobot_robot_rby1 import model_probe
+
+        model = cfg.robot_model.strip().lower()
+        if model == "auto":
+            model, _ = model_probe.resolve_model_version("auto", "auto", cfg.robot_address)
+        if model not in ("a", "m"):
+            raise RuntimeError(f"RB-Y1 model '{model}' is not supported by rby1_vr (only A and M).")
+        self._robot = rby.create_robot(cfg.robot_address, model)
         if not self._robot.connect():
             raise ConnectionError(f"Failed to connect to RB-Y1 at {cfg.robot_address}.")
 
@@ -327,8 +334,7 @@ class Rby1VR(Teleoperator):
         Latches the emitted targets to the current EE poses so the follower
         holds position until a grip is squeezed.  Moving the robot to its
         ready pose is owned by the follower robot
-        (``move_to_ready_on_connect`` / record resets), not by this
-        teleoperator.
+        (``move_to_ready_on_connect``), not by this teleoperator.
         """
         logger.info("Right A pressed — latching targets to the current robot pose.")
         self._mobile_base.reset()
@@ -475,7 +481,8 @@ class Rby1VR(Teleoperator):
         if self._following.torso and head_ctrl:
             head_pose = vr_to_robot(head_ctrl["position"], head_ctrl["rotation"])
             diff = np.linalg.inv(self._poses.head_controller_start) @ head_pose
-            # Ignore translation — only the rotation is meaningful for the torso.
+            # Drop the horizontal (x/y) head translation: the torso follows the
+            # head's rotation and height (z) only.
             diff[0, 3] = 0.0
             diff[1, 3] = 0.0
             self._poses.torso_locked = self._poses.torso_start @ diff

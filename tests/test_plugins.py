@@ -47,3 +47,14 @@ def test_parse_vr_teleop_ee_mode() -> None:
     cfg = _parse("--robot.type=rby1", "--robot.action_mode=ee", "--teleop.type=rby1_vr")
     assert cfg.robot.action_mode == "ee"
     assert cfg.teleop.type == "rby1_vr"
+
+
+def test_unsupported_options_are_rejected() -> None:
+    import pytest
+    from lerobot_robot_rby1 import Rby1Config
+    from lerobot_teleoperator_rby1 import Rby1LeaderArmConfig
+
+    with pytest.raises(ValueError, match="ub"):
+        Rby1Config(model="ub")
+    with pytest.raises(ValueError, match="use_torso"):
+        Rby1LeaderArmConfig(use_torso=True)

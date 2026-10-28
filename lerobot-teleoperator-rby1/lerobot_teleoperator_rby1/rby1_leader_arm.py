@@ -7,7 +7,7 @@ and analog trigger per hand.  This teleoperator runs a 100 Hz background
 control loop on the leader arm hardware that applies:
 
     * a smooth cosine init trajectory to the configured ready pose
-    * gravity compensation, joint-limit barriers, viscous damping
+    * gravity compensation, joint-limit barriers, viscous friction compensation
     * button-driven free / hold mode switching
     * trigger read-back for gripper control
 
@@ -52,7 +52,6 @@ from .constants import (
     RIGHT_ARM_NAMES,
     RIGHT_ARM_Q_MAX,
     RIGHT_ARM_Q_MIN,
-    TORSO_NAMES,
 )
 from .leader_arm_controller import LeaderArmControlLoop
 
@@ -107,8 +106,6 @@ class Rby1LeaderArm(Teleoperator):
     def action_features(self) -> dict[str, type]:
         cfg = self._config
         names: list[str] = []
-        if cfg.use_torso:
-            names += TORSO_NAMES
         if cfg.use_right_arm:
             names += RIGHT_ARM_NAMES
         if cfg.use_left_arm:
@@ -230,12 +227,6 @@ class Rby1LeaderArm(Teleoperator):
             left_trigger = self._left_trigger
 
         action: dict[str, Any] = {}
-
-        if cfg.use_torso:
-            # Leader arm has no torso DOFs — emit zeros as placeholder so
-            # action_features stay consistent with the follower robot.
-            for name in TORSO_NAMES:
-                action[f"{name}{POS_SUFFIX}"] = 0.0
 
         if cfg.use_right_arm:
             right_q_out = right_q.copy()

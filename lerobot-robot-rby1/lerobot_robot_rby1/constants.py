@@ -111,8 +111,10 @@ DEFAULT_TORSO_JOINT_LIMITS: JointLimits = {
 DEFAULT_RIGHT_ARM_JOINT_LIMITS: JointLimits = {"right_arm_3": (-2.6, -0.5)}
 DEFAULT_LEFT_ARM_JOINT_LIMITS: JointLimits  = {"left_arm_3":  (-2.6, -0.5)}
 
-# Cartesian add_target gain tuples for rby1_sdk add_target(...):
-# (linear_acc_limit, linear_vel_limit, angular_acc_limit, angular_vel_limit).
+# Cartesian target limit tuples, passed positionally to rby1_sdk
+# CartesianImpedanceControlCommandBuilder.add_target(ref, link, T, ...):
+#   (linear_velocity_limit [m/s], angular_velocity_limit [rad/s],
+#    linear_acceleration_limit [m/s^2], angular_acceleration_limit [rad/s^2])
 _PI = math.pi
 TORSO_TARGET_GAINS_WB = (1.0, _PI * 0.5, 10.0, _PI * 20.0)
 TORSO_TARGET_GAINS_PC = (1.0, _PI * 0.5, 20.0, _PI * 40.0)

@@ -19,7 +19,8 @@ class Rby1VRConfig(TeleoperatorConfig):
 
     # ── Robot connection (read-only: state + FK for latching) ────────
     robot_address: str = "192.168.30.1:50051"
-    robot_model: str = "m"  # "a" | "m" | "ub"
+    # "a" | "m" | "auto" (detect from the robot, like the follower does)
+    robot_model: str = "auto"
 
     # ── Meta Quest UDP communication ─────────────────────────────────
     local_ip: str = "192.168.20.3"            # IP of this PC (Quest must reach it)
