@@ -25,11 +25,7 @@ Available modules (import directly)::
     from lerobot_async_inference.robot_client import ...
 """
 
-from lerobot.utils.import_utils import require_package
-
-require_package("grpcio", import_name="grpc")
-
-from lerobot.transport import services_pb2_grpc  # noqa: E402
+from lerobot.transport import services_pb2_grpc
 
 if not hasattr(services_pb2_grpc, "AsyncInferenceServicer"):
     raise ImportError(
