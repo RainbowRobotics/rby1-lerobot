@@ -601,15 +601,30 @@ class Rby1(Robot):
         except ImportError as e:
             raise ImportError("rby1_sdk is required.") from e
 
-        if self._config.action_mode == "ee":
-            self._send_ee_action(rby, action)
-            sent = {key: action[key] for key in self._motors_ft}
-        else:
-            sent = self._send_joint_action(rby, action)
+        try:
+            sent = self._dispatch_action(rby, action)
+        except RuntimeError as e:
+            if "expired" not in str(e).lower():
+                raise
+            # The stream expires when the command it carries has ended on the
+            # robot, e.g. the base velocity command finished after its short
+            # hold time during a stall in the action stream. Retry once on a
+            # fresh stream; a second failure is fatal.
+            logger.warning(f"Command stream expired ({e}); re-creating it and retrying once.")
+            self._stream = self._robot.create_command_stream(priority=1)
+            self._last_ee_targets = None  # force a reference reset on the retry
+            sent = self._dispatch_action(rby, action)
         sent.update(self._send_gripper_action(action))
         if self._config.use_mobile_base:
-            sent.update({key: float(action.get(key, 0.0)) for key in BASE_VEL_NAMES})
+            linear, angular = self._base_velocity_from_action(action)
+            sent.update({"x.vel": float(linear[0]), "y.vel": float(linear[1]), "theta.vel": angular})
         return sent
+
+    def _dispatch_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
+        if self._config.action_mode == "ee":
+            self._send_ee_action(rby, action)
+            return {key: action[key] for key in self._motors_ft}
+        return self._send_joint_action(rby, action)
 
     def _send_joint_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
         """Execute a joint-position action (``action_mode="joint"``).
@@ -652,10 +667,9 @@ class Rby1(Robot):
         if has_body:
             cbc.set_body_command(body)
         if self._config.use_mobile_base:
-            linear, angular = self._base_velocity_from_action(action)
-            cbc.set_mobility_command(
-                cb.build_mobility_command(rby, linear, angular, minimum_time)
-            )
+            # The base does not follow the arm startup ramp: a stop must take
+            # effect at once, not after up to startup_min_time.
+            cbc.set_mobility_command(self._mobility_command(rby, action, self._config.normal_min_time))
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
         )
@@ -694,11 +708,8 @@ class Rby1(Robot):
             )
         cbc = rby.ComponentBasedCommandBuilder().set_body_command(body)
         if cfg.use_mobile_base:
-            linear, angular = self._base_velocity_from_action(action)
             cbc.set_mobility_command(
-                cb.build_mobility_command(
-                    rby, linear, angular, cfg.ee_dt * cfg.min_time_factor_wb
-                )
+                self._mobility_command(rby, action, cfg.ee_dt * cfg.min_time_factor_wb)
             )
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
@@ -760,14 +771,29 @@ class Rby1(Robot):
         self._gripper.set_positions(gripper_target)
         return sent
 
-    @staticmethod
-    def _base_velocity_from_action(action: dict[str, Any]) -> tuple[np.ndarray, float]:
-        """Extract the SE2 base command (linear xy, yaw rate) from an action."""
+    def _base_velocity_from_action(self, action: dict[str, Any]) -> tuple[np.ndarray, float]:
+        """SE2 base command (linear xy, yaw rate) from an action, clamped to the limits."""
+        cfg = self._config
         linear = np.array(
             [action.get("x.vel", 0.0), action.get("y.vel", 0.0)], dtype=np.float64
         )
-        angular = float(action.get("theta.vel", 0.0))
+        speed = float(np.linalg.norm(linear))
+        if speed > cfg.mobile_base_max_linear_velocity:
+            linear *= cfg.mobile_base_max_linear_velocity / speed
+        angular = float(
+            np.clip(
+                action.get("theta.vel", 0.0),
+                -cfg.mobile_base_max_angular_velocity,
+                cfg.mobile_base_max_angular_velocity,
+            )
+        )
         return linear, angular
+
+    def _mobility_command(self, rby: Any, action: dict[str, Any], minimum_time: float) -> Any:
+        linear, angular = self._base_velocity_from_action(action)
+        return cb.build_mobility_command(
+            rby, linear, angular, minimum_time, hold_time=self._config.mobile_base_hold_time
+        )
 
 
     def _ramp_minimum_time(self, now: float) -> float:

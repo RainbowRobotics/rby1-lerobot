@@ -232,14 +232,25 @@ class _RobotState:
 
 
 class _CommandStream:
+    """Like the real stream, it expires once a streamed base velocity command
+    has outlived its control hold time (the core then finishes the mobility
+    component and rejects further requests on this stream)."""
+
     def __init__(self, robot, priority):
         self._robot = robot
         self.priority = priority
         self._done = False
+        self._mobility_deadline: float | None = None
 
     def send_command(self, cmd, timeout_ms=1000):
+        now = time.monotonic()
+        if self._done or (self._mobility_deadline is not None and now > self._mobility_deadline):
+            self._done = True
+            raise RuntimeError("Command stream expired (fake)")
         self._robot.n_stream_commands += 1
         self._robot._apply(cmd)
+        hold = _mobility_hold_time(cmd)
+        self._mobility_deadline = None if hold is None else now + hold
         return _Future()
 
     def is_done(self):
@@ -247,6 +258,16 @@ class _CommandStream:
 
     def cancel(self):
         self._done = True
+
+
+def _mobility_hold_time(cmd):
+    cbc = cmd.get("set_command")
+    mobility = cbc[0].get("set_mobility_command") if cbc else None
+    if not mobility:
+        return None
+    header = mobility[0].get("set_command_header")
+    hold = header[0].get("set_control_hold_time") if header else None
+    return float(hold[0]) if hold else None
 
 
 class FakeRobot:

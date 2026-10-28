@@ -138,6 +138,15 @@ class Rby1Config(RobotConfig):
     # ("a" or "m"). Leave False for upper-body-only setups.
     use_mobile_base: bool = False
 
+    # The base keeps the last commanded velocity for this long (s) after the
+    # action stream stops (e.g. while lerobot-record saves an episode), then
+    # decelerates to a stop. Keep it short: it is how far the base coasts.
+    mobile_base_hold_time: float = 0.5
+    # Base velocity commands are clamped to these limits (m/s for the x/y
+    # speed, rad/s for yaw). The defaults are the rby1_vr joystick maximum.
+    mobile_base_max_linear_velocity: float = 0.6
+    mobile_base_max_angular_velocity: float = 1.4
+
     # ── Impedance control ──────────────────────────────────────────────
     # When True, send_action uses JointImpedanceControlCommandBuilder
     # instead of JointPositionCommandBuilder, yielding compliant behaviour
@@ -215,7 +224,7 @@ class Rby1Config(RobotConfig):
     min_time_factor_pc: float = 1.02
 
     # Cartesian commands keep holding for this long (s) if the stream stalls.
-    ee_hold_time: float = 30.0
+    ee_hold_time: float = 1.0
 
     # ── Reference reset (jump) detection ──────────────────────────────
     # When a new EE target jumps further than these thresholds from the
@@ -311,6 +320,12 @@ class Rby1Config(RobotConfig):
             "right_arm_damping_ratio", "left_arm_damping_ratio", "nullspace_damping_ratio",
         ):
             # The controller rejects commands with a non-positive damping ratio.
+            if not getattr(self, name) > 0:
+                raise ValueError(f"Rby1Config.{name} must be > 0, got {getattr(self, name)}.")
+        for name in (
+            "mobile_base_hold_time", "mobile_base_max_linear_velocity",
+            "mobile_base_max_angular_velocity", "ee_hold_time",
+        ):
             if not getattr(self, name) > 0:
                 raise ValueError(f"Rby1Config.{name} must be > 0, got {getattr(self, name)}.")
         body_dof = TORSO_DOF + 2 * ARM_DOF
