@@ -49,7 +49,7 @@ run calibrate_robot 0 lerobot-calibrate "${ROBOT[@]}"
 run calibrate_teleop 0 lerobot-calibrate "${TELEOP[@]}"
 run train 0 lerobot-train "${DS[@]}" --policy.type=act --policy.device=cpu --policy.push_to_hub=false \
   --policy.pretrained_backbone_weights=null --policy.chunk_size=10 --policy.n_action_steps=10 \
-  --steps=2 --batch_size=2 --num_workers=0 --save_freq=2 --log_freq=1 --wandb.enable=false \
+  --steps=2 --batch_size=2 --num_workers=0 --save_freq=2 --log_freq=1 \
   --output_dir="$WORK/train"
 run rollout 1 lerobot-rollout "${ROBOT[@]}" --robot.cameras="$CAM" \
   --policy.path="$WORK/train/checkpoints/last/pretrained_model" --device=cpu \

@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from lerobot.transport import services_pb2_grpc
+
+# The async package is only installed (and grpc only present) for lerobot 0.6.x.
+pytest.importorskip("grpc", reason="grpc not installed (lerobot-async-rby1 not installed)")
+pytest.importorskip("lerobot_async_inference.helpers", reason="lerobot-async-rby1 not importable")
+from lerobot.transport import services_pb2_grpc  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not hasattr(services_pb2_grpc, "AsyncInferenceServicer"),
