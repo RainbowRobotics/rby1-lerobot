@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _FollowingState:
-    """Per-component flags: are we actively tracking the controller?"""
+    """Per-group (torso / right arm / left arm) flags: are we actively tracking the controller?"""
 
     right_arm: bool = False
     left_arm: bool = False

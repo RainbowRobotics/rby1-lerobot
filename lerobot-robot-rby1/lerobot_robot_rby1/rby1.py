@@ -742,16 +742,13 @@ class Rby1(Robot):
                 f"right={reset.right_arm}, left={reset.left_arm})."
             )
 
-        if cfg.ee_whole_body:
-            body = cb.build_whole_body_command(rby, cfg, targets, reset)
-        else:
-            body = cb.build_per_component_command(
-                rby, cfg, targets, reset, self._null_right, self._null_left
-            )
+        body = cb.build_ee_command(
+            rby, cfg, targets, reset, self._null_right, self._null_left
+        )
         cbc = rby.ComponentBasedCommandBuilder().set_body_command(body)
         if cfg.use_mobile_base:
             cbc.set_mobility_command(
-                self._mobility_command(rby, action, cfg.ee_dt * cfg.min_time_factor_wb)
+                self._mobility_command(rby, action, cfg.normal_min_time)
             )
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)

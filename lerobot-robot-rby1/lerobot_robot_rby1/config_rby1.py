@@ -9,23 +9,20 @@ from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraCon
 
 from .constants import (
     ARM_DOF,
-    ARM_TARGET_GAINS_PC,
-    ARM_TARGET_GAINS_WB,
+    ARM_TARGET_GAINS,
     DEFAULT_LEFT_ARM_JOINT_LIMITS,
     DEFAULT_NULL_LEFT_DEG,
     DEFAULT_NULL_RIGHT_DEG,
     DEFAULT_RIGHT_ARM_JOINT_LIMITS,
     DEFAULT_TORSO_JOINT_LIMITS,
-    DEFAULT_WB_JOINT_LIMITS,
     JointLimits,
     TORSO_DOF,
-    TORSO_TARGET_GAINS_PC,
-    TORSO_TARGET_GAINS_WB,
+    TORSO_TARGET_GAINS,
 )
 
 # ---------------------------------------------------------------------------
 # Ready pose (radians) — a safe, known configuration the robot moves to on
-# connect and (optionally per-arm) between record episodes.
+# connect.
 #
 # RB-Y1 v1.2 and v1.3 differ in the joint configuration near the wrist, so each
 # version needs its own arm ready pose. The v1.3 pose zeroes the three wrist
@@ -90,7 +87,7 @@ class Rby1Config(RobotConfig):
 
     # Robot model variant: "a" (24-DOF), "m" (26-DOF mecanum), or "auto" to
     # detect it from the robot via rby1-sdk on connect(). The upper-body "ub"
-    # model is not supported: the ready pose, torso keys and whole-body gains
+    # model is not supported: the ready pose, torso keys and EE solver gains
     # assume the 6-DOF torso of Model A/M.
     model: str = "auto"
 
@@ -214,16 +211,13 @@ class Rby1Config(RobotConfig):
     # The fields below only apply when action_mode="ee".
     # ════════════════════════════════════════════════════════════════════
 
-    # Use a single whole-body Cartesian impedance solver for torso + arms.
-    # False → separate torso / right-arm / left-arm solvers (more stable).
-    ee_whole_body: bool = False
+    # The torso, right arm and left arm each run their own Cartesian
+    # impedance solver.
 
-    # Expected action period (s); Cartesian command minimum_time is
-    # ee_dt * min_time_factor_wb (whole-body / mobility) or
-    # ee_dt * min_time_factor_pc (per-component torso/arm).
+    # Expected action period (s); the torso / arm Cartesian commands use
+    # minimum_time = ee_dt * min_time_factor.
     ee_dt: float = 1 / 15
-    min_time_factor_wb: float = 1.01
-    min_time_factor_pc: float = 1.02
+    min_time_factor: float = 1.02
 
     # Cartesian commands keep holding for this long (s) if the stream stalls.
     ee_hold_time: float = 1.0
@@ -236,21 +230,7 @@ class Rby1Config(RobotConfig):
     ee_reset_position_threshold: float = 0.1   # metres
     ee_reset_rotation_threshold: float = 0.5   # radians
 
-    # ── Whole-body solver tuning (ee_whole_body=True) ──────────────────
-    # Stiffness / torque-limit arrays are laid out as
-    # [torso (6) | right arm (7) | left arm (7)].
-    wb_joint_stiffness: List[float] = field(
-        default_factory=lambda: [400.0] * 6 + [60.0] * 7 + [60.0] * 7
-    )
-    wb_joint_torque_limit: List[float] = field(
-        default_factory=lambda: [500.0] * 6 + [30.0] * 7 + [30.0] * 7
-    )
-    wb_joint_damping_ratio: float = 1.0
-    wb_joint_limits: JointLimits = field(
-        default_factory=lambda: dict(DEFAULT_WB_JOINT_LIMITS)
-    )
-
-    # ── Per-component solver tuning (ee_whole_body=False) ───────────────
+    # ── Torso / arm solver tuning ───────────────────────────────────────
     torso_stiffness: List[float] = field(default_factory=lambda: [1700.0] * 6)
     torso_torque_limit: List[float] = field(default_factory=lambda: [600.0] * 6)
     torso_damping_ratio: float = 1.0
@@ -282,12 +262,10 @@ class Rby1Config(RobotConfig):
     )
 
     # ── Cartesian add_target gain tuples ─────────────────────────────
-    torso_target_gains_wb: Tuple[float, float, float, float] = TORSO_TARGET_GAINS_WB
-    torso_target_gains_pc: Tuple[float, float, float, float] = TORSO_TARGET_GAINS_PC
-    arm_target_gains_wb:   Tuple[float, float, float, float] = ARM_TARGET_GAINS_WB
-    arm_target_gains_pc:   Tuple[float, float, float, float] = ARM_TARGET_GAINS_PC
+    torso_target_gains: Tuple[float, float, float, float] = TORSO_TARGET_GAINS
+    arm_target_gains:   Tuple[float, float, float, float] = ARM_TARGET_GAINS
 
-    # ── Nullspace targets (per-component arm solvers) ─────────────────
+    # ── Nullspace targets (arm solvers) ───────────────────────────────
     null_right_arm_deg: List[float] = field(
         default_factory=lambda: list(DEFAULT_NULL_RIGHT_DEG)
     )
@@ -319,7 +297,7 @@ class Rby1Config(RobotConfig):
                 f'got "{self.version}".'
             )
         for name in (
-            "impedance_damping_ratio", "wb_joint_damping_ratio", "torso_damping_ratio",
+            "impedance_damping_ratio", "torso_damping_ratio",
             "right_arm_damping_ratio", "left_arm_damping_ratio", "nullspace_damping_ratio",
         ):
             # The controller rejects commands with a non-positive damping ratio.
@@ -334,8 +312,6 @@ class Rby1Config(RobotConfig):
         body_dof = TORSO_DOF + 2 * ARM_DOF
         self._check_len("impedance_stiffness", self.impedance_stiffness, body_dof)
         self._check_len("impedance_torque_limit", self.impedance_torque_limit, body_dof)
-        self._check_len("wb_joint_stiffness", self.wb_joint_stiffness, body_dof)
-        self._check_len("wb_joint_torque_limit", self.wb_joint_torque_limit, body_dof)
         self._check_len("torso_stiffness", self.torso_stiffness, TORSO_DOF)
         self._check_len("torso_torque_limit", self.torso_torque_limit, TORSO_DOF)
         self._check_len("right_arm_stiffness", self.right_arm_stiffness, ARM_DOF)

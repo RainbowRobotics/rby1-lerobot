@@ -273,6 +273,13 @@ teleoperator's `lerobot_robot_rby1>=` requirement), update the table above, merg
 `main`, then push a `vX.Y.Z` tag on `main`. The release workflow checks that the tag
 matches the package versions, runs CI and publishes the GitHub Release.
 
+Breaking changes in 0.2.0 (besides the `.pos` keys and the lerobot/Python pins):
+the `reset_*_arm_on_record` options and the EE whole-body solver (`ee_whole_body`,
+`wb_joint_*`, `*_target_gains_wb`, `min_time_factor_wb`) were removed, and
+`min_time_factor_pc` / `torso_target_gains_pc` / `arm_target_gains_pc` were renamed to
+`min_time_factor` / `torso_target_gains` / `arm_target_gains`; the async scripts are now
+`rby1-policy-server`, `rby1-robot-client` and `rby1-robot-replay`.
+
 LeRobot commands that do not apply to RB-Y1:
 
 - `lerobot-find-joint-limits` and `lerobot-setup-motors` target LeRobot motor-bus arms

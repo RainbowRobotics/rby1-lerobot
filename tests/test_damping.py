@@ -35,17 +35,29 @@ def test_joint_position_mode_has_no_damping_ratio() -> None:
     assert limb.get("set_damping_ratio") is None
 
 
-def test_whole_body_ee_sends_joint_damping_ratio() -> None:
+def test_ee_solvers_send_joint_damping_ratio() -> None:
     cfg = Rby1Config(
-        address="stub.invalid:1", action_mode="ee", ee_whole_body=True, wb_joint_damping_ratio=0.8
+        address="stub.invalid:1", action_mode="ee", use_torso=True,
+        torso_damping_ratio=0.9, right_arm_damping_ratio=0.8, left_arm_damping_ratio=0.7,
     )
     eye = np.eye(4)
     targets = cb.CartesianTargets(torso=eye, right_arm=eye, left_arm=eye)
-    builder = cb.build_whole_body_command(rby, cfg, targets, cb.ResetFlags())
-    assert builder.get("set_joint_damping_ratio") == (0.8,)
+    body = cb.build_ee_command(rby, cfg, targets, cb.ResetFlags(), np.zeros(7), np.zeros(7))
+    for setter, zeta in (
+        ("set_torso_command", 0.9),
+        ("set_right_arm_command", 0.8),
+        ("set_left_arm_command", 0.7),
+    ):
+        assert body.get(setter)[0].get("set_joint_damping_ratio") == (zeta,)
 
 
-@pytest.mark.parametrize("name", ["impedance_damping_ratio", "wb_joint_damping_ratio"])
+def test_whole_body_mode_is_gone() -> None:
+    with pytest.raises(TypeError):
+        Rby1Config(address="stub.invalid:1", ee_whole_body=True)
+    assert not hasattr(cb, "build_whole_body_command")
+
+
+@pytest.mark.parametrize("name", ["impedance_damping_ratio", "right_arm_damping_ratio"])
 def test_non_positive_damping_ratio_is_rejected(name: str) -> None:
     with pytest.raises(ValueError, match=name):
         Rby1Config(address="stub.invalid:1", **{name: 0.0})

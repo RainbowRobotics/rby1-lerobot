@@ -7,8 +7,7 @@ focused on high-level control flow.
 
 Joint-mode actions are executed via :func:`build_body_command`; EE-mode
 actions (``action_mode="ee"``) are decoded with :func:`pose_from_action` and
-executed via :func:`build_whole_body_command` or
-:func:`build_per_component_command`.
+executed via :func:`build_ee_command`.
 """
 
 from __future__ import annotations
@@ -56,7 +55,7 @@ class CartesianTargets:
 
 @dataclass
 class ResetFlags:
-    """Per-component ``set_reset_reference`` flags for the next command."""
+    """Per-solver (torso / right arm / left arm) ``set_reset_reference`` flags for the next command."""
 
     torso: bool = False
     right_arm: bool = False
@@ -101,46 +100,7 @@ def _apply_joint_limits(builder: Any, limits: dict[str, tuple[float, float]]) ->
     return builder
 
 
-def build_whole_body_command(
-    rby: Any,
-    cfg: Any,
-    targets: CartesianTargets,
-    reset: ResetFlags,
-) -> Any:
-    """Single-solver Cartesian impedance command over the full 20-DOF body."""
-    dt = cfg.ee_dt
-    builder = (
-        rby.CartesianImpedanceControlCommandBuilder()
-        .set_command_header(_ee_command_header(rby, cfg.ee_hold_time))
-        .set_minimum_time(dt * cfg.min_time_factor_wb)
-        .set_joint_stiffness(cfg.wb_joint_stiffness)
-        .set_joint_torque_limit(cfg.wb_joint_torque_limit)
-        .set_joint_damping_ratio(cfg.wb_joint_damping_ratio)
-        .set_stop_joint_position_tracking_error(0)
-        .set_stop_orientation_tracking_error(0)
-        .set_reset_reference(reset.any)
-    )
-    _apply_joint_limits(builder, cfg.wb_joint_limits)
-
-    if cfg.use_torso:
-        builder.add_target(
-            "base", "link_torso_5", targets.torso,
-            *cfg.torso_target_gains_wb,
-        )
-    if cfg.use_right_arm:
-        builder.add_target(
-            "base", "link_right_arm_6", targets.right_arm,
-            *cfg.arm_target_gains_wb,
-        )
-    if cfg.use_left_arm:
-        builder.add_target(
-            "base", "link_left_arm_6", targets.left_arm,
-            *cfg.arm_target_gains_wb,
-        )
-    return builder
-
-
-def build_per_component_command(
+def build_ee_command(
     rby: Any,
     cfg: Any,
     targets: CartesianTargets,
@@ -148,7 +108,7 @@ def build_per_component_command(
     null_right: np.ndarray,
     null_left: np.ndarray,
 ) -> Any:
-    """Separate torso / right-arm / left-arm solvers (more stable than WB)."""
+    """Cartesian impedance command with separate torso / right-arm / left-arm solvers."""
     dt = cfg.ee_dt
     body = rby.BodyComponentBasedCommandBuilder()
 
@@ -156,7 +116,7 @@ def build_per_component_command(
         torso_builder = (
             rby.CartesianImpedanceControlCommandBuilder()
             .set_command_header(_ee_command_header(rby, cfg.ee_hold_time))
-            .set_minimum_time(dt * cfg.min_time_factor_pc)
+            .set_minimum_time(dt * cfg.min_time_factor)
             .set_joint_stiffness(cfg.torso_stiffness)
             .set_joint_torque_limit(cfg.torso_torque_limit)
             .set_stop_joint_position_tracking_error(0)
@@ -167,7 +127,7 @@ def build_per_component_command(
         _apply_joint_limits(torso_builder, cfg.torso_joint_limits)
         torso_builder.add_target(
             "base", "link_torso_5", targets.torso,
-            *cfg.torso_target_gains_pc,
+            *cfg.torso_target_gains,
         )
         body.set_torso_command(torso_builder)
 
@@ -175,7 +135,7 @@ def build_per_component_command(
         right_builder = (
             rby.CartesianImpedanceControlCommandBuilder()
             .set_command_header(_ee_command_header(rby, cfg.ee_hold_time))
-            .set_minimum_time(dt * cfg.min_time_factor_pc)
+            .set_minimum_time(dt * cfg.min_time_factor)
             .set_joint_stiffness(cfg.right_arm_stiffness)
             .set_joint_torque_limit(cfg.right_arm_torque_limit)
             .set_nullspace_joint_target(
@@ -192,7 +152,7 @@ def build_per_component_command(
         _apply_joint_limits(right_builder, cfg.right_arm_joint_limits)
         right_builder.add_target(
             "base", "link_right_arm_6", targets.right_arm,
-            *cfg.arm_target_gains_pc,
+            *cfg.arm_target_gains,
         )
         body.set_right_arm_command(right_builder)
 
@@ -200,7 +160,7 @@ def build_per_component_command(
         left_builder = (
             rby.CartesianImpedanceControlCommandBuilder()
             .set_command_header(_ee_command_header(rby, cfg.ee_hold_time))
-            .set_minimum_time(dt * cfg.min_time_factor_pc)
+            .set_minimum_time(dt * cfg.min_time_factor)
             .set_joint_stiffness(cfg.left_arm_stiffness)
             .set_joint_torque_limit(cfg.left_arm_torque_limit)
             .set_nullspace_joint_target(
@@ -217,7 +177,7 @@ def build_per_component_command(
         _apply_joint_limits(left_builder, cfg.left_arm_joint_limits)
         left_builder.add_target(
             "base", "link_left_arm_6", targets.left_arm,
-            *cfg.arm_target_gains_pc,
+            *cfg.arm_target_gains,
         )
         body.set_left_arm_command(left_builder)
 
