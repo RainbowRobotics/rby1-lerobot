@@ -219,6 +219,8 @@ class _RobotInfo:
         self.robot_model_name = name
         self.robot_model_version = version
         self.sdk_version = __version__
+        self.version = "0.0.0+fake-core"
+        self.robot_version = version
 
 
 class _RobotState:
@@ -260,6 +262,44 @@ class _CommandStream:
         self._done = True
 
 
+# Core parameters of Model A (core/robots/rby1a/parameters.h): name -> (type, default).
+# Type codes as in rb/api/parameter.proto: 0 int, 1 double, 2 string, 3/4/5 array3/6/7.
+_CANCEL = ["jog_command", "joint_position_command", "cartesian_command", "stop_command",
+           "joint_velocity_command", "se2_velocity_command", "joint_impedance_control_command",
+           "cartesian_impedance_control_command", "joint_group_position_command"]
+CORE_PARAMETERS = {
+    "robot_model_name": (2, "rby1a"), "model_name": (2, ""), "battery_config": (5, [0.0] * 7),
+    "soft_stop_enabled": (0, 0), "major_fault_power_off_target": (2, ".*"), "boot.power_on_target": (2, ""),
+    "hotspot.ssid": (2, "RBY1"), "hotspot.password": (2, "RBY1@@@@"), "hotspot.band": (2, "2.4"),
+    "hotspot.channel": (0, 0), "hotspot.ht": (0, 1), "hotspot.width": (0, 0), "wifi.band": (2, "auto"),
+    "power_command.timeout": (1, 1.0), "servo_on_command.timeout": (1, 15.0),
+    "servo_on_command.new_data_timeout": (1, 3.0), "preset_position_command.timeout": (1, 5.0),
+    "preset_position_command.new_data_timeout": (1, 3.0), "gravity": (3, [0.0, 0.0, -9.8]),
+    "default.velocity_limit_scaling": (1, 1.0), "default.acceleration_limit_scaling": (1, 1.0),
+    "default.torque_limit_scaling": (1, 1.0), "default.linear_acceleration_limit": (1, 20.0),
+    "default.angular_acceleration_limit": (1, 10.0),
+    "default.cartesian_command__stop_position_tracking_error": (1, 0.005),
+    "default.cartesian_command__stop_orientation_tracking_error": (1, 0.02),
+    "default.cartesian_command__stop_joint_position_tracking_error": (1, 0.01),
+    "default.optimal_control_command__stop_cost": (1, 1e-3),
+    "default.se2_velocity_command__acceleration_limit": (3, [1.0, 1.0, 1.0]),
+    "default.cartesian_impedance_control_command__stop_position_tracking_error": (1, 0.005),
+    "default.cartesian_impedance_control_command__stop_orientation_tracking_error": (1, 0.02),
+    "default.cartesian_impedance_control_command__stop_joint_position_tracking_error": (1, 0.01),
+    "jog_command.one_step_size": (1, 0.087266463),
+    "joint_position_command.cutoff_frequency": (1, 15.0), "optimal_control_command.cutoff_frequency": (1, 15.0),
+    "cartesian_command.cutoff_frequency": (1, 15.0), "joint_group_position_command.cutoff_frequency": (1, 15.0),
+    "manipulability_threshold": (1, 1e4), "real_time_control.max_timeout_count": (0, 10),
+    "friction_compensation_enabled": (0, 0), "friction_compensation_gain": (1, 1.0),
+    **{f"{c}.canceling_time": (1, 0.1) for c in _CANCEL},
+}
+
+
+class _PIDGain:
+    def __init__(self, p, i, d):
+        self.p_gain, self.i_gain, self.d_gain = p, i, d
+
+
 def _mobility_hold_time(cmd):
     cbc = cmd.get("set_command")
     mobility = cbc[0].get("set_mobility_command") if cbc else None
@@ -289,7 +329,11 @@ class FakeRobot:
         self.n_commands = 0
         self.n_stream_commands = 0
         _ROBOTS.append(self)
-        self.params: dict[str, str] = {}
+        # Stored (DB) values and session overrides set with write_db=False;
+        # a new FakeRobot (= reconnect / core restart) starts from the DB again.
+        self.params_db: dict[str, object] = {k: v for k, (_, v) in CORE_PARAMETERS.items()}
+        self.params_session: dict[str, object] = {}
+        self.param_writes: list[tuple[str, str, bool]] = []
 
     # connection --------------------------------------------------------
     def connect(self, max_retries=5, timeout_ms=1000, *a, **k):
@@ -363,12 +407,47 @@ class FakeRobot:
     def wait_for_control_ready(self, timeout_ms):
         return True
 
+    def get_parameter_list(self):
+        return [(name, t) for name, (t, _) in CORE_PARAMETERS.items()]
+
     def set_parameter(self, name, value, write_db=True):
-        self.params[name] = value
+        import json as _json
+
+        if name not in CORE_PARAMETERS:
+            return False
+        self.param_writes.append((name, value, write_db))
+        parsed = _json.loads(value)
+        if write_db:
+            self.params_db[name] = parsed
+            self.params_session.pop(name, None)
+        else:
+            self.params_session[name] = parsed
         return True
 
     def get_parameter(self, name):
-        return self.params.get(name, "")
+        import json as _json
+
+        if name not in CORE_PARAMETERS:
+            raise RuntimeError(f"unknown parameter {name}")
+        return _json.dumps(self.params_session.get(name, self.params_db[name]))
+
+    def get_robot_model(self):
+        return f"<robot name='fake_{self._model_name}'/>"
+
+    def _pid(self, n):
+        return [_PIDGain(100.0, 0.0, 10.0) for _ in range(n)]
+
+    def get_torso_position_pid_gains(self):
+        return self._pid(6)
+
+    def get_right_arm_position_pid_gains(self):
+        return self._pid(7)
+
+    def get_left_arm_position_pid_gains(self):
+        return self._pid(7)
+
+    def get_head_position_pid_gains(self):
+        return self._pid(2)
 
     def set_tool_flange_output_voltage(self, side, voltage):
         _rec("set_tool_flange_output_voltage", side, voltage)

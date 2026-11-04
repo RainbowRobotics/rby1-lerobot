@@ -31,6 +31,11 @@ class Rby1VRConfig(TeleoperatorConfig):
     # grippers held) when no packet arrived for this long (s).
     vr_timeout_s: float = 0.2
 
+    # Record this teleoperator's config in the robot profile file (use the
+    # same path as --robot.profile_out, e.g. <dataset_root>/meta/rby1_profile.json).
+    # It is stored under "teleop" for reproducibility and never compared.
+    profile_out: str | None = None
+
     # ── Joint group selection ─────────────────────────────────────────
     # Must match the corresponding flags in Rby1Config (action_mode="ee")
     # so action_features stay consistent between teleoperator and robot.

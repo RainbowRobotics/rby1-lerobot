@@ -13,6 +13,8 @@ from pathlib import Path
 FAKES_DIR = Path(__file__).parent / "fakes"
 sys.path.insert(0, str(FAKES_DIR))
 os.environ.setdefault("RBY1_FAKE_SUMMARY", "0")
+# Keep default-path robot profiles out of ~/.cache during tests.
+os.environ.setdefault("RBY1_PROFILE_DIR", str(Path(__import__("tempfile").mkdtemp(prefix="rby1-profiles-"))))
 
 import pytest  # noqa: E402
 import rby1_sdk  # noqa: E402

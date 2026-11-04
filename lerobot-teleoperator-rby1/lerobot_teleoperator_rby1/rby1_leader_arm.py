@@ -178,6 +178,13 @@ class Rby1LeaderArm(Teleoperator):
         self._leader_arm.start_control(self._control_loop)
 
         self._is_connected = True
+        if self._config.profile_out:
+            from lerobot_robot_rby1.profile import update_profile_section
+
+            path = update_profile_section(
+                self._config.profile_out, "teleop", {"type": self.name, "config": self._config}
+            )
+            logger.info(f"{self} config recorded in {path}.")
         logger.info(
             f"{self} control loop started. Waiting {cfg.startup_wait_time:.1f}s "
             "for leader arm to reach ready pose …"

@@ -123,6 +123,11 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # to reach the ready pose before returning from connect().
     startup_wait_time: float = 5.0
 
+    # Record this teleoperator's config in the robot profile file (use the
+    # same path as --robot.profile_out, e.g. <dataset_root>/meta/rby1_profile.json).
+    # It is stored under "teleop" for reproducibility and never compared.
+    profile_out: str | None = None
+
     # ------------------------------------------------------------------ #
 
     def __post_init__(self) -> None:

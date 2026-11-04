@@ -32,6 +32,7 @@ Cartesian impedance solver.  This is the mode produced by the
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
@@ -44,6 +45,7 @@ from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnected
 
 from . import command_builders as cb
 from . import model_probe
+from . import profile as rprofile
 from .config_rby1 import (
     READY_HEAD,
     READY_LEFT,
@@ -132,6 +134,10 @@ class Rby1(Robot):
         self._last_ee_targets: cb.CartesianTargets | None = None
         self._null_right: np.ndarray = np.deg2rad(config.null_right_arm_deg)
         self._null_left: np.ndarray = np.deg2rad(config.null_left_arm_deg)
+        # Profile: reference loaded from profile_in, and functions that undo
+        # session-only core parameter changes on disconnect.
+        self._reference_profile: dict[str, Any] | None = None
+        self._restore_fns: list[Any] = []
         # EE mode: dynamics model + FK state for end-effector observations.
         self._dyn_robot: Any = None
         self._fk_state: Any = None
@@ -310,6 +316,11 @@ class Rby1(Robot):
             f"version='{self._resolved_version}'."
         )
 
+        # 0b. Compare against the reference profile before touching the robot:
+        #     feature / firmware-version mismatches fail here; with
+        #     profile_mode="apply" the behaviour settings are adopted.
+        self._check_reference_config()
+
         # Any failure part-way (e.g. the gripper ping) rolls back what was
         # already set up: control manager, tool-flange power, stream, cameras.
         try:
@@ -400,6 +411,7 @@ class Rby1(Robot):
 
             self._is_connected = True
             self.configure()
+            self._snapshot_profile()
             logger.info(f"{self} connected.")
 
             # 8. Move to the ready pose before inference begins.
@@ -433,6 +445,11 @@ class Rby1(Robot):
         for cam in self.cameras.values():
             if cam.is_connected:
                 attempt(f"camera {cam} disconnect", cam.disconnect)
+
+        # Undo session-only core parameter changes (profile apply, cutoff).
+        for restore in reversed(self._restore_fns):
+            attempt("restore core parameters", restore)
+        self._restore_fns = []
 
         if self._robot is not None:
             # Cancel the command stream before disabling the control manager;
@@ -473,9 +490,83 @@ class Rby1(Robot):
     def configure(self) -> None:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
-        # Low-pass filter on joint position commands to reduce jitter.
-        self._robot.set_parameter("joint_position_command.cutoff_frequency", "5")
-        logger.info("RB-Y1 configured: cutoff_frequency=5 Hz.")
+        # Low-pass filter on joint position commands to reduce jitter. Set for
+        # this session only (write_db=False) and restored on disconnect, so the
+        # robot's stored value is left alone.
+        name = "joint_position_command.cutoff_frequency"
+        cutoff = float(self._config.joint_position_cutoff_frequency)
+        previous = self._robot.get_parameter(name)
+        if self._robot.set_parameter(name, json.dumps(cutoff), write_db=False):
+            self._restore_fns.append(
+                lambda: self._robot.set_parameter(name, previous, write_db=False)
+            )
+            logger.info(f"RB-Y1 configured: {name}={cutoff:g} Hz (was {previous}).")
+        else:
+            logger.warning(f"RB-Y1 rejected {name}={cutoff:g}.")
+
+    # ------------------------------------------------------------------ #
+    #  Robot profile                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _check_reference_config(self) -> None:
+        """Compare the config with profile_in before connecting (feature errors fail)."""
+        cfg = self._config
+        self._reference_profile = None
+        if not cfg.profile_in or cfg.profile_mode == "off":
+            return
+        path = rprofile.resolve_profile_source(cfg.profile_in)
+        ref = rprofile.load_profile(path)
+        self._reference_profile = ref
+        current = rprofile.build_profile(
+            cfg,
+            robot={"model": self._resolved_model, "version": self._resolved_version},
+            version=self._resolved_version,
+        )
+        diffs = [
+            d for d in rprofile.diff_profiles(ref, current)
+            if d.key.startswith(("robot_config", "robot.model", "robot.version"))
+        ]
+        errors = [d for d in diffs if d.severity == rprofile.ERROR]
+        if errors:
+            raise ValueError(
+                f"RB-Y1 config does not match the profile {path} (the policy's observation/"
+                f"action layout or joint meaning would differ):\n{rprofile.format_diffs(errors)}"
+            )
+        if cfg.profile_mode == "apply":
+            changed = rprofile.apply_robot_config(cfg, ref)
+            if changed:
+                logger.warning(f"profile apply: config fields taken from {path}: {', '.join(changed)}")
+                self._null_right = np.deg2rad(cfg.null_right_arm_deg)
+                self._null_left = np.deg2rad(cfg.null_left_arm_deg)
+        elif diffs:
+            logger.warning(f"RB-Y1 config differs from the profile {path}:\n{rprofile.format_diffs(diffs)}")
+
+    def _snapshot_profile(self) -> None:
+        """Compare the live robot with profile_in, apply core parameters, write profile_out."""
+        cfg = self._config
+        live_params = rprofile.read_core_parameters(self._robot)
+        ref = self._reference_profile
+        if ref is not None and cfg.profile_mode == "apply":
+            self._restore_fns.append(rprofile.apply_core_parameters(self._robot, ref, live_params))
+            live_params = rprofile.read_core_parameters(self._robot)
+        current = rprofile.build_profile(
+            cfg,
+            robot=rprofile.read_robot_section(self._robot, self._resolved_model, self._resolved_version),
+            core_parameters=live_params,
+            version=self._resolved_version,
+        )
+        if ref is not None:
+            diffs = [
+                d for d in rprofile.diff_profiles(ref, current)
+                if not d.key.startswith("robot_config")
+            ]
+            if diffs:
+                logger.warning(f"RB-Y1 robot differs from the reference profile:\n{rprofile.format_diffs(diffs)}")
+            else:
+                logger.info("RB-Y1 robot matches the reference profile.")
+        out = cfg.profile_out or rprofile.default_profile_path()
+        written = rprofile.write_profile(out, current, force=cfg.profile_force)
+        logger.info(f"RB-Y1 profile written to {written}.")
 
     def move_to_ready_pose(
         self,

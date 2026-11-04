@@ -244,6 +244,61 @@ Limitations:
   the state dimension will not match a policy trained on such a dataset. `connect()` logs
   a warning when this is set.
 
+## Keeping robots consistent (robot profile)
+
+A policy behaves the same only if the robot that runs it is configured like
+the robot that recorded its dataset. The plugin can write a **robot profile**
+(`rby1_profile.json`) into the dataset and compare it with the robot at
+inference time. The profile contains:
+
+- the robot: model, firmware version, core / SDK versions, URDF hash and joint
+  limits, joint-driver PID gains
+- every core parameter (`get_parameter_list`), e.g. command cutoff frequencies,
+  velocity / acceleration / torque limit scaling, canceling times, friction
+  compensation
+- the full `Rby1Config` and the plugin's hard-coded constants (ready pose, joint
+  clip limits)
+- the teleoperator config (recorded only)
+
+The file lives in the dataset's `meta/` folder, which `LeRobotDataset` uploads
+and downloads with the rest of the metadata, so it travels with the dataset.
+
+```bash
+# Record: write the profile into the dataset
+lerobot-record ... --dataset.root=<root> \
+  --robot.profile_out=<root>/meta/rby1_profile.json \
+  --teleop.profile_out=<root>/meta/rby1_profile.json
+
+# Inference: compare the robot with the dataset's profile (a dataset root,
+# a Hugging Face dataset repo id, or a profile file)
+lerobot-rollout ... --robot.profile_in=<hf_user>/<dataset> --robot.profile_mode=check
+```
+
+`profile_mode`:
+
+| Mode | Behaviour |
+|------|-----------|
+| `check` (default) | Logs every difference. Fails before the robot moves if the observation/action layout (`use_*`, `action_mode`, camera names / size / rotation) or the firmware version differ. Model A vs M, gains, limits, core parameters, URDF and PID gains only warn. |
+| `apply` | As `check`, then adopts the profile's behaviour settings (gains, limits, timing) and core parameters. Core parameters are set for this session only (`write_db=False`) and restored on disconnect; URDF and PID gains are never changed. |
+| `off` | No comparison. |
+
+One dataset holds one profile: recording into a dataset whose profile differs
+fails unless `--robot.profile_force=true`, which keeps the original and writes a
+time-stamped extra profile. Without `profile_out` the profile is written to
+`~/.cache/rby1_lerobot/profiles/` (or `$RBY1_PROFILE_DIR`).
+
+The `rby1-profile` command works without recording:
+
+```bash
+rby1-profile export --out robot.json --robot.address=192.168.30.1:50051   # read-only, no motion
+rby1-profile attach robot.json --dataset <root or hf_user/dataset>
+rby1-profile diff <hf_user>/<dataset> robot.json   # exit code 1 on layout / firmware mismatch
+```
+
+The joint position command cutoff (`joint_position_cutoff_frequency`, default
+5 Hz) is now also applied for the session only and restored on disconnect;
+earlier versions wrote 5 Hz to the robot's stored parameters.
+
 ## Compatibility
 
 | Plugin version | LeRobot | Python | Notes |

@@ -31,6 +31,9 @@ Homepage = "https://github.com/RainbowRobotics/rby1-lerobot"
 Repository = "https://github.com/RainbowRobotics/rby1-lerobot"
 Issues = "https://github.com/RainbowRobotics/rby1-lerobot/issues"
 
+[project.scripts]
+rby1-profile = "lerobot_robot_rby1.profile_cli:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["lerobot_robot_rby1*"]

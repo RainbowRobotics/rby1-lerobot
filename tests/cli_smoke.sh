@@ -25,6 +25,8 @@ ROBOT=(--robot.type=rby1 --robot.address=stub.invalid:1)
 TELEOP=(--teleop.type=rby1_leader_arm --teleop.robot_address=stub.invalid:1
         --teleop.init_duration=0.5 --teleop.startup_wait_time=0.5)
 DS=(--dataset.repo_id=local/rby1_smoke --dataset.root="$WORK/ds")
+PROFILE="$WORK/ds/meta/rby1_profile.json"
+export RBY1_PROFILE_DIR="$WORK/profiles"
 
 failed=()
 # run <name> <expects_robot_commands:0|1> <cmd...>
@@ -42,6 +44,7 @@ run() {
 run teleoperate 1 lerobot-teleoperate "${ROBOT[@]}" --robot.cameras="$CAM" "${TELEOP[@]}" \
   --teleop_time_s=3 --fps=30
 run record 1 lerobot-record "${ROBOT[@]}" --robot.cameras="$CAM" "${TELEOP[@]}" "${DS[@]}" \
+  --robot.profile_out="$PROFILE" --teleop.profile_out="$PROFILE" \
   --dataset.push_to_hub=false --dataset.single_task="smoke task" --dataset.num_episodes=1 \
   --dataset.episode_time_s=3 --dataset.reset_time_s=1 --dataset.fps=30
 run replay 1 lerobot-replay "${ROBOT[@]}" "${DS[@]}" --dataset.episode=0
@@ -52,8 +55,18 @@ run train 0 lerobot-train "${DS[@]}" --policy.type=act --policy.device=cpu --pol
   --steps=2 --batch_size=2 --num_workers=0 --save_freq=2 --log_freq=1 \
   --output_dir="$WORK/train"
 run rollout 1 lerobot-rollout "${ROBOT[@]}" --robot.cameras="$CAM" \
+  --robot.profile_in="$WORK/ds" --robot.profile_mode=check \
   --policy.path="$WORK/train/checkpoints/last/pretrained_model" --device=cpu \
   --duration=4 --fps=30 --task="smoke task"
+# The recording's profile (robot + teleop) must be in the dataset and match at rollout.
+check() {
+  local name=$1; shift
+  if "$@" >>"$WORK/$name.log" 2>&1; then echo "PASS $name"; else echo "FAIL $name"; failed+=("$name"); fi
+}
+check profile_recorded python -c "import json,sys; d=json.load(open(sys.argv[1])); \
+assert d['robot_config'] and d['core_parameters'] and d['teleop']['type']=='rby1_leader_arm'" "$PROFILE"
+check profile_matches grep -q "matches the reference profile" "$WORK/rollout.log"
+check profile_diff rby1-profile diff "$WORK/ds" "$PROFILE"
 
 if ((${#failed[@]})); then
   echo "failed: ${failed[*]}"; exit 1

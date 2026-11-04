@@ -208,6 +208,13 @@ class Rby1VR(Teleoperator):
         self._init_receiver(cfg)
 
         self._is_connected = True
+        if self._config.profile_out:
+            from lerobot_robot_rby1.profile import update_profile_section
+
+            path = update_profile_section(
+                self._config.profile_out, "teleop", {"type": self.name, "config": self._config}
+            )
+            logger.info(f"{self} config recorded in {path}.")
         logger.info(f"{self} connected. Waiting for Right-A button to initialise …")
 
     def disconnect(self) -> None:

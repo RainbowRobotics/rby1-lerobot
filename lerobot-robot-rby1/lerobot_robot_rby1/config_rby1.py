@@ -191,6 +191,29 @@ class Rby1Config(RobotConfig):
     # when the robot is already in a safe position).
     move_to_ready_on_connect: bool = True
 
+    # Low-pass cutoff (Hz) for joint position commands, set on the robot for
+    # the session by configure() (core parameter
+    # joint_position_command.cutoff_frequency; restored on disconnect).
+    joint_position_cutoff_frequency: float = 5.0
+
+    # ── Robot profile (dataset <-> inference consistency) ──────────────
+    # See lerobot_robot_rby1.profile and the README "Keeping robots consistent".
+    # profile_out : write the robot profile here on connect, e.g.
+    #               <dataset_root>/meta/rby1_profile.json while recording.
+    #               None -> ~/.cache/rby1_lerobot/profiles/<time>.json.
+    # profile_in  : reference profile to compare against on connect: a file,
+    #               a dataset root, or a Hugging Face dataset repo id.
+    # profile_mode: "check" (log differences; fail on feature / firmware
+    #               version mismatches), "apply" (also adopt the profile's
+    #               behaviour settings and core parameters for this session),
+    #               or "off".
+    # profile_force: when profile_out already holds a different profile, keep
+    #               it and write a time-stamped extra profile instead of failing.
+    profile_out: str | None = None
+    profile_in: str | None = None
+    profile_mode: str = "check"
+    profile_force: bool = False
+
     # ── Startup ramp ───────────────────────────────────────────────────
     # At the beginning of a teleop session the follower robot needs to
     # smoothly converge to the leader's current pose.  A large
@@ -286,6 +309,12 @@ class Rby1Config(RobotConfig):
             raise ValueError(
                 f'Rby1Config.action_mode must be "joint" or "ee", got "{self.action_mode}".'
             )
+        if self.profile_mode not in ("check", "apply", "off"):
+            raise ValueError(
+                f'Rby1Config.profile_mode must be "check", "apply" or "off", got "{self.profile_mode}".'
+            )
+        if not self.joint_position_cutoff_frequency > 0:
+            raise ValueError("Rby1Config.joint_position_cutoff_frequency must be > 0.")
         if self.model.strip().lower() not in ("a", "m", "auto"):
             raise ValueError(
                 f'Rby1Config.model must be "a", "m" or "auto", got "{self.model}" '
