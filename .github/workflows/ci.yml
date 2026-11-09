@@ -48,7 +48,7 @@ jobs:
         python: ["3.12"]
         lerobot: ${{ fromJSON(needs.matrix.outputs.lerobot) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v5
         with:
