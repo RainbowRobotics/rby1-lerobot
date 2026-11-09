@@ -14,7 +14,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-PACKAGES = ["lerobot-robot-rby1", "lerobot-teleoperator-rby1", "lerobot-async-rby1"]
+PACKAGES = ["lerobot-robot-rby1", "lerobot-teleoperator-rby1"]
 
 
 def main(tag: str) -> int:
@@ -38,7 +38,7 @@ def main(tag: str) -> int:
     if not lower:
         print(f"no lower bound in {spec!r}", file=sys.stderr)
         return 1
-    out = {"lerobot_spec": spec, "lerobot_tested": lower.group(1), "async_spec": specs["lerobot-async-rby1"]}
+    out = {"lerobot_spec": spec, "lerobot_tested": lower.group(1)}
     for key, value in out.items():
         print(f"{key}={value}")
     if "GITHUB_OUTPUT" in os.environ:

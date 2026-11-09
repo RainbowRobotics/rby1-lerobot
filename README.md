@@ -334,8 +334,13 @@ Breaking changes in 0.2.0 (besides the `.pos` keys and the lerobot/Python pins):
 the `reset_*_arm_on_record` options and the EE whole-body solver (`ee_whole_body`,
 `wb_joint_*`, `*_target_gains_wb`, `min_time_factor_wb`) were removed, and
 `min_time_factor_pc` / `torso_target_gains_pc` / `arm_target_gains_pc` were renamed to
-`min_time_factor` / `torso_target_gains` / `arm_target_gains`; the async scripts are now
-`rby1-policy-server`, `rby1-robot-client` and `rby1-robot-replay`.
+`min_time_factor` / `torso_target_gains` / `arm_target_gains`.
+
+Breaking change in 0.3.0: the `lerobot-async-rby1` package (`rby1-policy-server`,
+`rby1-robot-client`, `rby1-robot-replay`, gRPC + GR00T/Pi0.5 ZMQ backends) was removed;
+lerobot 0.7.0 dropped the gRPC AsyncInference service it was built on. Use lerobot's remote
+inference instead (see [Remote inference](#remote-inference)). The old package is in the git
+history (`git show v0.2.0:lerobot-async-rby1/`).
 
 LeRobot commands that do not apply to RB-Y1:
 
@@ -350,7 +355,6 @@ LeRobot commands that do not apply to RB-Y1:
 |------|-------------|
 | [`lerobot-robot-rby1/`](lerobot-robot-rby1) | RB-Y1 follower robot plugin (`--robot.type=rby1`) |
 | [`lerobot-teleoperator-rby1/`](lerobot-teleoperator-rby1) | RB-Y1 teleoperator plugins (`--teleop.type=rby1_leader_arm`, `--teleop.type=rby1_vr`) |
-| [`lerobot-async-rby1/`](lerobot-async-rby1) | Async inference client/server (`rby1-policy-server`, `rby1-robot-client`, `rby1-robot-replay`) with gRPC, GR00T-ZMQ and Pi0.5-ZMQ backends |
 | [`tests/`](tests) | Hardware-free tests using a fake `rby1_sdk` |
 
 ## Resources

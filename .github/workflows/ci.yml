@@ -28,8 +28,8 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
         run: |
-          release='{"name":"0.7.0","spec":"lerobot[core_scripts,training]==0.7.0","async":false,"experimental":false}'
-          main='{"name":"main","spec":"lerobot[core_scripts,training] @ git+https://github.com/huggingface/lerobot@main","async":false,"experimental":true}'
+          release='{"name":"0.7.0","spec":"lerobot[core_scripts,training,remote]==0.7.0","experimental":false}'
+          main='{"name":"main","spec":"lerobot[core_scripts,training,remote] @ git+https://github.com/huggingface/lerobot@main","experimental":true}'
           if [ "$EVENT" = schedule ] || [ "$EVENT" = workflow_dispatch ]; then
             echo "lerobot=[$release,$main]" >> "$GITHUB_OUTPUT"
           else
@@ -61,16 +61,12 @@ jobs:
         env:
           UV_TORCH_BACKEND: cpu
           SPEC: ${{ matrix.lerobot.spec }}
-          WITH_ASYNC: ${{ matrix.lerobot.async }}
         run: |
           # setup-uv with python-version has already created and activated .venv.
           # --no-sources: lerobot's own uv sources pin CUDA torch wheels.
           uv pip install --no-sources "$SPEC" pytest
           uv pip install -e lerobot-robot-rby1 -e lerobot-teleoperator-rby1 \
             -e tests/fakes/lerobot-camera-fakecam
-          if [ "$WITH_ASYNC" = "true" ]; then
-            uv pip install -e lerobot-async-rby1
-          fi
           uv pip list | grep -iE "^(lerobot|torch|rby1)"
 
       - name: pytest

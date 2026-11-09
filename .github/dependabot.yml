@@ -6,7 +6,6 @@ updates:
     directories:
       - /lerobot-robot-rby1
       - /lerobot-teleoperator-rby1
-      - /lerobot-async-rby1
     schedule:
       interval: weekly
     allow:
