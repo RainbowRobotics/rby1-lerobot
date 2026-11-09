@@ -8,7 +8,7 @@
 ## Platform Requirements
 - **RB-Y1**: Currently, **only robots version 1.2 or lower are supported.** Support for version 1.3 is coming soon.
 - **Linux**: Tested on Ubuntu 22.04 (x86-64 and ARM64).
-- **Python 3.12+** and **LeRobot 0.6.1** (see [Compatibility](#compatibility)).
+- **Python 3.12+** and **LeRobot 0.7.0** (see [Compatibility](#compatibility)).
 - **Ethernet connection to RPC**: Ethernet connection to the RPC at `192.168.30.1` (or desired IP).
 - **Teleoperation device**: Leader arm connection via 4-Pin MOCO cable to the RB-Y1 UPC(VR-based teleoperation is not currently supported; this feature is coming soon).
 
@@ -60,11 +60,14 @@ conda activate lerobot
 ```bash
 # 0. Install the LeRobot CLI dependencies
 #    From PyPI:
-pip install 'lerobot[core_scripts]==0.6.1'
-#    or, inside a LeRobot source checkout (tag v0.6.1):
+pip install 'lerobot[core_scripts]==0.7.0'
+#    or, inside a LeRobot source checkout (tag v0.7.0):
 #    pip install -e ".[core_scripts]"
 #    Add the `training` extra (e.g. 'lerobot[core_scripts,training]') to train
 #    policies with lerobot-train on the same machine.
+#    LeRobot 0.7.0 installs CUDA 13 torch wheels on Linux (NVIDIA driver >= 580.65).
+#    On a machine without a GPU (e.g. the UPC) install CPU torch first, or with uv:
+#    UV_TORCH_BACKEND=cpu uv pip install 'lerobot[core_scripts]==0.7.0'
 
 # 1. Create a working directory and move into it
 #    (to avoid accidentally cloning inside the LeRobot package folder)
@@ -83,7 +86,7 @@ pip install -e lerobot-teleoperator-rby1
 
 # 5. (only for Intel RealSense cameras) Install pyrealsense2
 #    x86-64:
-pip install 'lerobot[intelrealsense]==0.6.1'
+pip install 'lerobot[intelrealsense]==0.7.0'
 #    RB-Y1's UPC (ARM64): the official pyrealsense2 package on PyPI does not
 #    support ARM64, so a pre-built wheel (ARM64, Python 3.12) is included here.
 pip install pyrealsense2-2.56.5-cp312-cp312-linux_aarch64.whl
@@ -234,9 +237,7 @@ lerobot-rollout \
 
 Limitations:
 
-- Requires **lerobot 0.6.1 or newer**. `lerobot-rollout` does not exist before 0.6.0,
-  and 0.6.0 keeps only `.pos` features, dropping the mobile-base (`x.vel`, …) and
-  `use_velocity` channels.
+- Requires **lerobot 0.7.0 or newer** (plugin 0.3.x). Plugin 0.2.x targets lerobot 0.6.1.
 - `action_mode="ee"` is **not supported**. Rollout keeps only `.pos` / `.vel` state and
   action features, and end-effector keys (`right_ee.x`, …) match neither — this is an
   upstream limitation that applies to LeRobot's own EE robots too.
@@ -303,8 +304,9 @@ earlier versions wrote 5 Hz to the robot's stored parameters.
 
 | Plugin version | LeRobot | Python | Notes |
 |----------------|---------|--------|-------|
-| 0.2.x | 0.6.1 | 3.12, 3.13 | Tested in CI. `lerobot-async-rby1` requires `<0.6.2`. |
-| 0.2.x | `main` (next release) | 3.12 | Robot/teleop tested weekly in CI. `lerobot-async-rby1` is not supported (upstream removed the AsyncInference gRPC service). |
+| 0.3.x | 0.7.0 | 3.12, 3.13 | Tested in CI. Remote inference via lerobot's `lerobot-policy-server` / `--inference.type=remote`. |
+| 0.3.x | `main` (next release) | 3.12 | Robot/teleop tested weekly in CI. |
+| 0.2.x | 0.6.1 | 3.12, 3.13 | Legacy: last version with the gRPC `lerobot-async-rby1` package. |
 | 0.1.x | 0.4 – 0.6.0 | ≥ 3.10 | Bare joint keys (no `.pos` suffix), unmaintained. |
 
 ### Versioning and releases

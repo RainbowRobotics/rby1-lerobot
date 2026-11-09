@@ -28,7 +28,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
         run: |
-          release='{"name":"0.6.1","spec":"lerobot[core_scripts,training]==0.6.1","async":true,"experimental":false}'
+          release='{"name":"0.7.0","spec":"lerobot[core_scripts,training]==0.7.0","async":false,"experimental":false}'
           main='{"name":"main","spec":"lerobot[core_scripts,training] @ git+https://github.com/huggingface/lerobot@main","async":false,"experimental":true}'
           if [ "$EVENT" = schedule ] || [ "$EVENT" = workflow_dispatch ]; then
             echo "lerobot=[$release,$main]" >> "$GITHUB_OUTPUT"
