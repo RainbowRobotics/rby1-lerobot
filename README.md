@@ -245,6 +245,53 @@ Limitations:
   the state dimension will not match a policy trained on such a dataset. `connect()` logs
   a warning when this is set.
 
+## Remote inference
+
+Run the policy on a GPU machine and the robot loop on the UPC with lerobot's
+remote inference (lerobot >= 0.7.0; it replaces the gRPC `lerobot-async-rby1`
+package of plugin 0.2.x). The server loads a LeRobot checkpoint and admits one
+client whose feature names, shapes and `semantics` string match the deployment
+exactly, so generate the server config from the training dataset instead of
+writing it by hand:
+
+```bash
+# 1. Inference machine (GPU)
+pip install 'lerobot[core_scripts,remote]==0.7.0'
+pip install -e lerobot-robot-rby1            # registers robot_type "rby1"
+rby1-profile server-config --checkpoint <hf_user>/<policy> --out server.yaml
+#   --dataset <root or hf_user/dataset> if the checkpoint's train_config.json does not name it
+#   --semantics ... if the dataset has no RB-Y1 profile (default: the profile's semantics)
+lerobot-policy-server --config_path=server.yaml      # listens on tcp/0.0.0.0:7447
+
+# 2. Robot machine (UPC)
+pip install 'lerobot[core_scripts,remote]==0.7.0'    # plus the plugins as above
+lerobot-rollout \
+  --robot.type=rby1 --robot.address=192.168.30.1:50051 \
+  --robot.cameras='{...}' --robot.profile_in=<hf_user>/<dataset> \
+  --inference.type=remote --inference.endpoint=tcp/<inference-host>:7447 \
+  --inference.deployment=rby1 --inference.semantics=<semantics from server.yaml> \
+  --inference.mode=chunk --fps=30 --task="<task description>"
+```
+
+`rby1-profile server-config` prints the matching `lerobot-rollout` flags. The
+semantics string (e.g. `rby1-a-v12-radians-gripper01-v1`) is recorded in the
+dataset's robot profile, written into `server.yaml` and checked at admission, so
+a checkpoint trained on one robot configuration cannot be served to another.
+
+Notes:
+
+- RB-Y1 implements lerobot's command hold (`hold()`): when no fresh action is
+  available (network stall, server fault) the arms keep their last target and the
+  mobile base is stopped. This works in joint, EE and mobile-base configurations,
+  which the generic position hold would reject.
+- The 0.6.x async client's `aggregate_fn` / `chunk_size_threshold` have no
+  counterpart; tune `--inference.chunk_merge={auto,append,aligned}`,
+  `--inference.blend_steps/--inference.blend_weight` and `--inference.refill_seconds`
+  instead. `--inference.encoding=jpeg` reduces camera bandwidth over Wi-Fi.
+- Only LeRobot-native policies can be served. The old GR00T / Pi0.5 ZMQ backends
+  (which spoke to the NVIDIA GR00T and openpi servers directly) were removed with
+  the async package; `git show v0.2.0:lerobot-async-rby1/` has them.
+
 ## Keeping robots consistent (robot profile)
 
 A policy behaves the same only if the robot that runs it is configured like

@@ -117,7 +117,7 @@ class Rby1(Robot):
     def __init__(self, config: Rby1Config) -> None:
         super().__init__(config)
         self._config = config
-        # Upstream rollout (lerobot > 0.6.1) only holds/retargets robots whose
+        # lerobot rollout (>= 0.7.0) only position-holds robots whose
         # actions are all position targets; the EE and mobile-base modes are not.
         self.supports_position_hold = (
             config.action_mode == "joint" and not config.use_mobile_base

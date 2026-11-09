@@ -11,6 +11,9 @@ Examples::
     # Compare two robots / datasets (files, dataset roots or repo ids)
     rby1-profile diff <hf_user>/<dataset> robot_b.json
 
+    # lerobot-policy-server config for a checkpoint (features from its dataset)
+    rby1-profile server-config --checkpoint <hf_user>/<policy> --out server.yaml
+
 ``diff`` exits with 1 when an error-level difference exists (the policy's
 observation/action layout or joint meaning would differ), else 0.
 """
@@ -114,6 +117,30 @@ def _diff(args: argparse.Namespace) -> int:
     return 1 if any(d.severity == rprofile.ERROR for d in diffs) else 0
 
 
+def _server_config(args: argparse.Namespace) -> int:
+    from .server_config import build_server_config, write_server_config
+
+    config = build_server_config(
+        checkpoint=args.checkpoint,
+        dataset=args.dataset,
+        deployment=args.deployment,
+        semantics=args.semantics,
+        device=args.device,
+        listen_endpoint=args.listen,
+        fps=args.fps,
+        n_action_steps=args.n_action_steps,
+    )
+    written = write_server_config(config, args.out)
+    print(f"Wrote {written}")
+    print(
+        "Run:   lerobot-policy-server --config_path=" + str(written) + "\n"
+        f"Then:  lerobot-rollout --robot.type=rby1 ... --inference.type=remote "
+        f"--inference.endpoint=tcp/<server-host>:{args.listen.rsplit(':', 1)[-1]} "
+        f"--inference.deployment={config['deployment']} --inference.semantics={config['semantics']}"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(prog="rby1-profile", description=__doc__.split("\n\n")[0])
@@ -132,12 +159,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("reference")
     p.add_argument("other")
 
+    p = sub.add_parser("server-config", help="write a lerobot-policy-server YAML for a checkpoint")
+    p.add_argument("--checkpoint", required=True, help="checkpoint directory or Hub model repo id")
+    p.add_argument("--dataset", help="dataset root or repo id (default: from the checkpoint's train_config.json)")
+    p.add_argument("--out", required=True)
+    p.add_argument("--deployment", default="rby1")
+    p.add_argument("--semantics", help="default: the dataset profile's semantics")
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--listen", default="tcp/0.0.0.0:7447")
+    p.add_argument("--fps", type=float, help="action fps (default: the dataset fps)")
+    p.add_argument("--n_action_steps", type=int)
+
     args, rest = parser.parse_known_args(argv)
     if args.command == "export":
         return _export(args, rest)
     if rest:
         parser.error(f"unrecognized arguments: {' '.join(rest)}")
-    return _attach(args) if args.command == "attach" else _diff(args)
+    if args.command == "attach":
+        return _attach(args)
+    if args.command == "server-config":
+        return _server_config(args)
+    return _diff(args)
 
 
 if __name__ == "__main__":
