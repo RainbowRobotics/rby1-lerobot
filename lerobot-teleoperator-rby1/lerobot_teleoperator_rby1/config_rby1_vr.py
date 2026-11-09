@@ -19,13 +19,22 @@ class Rby1VRConfig(TeleoperatorConfig):
 
     # ── Robot connection (read-only: state + FK for latching) ────────
     robot_address: str = "192.168.30.1:50051"
-    robot_model: str = "m"  # "a" | "m" | "ub"
+    # "a" | "m" | "auto" (detect from the robot, like the follower does)
+    robot_model: str = "auto"
 
     # ── Meta Quest UDP communication ─────────────────────────────────
     local_ip: str = "192.168.20.3"            # IP of this PC (Quest must reach it)
     local_port: int = 5005                     # UDP port we listen on
     meta_quest_ip: str = "192.168.20.2"       # Quest headset IP
     meta_quest_port: int = 6000                # Quest UDP port for the handshake
+    # Controllers count as absent (arm following released, base input zero,
+    # grippers held) when no packet arrived for this long (s).
+    vr_timeout_s: float = 0.2
+
+    # Record this teleoperator's config in the robot profile file (use the
+    # same path as --robot.profile_out, e.g. <dataset_root>/meta/rby1_profile.json).
+    # It is stored under "teleop" for reproducibility and never compared.
+    profile_out: str | None = None
 
     # ── Joint group selection ─────────────────────────────────────────
     # Must match the corresponding flags in Rby1Config (action_mode="ee")

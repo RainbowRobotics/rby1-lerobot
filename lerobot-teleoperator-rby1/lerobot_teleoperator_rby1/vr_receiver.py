@@ -4,7 +4,9 @@ The companion Meta Quest app streams JSON packets to ``local_ip:local_port``
 at high rate.  This module starts a background thread that decodes those
 packets, keeps the latest snapshot under a lock, and detects rising-edge
 button events (A / B / X / Y) so that consumers don't miss presses between
-ticks.
+ticks. Packets from hosts other than the Quest are ignored, and the snapshot
+reads as empty ("no controllers") once no packet has arrived for
+``stale_timeout_s``.
 
 Packet schema::
 
@@ -36,6 +38,7 @@ import json
 import logging
 import socket
 import threading
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -56,14 +59,20 @@ class VRReceiver:
         local_port: int,
         meta_quest_ip: str,
         meta_quest_port: int,
+        stale_timeout_s: float = 0.2,
     ) -> None:
         self.local_ip = local_ip
         self.local_port = local_port
         self.meta_quest_ip = meta_quest_ip
         self.meta_quest_port = meta_quest_port
+        self.stale_timeout_s = stale_timeout_s
 
         self._lock = threading.Lock()
         self._controller_state: dict[str, Any] = {}
+        self._last_packet_time: float | None = None  # time.monotonic()
+        self._stale_logged = False
+        # Previous primary/secondary button states, for rising-edge detection.
+        self._prev_buttons: dict[str, bool] = {}
 
         # Latched button events (set True on press, consumed once)
         self._event_right_a: bool = False
@@ -101,8 +110,23 @@ class VRReceiver:
     # ------------------------------------------------------------------ #
 
     def get_state(self) -> dict[str, Any]:
-        """Return a snapshot of the latest controller state dict."""
+        """Return a snapshot of the latest controller state dict.
+
+        Returns ``{}`` (no controllers) when the newest packet is older than
+        ``stale_timeout_s``, so a dropped Quest link releases arm following and
+        stops the base instead of replaying the last input forever.
+        """
         with self._lock:
+            last = self._last_packet_time
+            if last is None or time.monotonic() - last > self.stale_timeout_s:
+                if last is not None and not self._stale_logged:
+                    logger.warning(
+                        f"No Meta Quest packet for >{self.stale_timeout_s:.2f}s; "
+                        "treating controllers as absent."
+                    )
+                    self._stale_logged = True
+                return {}
+            self._stale_logged = False
             return dict(self._controller_state)
 
     def consume_button_events(self) -> dict[str, bool]:
@@ -151,13 +175,15 @@ class VRReceiver:
             )
             while self._running:
                 try:
-                    data, _ = srv.recvfrom(4096)
+                    data, (sender_ip, _) = srv.recvfrom(4096)
                 except socket.timeout:
                     continue
                 except Exception as exc:
                     logger.warning(f"UDP receive error: {exc}")
                     continue
 
+                if self.meta_quest_ip and sender_ip != self.meta_quest_ip:
+                    continue  # only accept controller data from the Quest
                 try:
                     parsed: dict = json.loads(data.decode("utf-8"))
                 except json.JSONDecodeError:
@@ -165,24 +191,19 @@ class VRReceiver:
 
                 with self._lock:
                     self._controller_state = parsed
+                    self._last_packet_time = time.monotonic()
                     self._parse_button_events(parsed)
 
     def _parse_button_events(self, state: dict) -> None:
-        """Latch edge-triggered button presses (call under self._lock)."""
+        """Latch rising-edge button presses (call under self._lock).
+
+        A held button produces one event, not one per packet.
+        """
         hands = state.get("hands", {})
-
-        left = hands.get("left", {})
-        if left:
-            btns = left.get("buttons", {})
-            if btns.get("primaryButton", False):
-                self._event_left_a = True
-            if btns.get("secondaryButton", False):
-                self._event_left_b = True
-
-        right = hands.get("right", {})
-        if right:
-            btns = right.get("buttons", {})
-            if btns.get("primaryButton", False):
-                self._event_right_a = True
-            if btns.get("secondaryButton", False):
-                self._event_right_b = True
+        for side, primary, secondary in (("left", "left_a", "left_b"), ("right", "right_a", "right_b")):
+            btns = hands.get(side, {}).get("buttons", {})
+            for button, event in (("primaryButton", primary), ("secondaryButton", secondary)):
+                pressed = bool(btns.get(button, False))
+                if pressed and not self._prev_buttons.get(event, False):
+                    setattr(self, f"_event_{event}", True)
+                self._prev_buttons[event] = pressed

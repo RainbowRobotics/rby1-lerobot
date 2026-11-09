@@ -32,6 +32,7 @@ Cartesian impedance solver.  This is the mode produced by the
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
@@ -44,6 +45,7 @@ from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnected
 
 from . import command_builders as cb
 from . import model_probe
+from . import profile as rprofile
 from .config_rby1 import (
     READY_HEAD,
     READY_LEFT,
@@ -53,25 +55,18 @@ from .config_rby1 import (
     ready_pose_for_version,
 )
 from .constants import (
-    ARM_DOF,
     BASE_VEL_NAMES,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
     POS_SUFFIX,
     RIGHT_ARM_NAMES,
     RIGHT_EE_NAMES,
-    TORSO_DOF,
     TORSO_EE_NAMES,
     TORSO_NAMES,
-    TOTAL_BODY_DOF,
 )
 from .gripper import Rby1Gripper
 
 logger = logging.getLogger(__name__)
-
-# Body-position slices within the 20-DOF [torso | right arm | left arm] vector.
-_RIGHT_ARM_BODY_SLICE = slice(TORSO_DOF, TORSO_DOF + ARM_DOF)          # 6:13
-_LEFT_ARM_BODY_SLICE = slice(TORSO_DOF + ARM_DOF, TOTAL_BODY_DOF)      # 13:20
 
 # Link indices for forward kinematics, matching the order of the link list
 # passed to ``make_state`` in connect() (EE-pose observations, EE mode only).
@@ -118,6 +113,11 @@ class Rby1(Robot):
     def __init__(self, config: Rby1Config) -> None:
         super().__init__(config)
         self._config = config
+        # Upstream rollout (lerobot > 0.6.1) only holds/retargets robots whose
+        # actions are all position targets; the EE and mobile-base modes are not.
+        self.supports_position_hold = (
+            config.action_mode == "joint" and not config.use_mobile_base
+        )
         self._robot = None
         self._model = None
         self._stream = None
@@ -134,6 +134,10 @@ class Rby1(Robot):
         self._last_ee_targets: cb.CartesianTargets | None = None
         self._null_right: np.ndarray = np.deg2rad(config.null_right_arm_deg)
         self._null_left: np.ndarray = np.deg2rad(config.null_left_arm_deg)
+        # Profile: reference loaded from profile_in, and functions that undo
+        # session-only core parameter changes on disconnect.
+        self._reference_profile: dict[str, Any] | None = None
+        self._restore_fns: list[Any] = []
         # EE mode: dynamics model + FK state for end-effector observations.
         self._dyn_robot: Any = None
         self._fk_state: Any = None
@@ -303,114 +307,164 @@ class Rby1(Robot):
             self._ready_left,
             self._ready_head,
         ) = ready_pose_for_version(self._resolved_version)
+        if self._resolved_model not in ("a", "m"):
+            raise RuntimeError(
+                f"RB-Y1 model '{self._resolved_model}' is not supported (only Model A and M)."
+            )
         logger.info(
             f"Using RB-Y1 model='{self._resolved_model}' "
             f"version='{self._resolved_version}'."
         )
 
-        # 1. Create and connect.
-        self._robot = rby.create_robot(self._config.address, self._resolved_model)
-        if not self._robot.connect():
-            raise ConnectionError(
-                f"Failed to connect to RB-Y1 at {self._config.address}."
+        # 0b. Compare against the reference profile before touching the robot:
+        #     feature / firmware-version mismatches fail here; with
+        #     profile_mode="apply" the behaviour settings are adopted.
+        self._check_reference_config()
+
+        # Any failure part-way (e.g. the gripper ping) rolls back what was
+        # already set up: control manager, tool-flange power, stream, cameras.
+        try:
+            # 1. Create and connect.
+            self._robot = rby.create_robot(self._config.address, self._resolved_model)
+            if not self._robot.connect():
+                raise ConnectionError(
+                    f"Failed to connect to RB-Y1 at {self._config.address}."
+                )
+
+            # 2. Power and servo on.
+            if not self._robot.is_power_on(".*"):
+                if not self._robot.power_on(".*"):
+                    raise RuntimeError("Failed to power on RB-Y1 actuators.")
+            if not self._robot.is_servo_on(".*"):
+                if not self._robot.servo_on(".*"):
+                    raise RuntimeError("Failed to servo on RB-Y1 motors.")
+
+            # 3. Clear faults and enable the control manager.
+            cm_state = self._robot.get_control_manager_state()
+            if cm_state.state in (
+                rby.ControlManagerState.State.MajorFault,
+                rby.ControlManagerState.State.MinorFault,
+            ):
+                logger.warning(f"Clearing RB-Y1 control manager fault (state={cm_state.state}) ...")
+                if not self._robot.reset_fault_control_manager():
+                    logger.warning("reset_fault_control_manager() returned False.")
+            # EE mode runs the Cartesian impedance solver at teleop speeds and
+            # needs the unlimited mode (as the VR teleoperator previously used).
+            self._robot.enable_control_manager(
+                unlimited_mode_enabled=(self._config.action_mode == "ee")
             )
+            cm_state = self._robot.get_control_manager_state()
+            if cm_state.state != rby.ControlManagerState.State.Enabled:
+                raise RuntimeError(
+                    "RB-Y1 control manager is not Enabled after enable_control_manager() "
+                    f"(state={cm_state.state}); check the robot's fault log."
+                )
 
-        # 2. Power and servo on.
-        if not self._robot.is_power_on(".*"):
-            if not self._robot.power_on(".*"):
-                raise RuntimeError("Failed to power on RB-Y1 actuators.")
-        if not self._robot.is_servo_on(".*"):
-            if not self._robot.servo_on(".*"):
-                raise RuntimeError("Failed to servo on RB-Y1 motors.")
-
-        # 3. Clear faults and enable the control manager.
-        cm_state = self._robot.get_control_manager_state()
-        if cm_state.state in (
-            rby.ControlManagerState.State.MajorFault,
-            rby.ControlManagerState.State.MinorFault,
-        ):
-            logger.warning("Clearing RB-Y1 control manager fault ...")
-            self._robot.reset_fault_control_manager()
-        # EE mode runs the Cartesian impedance solver at teleop speeds and
-        # needs the unlimited mode (as the VR teleoperator previously used).
-        self._robot.enable_control_manager(
-            unlimited_mode_enabled=(self._config.action_mode == "ee")
-        )
-
-        # 4. Cache the model (joint index arrays) and URDF velocity / acceleration
-        #    limits from the dynamics model.
-        self._model = self._robot.model()
-        dyn_model = self._robot.get_dynamics()
-        dyn_state = dyn_model.make_state([], self._model.robot_joint_names)
-        self._max_qdot = dyn_model.get_limit_qdot_upper(dyn_state)
-        self._max_qddot = dyn_model.get_limit_qddot_upper(dyn_state)
-        # The wrist (last arm joint) needs extra velocity headroom in impedance mode.
-        if self._config.use_impedance:
-            scale = self._config.wrist_velocity_limit_scale
-            self._max_qdot[self._model.right_arm_idx[-1]] *= scale
-            self._max_qdot[self._model.left_arm_idx[-1]] *= scale
-        logger.info(
-            f"URDF limits loaded: max_qdot range=[{self._max_qdot.min():.2f}, "
-            f"{self._max_qdot.max():.2f}] rad/s, max_qddot range=["
-            f"{self._max_qddot.min():.2f}, {self._max_qddot.max():.2f}] rad/s^2 "
-            f"(acc scale={self._config.acceleration_limit_scale}x)"
-        )
-
-        # 4b. In EE mode, prepare a forward-kinematics state so the observation
-        #     can report the end-effector pose of each group.
-        if self._config.action_mode == "ee":
-            self._dyn_robot = dyn_model
-            self._fk_state = dyn_model.make_state(
-                _FK_LINKS, self._model.robot_joint_names
-            )
-
-        # 5. Open the command stream (priority=1). This stream owns the arms,
-        #    the gripper and the mobile base for both teleoperation (the
-        #    teleoperator only produces actions) and replay / policy inference.
-        self._stream = self._robot.create_command_stream(priority=1)
-        self._last_ee_targets = None
-
-        # 6. Power the tool flanges and home the Dynamixel grippers.
-        if self._config.use_gripper:
-            self._robot.set_tool_flange_output_voltage("right", 12)
-            self._robot.set_tool_flange_output_voltage("left", 12)
-            time.sleep(0.5)  # allow the capacitors to stabilise
-            self._gripper = Rby1Gripper()
-            self._gripper.connect()
-        else:
+            # 4. Cache the model (joint index arrays) and URDF velocity / acceleration
+            #    limits from the dynamics model.
+            self._model = self._robot.model()
+            dyn_model = self._robot.get_dynamics()
+            dyn_state = dyn_model.make_state([], self._model.robot_joint_names)
+            self._max_qdot = dyn_model.get_limit_qdot_upper(dyn_state)
+            self._max_qddot = dyn_model.get_limit_qddot_upper(dyn_state)
+            # The wrist (last arm joint) needs extra velocity headroom in impedance mode.
+            if self._config.use_impedance:
+                scale = self._config.wrist_velocity_limit_scale
+                self._max_qdot[self._model.right_arm_idx[-1]] *= scale
+                self._max_qdot[self._model.left_arm_idx[-1]] *= scale
             logger.info(
-                "Gripper disabled (use_gripper=False) - skipping flange power and gripper init."
+                f"URDF limits loaded: max_qdot range=[{self._max_qdot.min():.2f}, "
+                f"{self._max_qdot.max():.2f}] rad/s, max_qddot range=["
+                f"{self._max_qddot.min():.2f}, {self._max_qddot.max():.2f}] rad/s^2 "
+                f"(acc scale={self._config.acceleration_limit_scale}x)"
             )
 
-        # 7. Connect cameras.
-        for cam in self.cameras.values():
-            cam.connect()
+            # 4b. In EE mode, prepare a forward-kinematics state so the observation
+            #     can report the end-effector pose of each group.
+            if self._config.action_mode == "ee":
+                self._dyn_robot = dyn_model
+                self._fk_state = dyn_model.make_state(
+                    _FK_LINKS, self._model.robot_joint_names
+                )
 
-        self._is_connected = True
-        self.configure()
-        logger.info(f"{self} connected.")
+            # 5. Open the command stream (priority=1). This stream owns the arms,
+            #    the gripper and the mobile base for both teleoperation (the
+            #    teleoperator only produces actions) and replay / policy inference.
+            self._stream = self._robot.create_command_stream(priority=1)
+            self._last_ee_targets = None
 
-        # 8. Move to the ready pose before inference begins.
-        if self._config.move_to_ready_on_connect:
-            self.move_to_ready_pose()
+            # 6. Power the tool flanges and home the Dynamixel grippers.
+            if self._config.use_gripper:
+                self._robot.set_tool_flange_output_voltage("right", 12)
+                self._robot.set_tool_flange_output_voltage("left", 12)
+                time.sleep(0.5)  # allow the capacitors to stabilise
+                self._gripper = Rby1Gripper()
+                self._gripper.connect()
+            else:
+                logger.info(
+                    "Gripper disabled (use_gripper=False) - skipping flange power and gripper init."
+                )
+
+            # 7. Connect cameras.
+            for cam in self.cameras.values():
+                cam.connect()
+
+            self._is_connected = True
+            self.configure()
+            self._snapshot_profile()
+            logger.info(f"{self} connected.")
+
+            # 8. Move to the ready pose before inference begins.
+            if self._config.move_to_ready_on_connect:
+                self.move_to_ready_pose()
+        except BaseException:
+            logger.error("RB-Y1 connect failed; releasing what was set up.")
+            self._teardown()
+            raise
 
     def disconnect(self) -> None:
         if not self.is_connected:
             return
+        self._teardown()
+        logger.info(f"{self} disconnected.")
+
+    def _teardown(self) -> None:
+        """Release everything connect() set up; each step is best-effort so one
+        failure does not leave the control manager enabled or the flanges on."""
+
+        def attempt(step: str, fn) -> None:
+            try:
+                fn()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"RB-Y1 disconnect: {step} failed: {exc}")
 
         if self._gripper is not None:
-            self._gripper.disconnect()
+            attempt("gripper disconnect", self._gripper.disconnect)
             self._gripper = None
 
         for cam in self.cameras.values():
-            cam.disconnect()
+            if cam.is_connected:
+                attempt(f"camera {cam} disconnect", cam.disconnect)
+
+        # Undo session-only core parameter changes (profile apply, cutoff).
+        for restore in reversed(self._restore_fns):
+            attempt("restore core parameters", restore)
+        self._restore_fns = []
 
         if self._robot is not None:
-            self._robot.disable_control_manager()
+            # Cancel the command stream before disabling the control manager;
+            # disabling with a live stream leaves the manager in a fault state
+            # that the next session then has to clear.
+            if self._stream is not None:
+                attempt("cancel command stream", self._stream.cancel)
+            attempt("disable control manager", self._robot.disable_control_manager)
             if self._config.use_gripper:
-                self._robot.set_tool_flange_output_voltage("right", 0)
-                self._robot.set_tool_flange_output_voltage("left", 0)
-            self._robot.disconnect()
+                for side in ("right", "left"):
+                    attempt(
+                        f"{side} tool-flange power off",
+                        lambda side=side: self._robot.set_tool_flange_output_voltage(side, 0),
+                    )
+            attempt("robot disconnect", self._robot.disconnect)
             self._robot = None
 
         self._model = None
@@ -424,7 +478,6 @@ class Rby1(Robot):
         self._fk_state = None
         self._resolved_model = None
         self._resolved_version = None
-        logger.info(f"{self} disconnected.")
 
     # ------------------------------------------------------------------ #
     #  Calibration / configuration                                         #
@@ -437,25 +490,83 @@ class Rby1(Robot):
     def configure(self) -> None:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
-        # Low-pass filter on joint position commands to reduce jitter.
-        self._robot.set_parameter("joint_position_command.cutoff_frequency", "5")
-        logger.info("RB-Y1 configured: cutoff_frequency=5 Hz.")
+        # Low-pass filter on joint position commands to reduce jitter. Set for
+        # this session only (write_db=False) and restored on disconnect, so the
+        # robot's stored value is left alone.
+        name = "joint_position_command.cutoff_frequency"
+        cutoff = float(self._config.joint_position_cutoff_frequency)
+        previous = self._robot.get_parameter(name)
+        if self._robot.set_parameter(name, json.dumps(cutoff), write_db=False):
+            self._restore_fns.append(
+                lambda: self._robot.set_parameter(name, previous, write_db=False)
+            )
+            logger.info(f"RB-Y1 configured: {name}={cutoff:g} Hz (was {previous}).")
+        else:
+            logger.warning(f"RB-Y1 rejected {name}={cutoff:g}.")
 
-    def reset(self) -> None:
-        """Return the enabled arms to the ready pose between record episodes.
+    # ------------------------------------------------------------------ #
+    #  Robot profile                                                       #
+    # ------------------------------------------------------------------ #
 
-        Called by ``lerobot-record``; mirrors ``unitree_g1.reset()``.  Arms whose
-        ``reset_*_arm_on_record`` flag is False keep their current position.
-        """
-        if (
-            not self._config.reset_right_arm_on_record
-            and not self._config.reset_left_arm_on_record
-        ):
-            logger.info("Record reset disabled for both arms; keeping current robot pose.")
+    def _check_reference_config(self) -> None:
+        """Compare the config with profile_in before connecting (feature errors fail)."""
+        cfg = self._config
+        self._reference_profile = None
+        if not cfg.profile_in or cfg.profile_mode == "off":
             return
+        path = rprofile.resolve_profile_source(cfg.profile_in)
+        ref = rprofile.load_profile(path)
+        self._reference_profile = ref
+        current = rprofile.build_profile(
+            cfg,
+            robot={"model": self._resolved_model, "version": self._resolved_version},
+            version=self._resolved_version,
+        )
+        diffs = [
+            d for d in rprofile.diff_profiles(ref, current)
+            if d.key.startswith(("robot_config", "robot.model", "robot.version"))
+        ]
+        errors = [d for d in diffs if d.severity == rprofile.ERROR]
+        if errors:
+            raise ValueError(
+                f"RB-Y1 config does not match the profile {path} (the policy's observation/"
+                f"action layout or joint meaning would differ):\n{rprofile.format_diffs(errors)}"
+            )
+        if cfg.profile_mode == "apply":
+            changed = rprofile.apply_robot_config(cfg, ref)
+            if changed:
+                logger.warning(f"profile apply: config fields taken from {path}: {', '.join(changed)}")
+                self._null_right = np.deg2rad(cfg.null_right_arm_deg)
+                self._null_left = np.deg2rad(cfg.null_left_arm_deg)
+        elif diffs:
+            logger.warning(f"RB-Y1 config differs from the profile {path}:\n{rprofile.format_diffs(diffs)}")
 
-        body_position, head_position = self._build_record_reset_targets()
-        self.move_to_ready_pose(body_position=body_position, head_position=head_position)
+    def _snapshot_profile(self) -> None:
+        """Compare the live robot with profile_in, apply core parameters, write profile_out."""
+        cfg = self._config
+        live_params = rprofile.read_core_parameters(self._robot)
+        ref = self._reference_profile
+        if ref is not None and cfg.profile_mode == "apply":
+            self._restore_fns.append(rprofile.apply_core_parameters(self._robot, ref, live_params))
+            live_params = rprofile.read_core_parameters(self._robot)
+        current = rprofile.build_profile(
+            cfg,
+            robot=rprofile.read_robot_section(self._robot, self._resolved_model, self._resolved_version),
+            core_parameters=live_params,
+            version=self._resolved_version,
+        )
+        if ref is not None:
+            diffs = [
+                d for d in rprofile.diff_profiles(ref, current)
+                if not d.key.startswith("robot_config")
+            ]
+            if diffs:
+                logger.warning(f"RB-Y1 robot differs from the reference profile:\n{rprofile.format_diffs(diffs)}")
+            else:
+                logger.info("RB-Y1 robot matches the reference profile.")
+        out = cfg.profile_out or rprofile.default_profile_path()
+        written = rprofile.write_profile(out, current, force=cfg.profile_force)
+        logger.info(f"RB-Y1 profile written to {written}.")
 
     def move_to_ready_pose(
         self,
@@ -495,8 +606,7 @@ class Rby1(Robot):
                 time.sleep(1.0)
 
             if not self._robot.wait_for_control_ready(1000):
-                logger.error("wait_for_control_ready timed out - skipping ready pose motion.")
-                return
+                raise RuntimeError("wait_for_control_ready timed out")
 
             target_body = (
                 self._ready_body if body_position is None
@@ -518,34 +628,13 @@ class Rby1(Robot):
             # robot likely moved away from the previously commanded target).
             self._stream = self._robot.create_command_stream(priority=1)
             self._last_ee_targets = None
+            # Re-arm the startup ramp: the next teleop/policy target can be far
+            # from the ready pose.
+            self._action_start_time = None
         except Exception as exc:
-            logger.error(f"move_to_ready_pose error: {exc}")
-
-    def _build_record_reset_targets(self) -> tuple[np.ndarray, np.ndarray]:
-        """Build (body, head) reset targets from the current state.
-
-        Enabled arms are overwritten with the ready pose; disabled arms and the
-        torso keep their measured positions.
-        """
-        state = self._robot.get_state()
-        position = np.asarray(state.position, dtype=np.float64)
-        model = self._model
-
-        body_position = np.concatenate(
-            [
-                position[model.torso_idx],
-                position[model.right_arm_idx],
-                position[model.left_arm_idx],
-            ]
-        ).copy()
-        head_position = np.asarray(position[model.head_idx], dtype=np.float64).copy()
-
-        if self._config.reset_right_arm_on_record:
-            body_position[_RIGHT_ARM_BODY_SLICE] = self._ready_right
-        if self._config.reset_left_arm_on_record:
-            body_position[_LEFT_ARM_BODY_SLICE] = self._ready_left
-
-        return body_position, head_position
+            # Callers (connect, scripts) must not carry on as if the robot were
+            # at the ready pose.
+            raise RuntimeError(f"RB-Y1 move_to_ready_pose failed: {exc}") from exc
 
     # ------------------------------------------------------------------ #
     #  Observation                                                         #
@@ -645,15 +734,36 @@ class Rby1(Robot):
         except ImportError as e:
             raise ImportError("rby1_sdk is required.") from e
 
+        try:
+            sent = self._dispatch_action(rby, action)
+        except RuntimeError as e:
+            if "expired" not in str(e).lower():
+                raise
+            # The stream expires when the command it carries has ended on the
+            # robot, e.g. the base velocity command finished after its short
+            # hold time during a stall in the action stream. Retry once on a
+            # fresh stream; a second failure is fatal.
+            logger.warning(f"Command stream expired ({e}); re-creating it and retrying once.")
+            self._stream = self._robot.create_command_stream(priority=1)
+            self._last_ee_targets = None  # force a reference reset on the retry
+            sent = self._dispatch_action(rby, action)
+        sent.update(self._send_gripper_action(action))
+        if self._config.use_mobile_base:
+            linear, angular = self._base_velocity_from_action(action)
+            sent.update({"x.vel": float(linear[0]), "y.vel": float(linear[1]), "theta.vel": angular})
+        return sent
+
+    def _dispatch_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
         if self._config.action_mode == "ee":
             self._send_ee_action(rby, action)
-        else:
-            self._send_joint_action(rby, action)
-        self._send_gripper_action(action)
-        return action
+            return {key: action[key] for key in self._motors_ft}
+        return self._send_joint_action(rby, action)
 
-    def _send_joint_action(self, rby: Any, action: dict[str, Any]) -> None:
-        """Execute a joint-position action (``action_mode="joint"``)."""
+    def _send_joint_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
+        """Execute a joint-position action (``action_mode="joint"``).
+
+        Returns the arm targets actually commanded (clipped to joint limits).
+        """
         # Start the startup ramp on the first command (after connect() and the
         # ready-pose motion are complete).
         now = time.monotonic()
@@ -690,13 +800,13 @@ class Rby1(Robot):
         if has_body:
             cbc.set_body_command(body)
         if self._config.use_mobile_base:
-            linear, angular = self._base_velocity_from_action(action)
-            cbc.set_mobility_command(
-                cb.build_mobility_command(rby, linear, angular, minimum_time)
-            )
+            # The base does not follow the arm startup ramp: a stop must take
+            # effect at once, not after up to startup_min_time.
+            cbc.set_mobility_command(self._mobility_command(rby, action, self._config.normal_min_time))
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
         )
+        return cb.clipped_arm_action(self._config, action)
 
     def _send_ee_action(self, rby: Any, action: dict[str, Any]) -> None:
         """Execute an end-effector pose action (``action_mode="ee"``).
@@ -723,19 +833,13 @@ class Rby1(Robot):
                 f"right={reset.right_arm}, left={reset.left_arm})."
             )
 
-        if cfg.ee_whole_body:
-            body = cb.build_whole_body_command(rby, cfg, targets, reset)
-        else:
-            body = cb.build_per_component_command(
-                rby, cfg, targets, reset, self._null_right, self._null_left
-            )
+        body = cb.build_ee_command(
+            rby, cfg, targets, reset, self._null_right, self._null_left
+        )
         cbc = rby.ComponentBasedCommandBuilder().set_body_command(body)
         if cfg.use_mobile_base:
-            linear, angular = self._base_velocity_from_action(action)
             cbc.set_mobility_command(
-                cb.build_mobility_command(
-                    rby, linear, angular, cfg.ee_dt * cfg.min_time_factor_wb
-                )
+                self._mobility_command(rby, action, cfg.normal_min_time)
             )
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
@@ -771,36 +875,55 @@ class Rby1(Robot):
             or angle > cfg.ee_reset_rotation_threshold
         )
 
-    def _send_gripper_action(self, action: dict[str, Any]) -> None:
+    def _send_gripper_action(self, action: dict[str, Any]) -> dict[str, float]:
         """Drive the Dynamixel grippers from the action dict.
 
         Action uses the dataset convention (1=open, 0=closed);
         Rby1Gripper.set_positions() expects the hardware convention
-        (0=open, 1=closed).
+        (0=open, 1=closed). A gripper whose key is missing from the action
+        holds its current position. Returns the commanded targets in the
+        dataset convention, keyed like ``action_features``.
         """
         if not self._config.use_gripper or self._gripper is None:
-            return
-        current_gripper = self._gripper.get_positions()
-        gripper_target = np.array(
-            [
-                1.0 - action.get(f"right_gripper_0{POS_SUFFIX}", 1.0)
-                if self._config.use_right_arm
-                else current_gripper[0],
-                1.0 - action.get(f"left_gripper_0{POS_SUFFIX}", 1.0)
-                if self._config.use_left_arm
-                else current_gripper[1],
-            ]
-        )
+            return {}
+        current_gripper = np.asarray(self._gripper.get_positions(), dtype=np.float64)
+        gripper_target = current_gripper.copy()
+        sent: dict[str, float] = {}
+        for idx, (side, enabled) in enumerate(
+            (("right", self._config.use_right_arm), ("left", self._config.use_left_arm))
+        ):
+            if not enabled:
+                continue
+            key = f"{side}_gripper_0{POS_SUFFIX}"
+            if key in action:
+                gripper_target[idx] = 1.0 - float(action[key])
+            sent[key] = float(1.0 - gripper_target[idx])
         self._gripper.set_positions(gripper_target)
+        return sent
 
-    @staticmethod
-    def _base_velocity_from_action(action: dict[str, Any]) -> tuple[np.ndarray, float]:
-        """Extract the SE2 base command (linear xy, yaw rate) from an action."""
+    def _base_velocity_from_action(self, action: dict[str, Any]) -> tuple[np.ndarray, float]:
+        """SE2 base command (linear xy, yaw rate) from an action, clamped to the limits."""
+        cfg = self._config
         linear = np.array(
             [action.get("x.vel", 0.0), action.get("y.vel", 0.0)], dtype=np.float64
         )
-        angular = float(action.get("theta.vel", 0.0))
+        speed = float(np.linalg.norm(linear))
+        if speed > cfg.mobile_base_max_linear_velocity:
+            linear *= cfg.mobile_base_max_linear_velocity / speed
+        angular = float(
+            np.clip(
+                action.get("theta.vel", 0.0),
+                -cfg.mobile_base_max_angular_velocity,
+                cfg.mobile_base_max_angular_velocity,
+            )
+        )
         return linear, angular
+
+    def _mobility_command(self, rby: Any, action: dict[str, Any], minimum_time: float) -> Any:
+        linear, angular = self._base_velocity_from_action(action)
+        return cb.build_mobility_command(
+            rby, linear, angular, minimum_time, hold_time=self._config.mobile_base_hold_time
+        )
 
 
     def _ramp_minimum_time(self, now: float) -> float:

@@ -23,16 +23,16 @@ pip install -e .   # this package
 
 ```bash
 # Policy server
-lerobot-policy-server --host=0.0.0.0 --port=8080
+rby1-policy-server --host=0.0.0.0 --port=8080
 
 # Robot client (gRPC)
-lerobot-robot-client --server_address=127.0.0.1:8080 --robot.type=rby1
+rby1-robot-client --server_address=127.0.0.1:8080 --robot.type=rby1
 
 # Robot client (GR00T ZMQ)
-lerobot-robot-client --backend=groot_zmq --robot.type=rby1 --server_address=127.0.0.1:5555
+rby1-robot-client --backend=groot_zmq --robot.type=rby1 --server_address=127.0.0.1:5555
 
 # Action replay
-lerobot-robot-replay --robot.type=rby1 --actions-file=actions.jsonl --fps=30
+rby1-robot-replay --robot.type=rby1 --actions_file=actions.jsonl --fps=30
 ```
 
 Running via `python -m lerobot_async_inference.robot_client` works the same way.

@@ -9,23 +9,20 @@ from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraCon
 
 from .constants import (
     ARM_DOF,
-    ARM_TARGET_GAINS_PC,
-    ARM_TARGET_GAINS_WB,
+    ARM_TARGET_GAINS,
     DEFAULT_LEFT_ARM_JOINT_LIMITS,
     DEFAULT_NULL_LEFT_DEG,
     DEFAULT_NULL_RIGHT_DEG,
     DEFAULT_RIGHT_ARM_JOINT_LIMITS,
     DEFAULT_TORSO_JOINT_LIMITS,
-    DEFAULT_WB_JOINT_LIMITS,
     JointLimits,
     TORSO_DOF,
-    TORSO_TARGET_GAINS_PC,
-    TORSO_TARGET_GAINS_WB,
+    TORSO_TARGET_GAINS,
 )
 
 # ---------------------------------------------------------------------------
 # Ready pose (radians) — a safe, known configuration the robot moves to on
-# connect and (optionally per-arm) between record episodes.
+# connect.
 #
 # RB-Y1 v1.2 and v1.3 differ in the joint configuration near the wrist, so each
 # version needs its own arm ready pose. The v1.3 pose zeroes the three wrist
@@ -88,13 +85,15 @@ class Rby1Config(RobotConfig):
     # gRPC address of the robot (host:port)
     address: str = "192.168.30.1:50051"
 
-    # Robot model variant: "a" (24-DOF), "m" (26-DOF mecanum), "ub" (18-DOF,
-    # no base), or "auto" to detect it from the robot via rby1-sdk on connect().
+    # Robot model variant: "a" (24-DOF), "m" (26-DOF mecanum), or "auto" to
+    # detect it from the robot via rby1-sdk on connect(). The upper-body "ub"
+    # model is not supported: the ready pose, torso keys and EE solver gains
+    # assume the 6-DOF torso of Model A/M.
     model: str = "auto"
 
     # Firmware version: "auto" to detect via rby1-sdk, or one of "1.0"/"1.1"/
     # "1.2"/"1.3". The version selects the ready pose set (v1.3 differs from
-    # earlier versions near the wrist). Ignored for the "ub" model.
+    # earlier versions near the wrist).
     version: str = "auto"
 
     # Timeout (seconds) for the model/version auto-detection probe connection.
@@ -138,12 +137,14 @@ class Rby1Config(RobotConfig):
     # ("a" or "m"). Leave False for upper-body-only setups.
     use_mobile_base: bool = False
 
-    # ── Record reset selection ────────────────────────────────────────
-    # When lerobot-record calls robot.reset() between episodes, only the
-    # enabled arms are moved back to the ready pose. Disabled arms keep
-    # their current joint positions.
-    reset_right_arm_on_record: bool = False
-    reset_left_arm_on_record: bool = False
+    # The base keeps the last commanded velocity for this long (s) after the
+    # action stream stops (e.g. while lerobot-record saves an episode), then
+    # decelerates to a stop. Keep it short: it is how far the base coasts.
+    mobile_base_hold_time: float = 0.5
+    # Base velocity commands are clamped to these limits (m/s for the x/y
+    # speed, rad/s for yaw). The defaults are the rby1_vr joystick maximum.
+    mobile_base_max_linear_velocity: float = 0.6
+    mobile_base_max_angular_velocity: float = 1.4
 
     # ── Impedance control ──────────────────────────────────────────────
     # When True, send_action uses JointImpedanceControlCommandBuilder
@@ -163,9 +164,13 @@ class Rby1Config(RobotConfig):
         default_factory=lambda: [500.0] * 6 + [40.0] * 7 + [40.0] * 7
     )
 
-    # Damping ratio applied to all joints [0.0, 1.0].
-    # 0.7 gives critical damping; lower values allow faster motion.
-    impedance_damping_ratio: float = 0.7
+    # Damping ratio zeta (> 0) applied to all joints. The RB-Y1 controller
+    # computes D = zeta * (sqrt(M) sqrt(K) + sqrt(K) sqrt(M)) from the mass
+    # matrix M and stiffness K, i.e. 2 * zeta * sqrt(m * k) per joint, so
+    # 1.0 is critical damping (no overshoot); values below 1.0 respond faster
+    # but overshoot (about 5 % at 0.7), values above 1.0 are overdamped.
+    # The same convention applies to every *_damping_ratio below.
+    impedance_damping_ratio: float = 1.0
 
     # ── Velocity / acceleration limits ─────────────────────────────────
     # Limits are read from the URDF dynamics model at connect() time.
@@ -185,6 +190,29 @@ class Rby1Config(RobotConfig):
     # Set False to skip the ready pose motion (e.g. during unit tests or
     # when the robot is already in a safe position).
     move_to_ready_on_connect: bool = True
+
+    # Low-pass cutoff (Hz) for joint position commands, set on the robot for
+    # the session by configure() (core parameter
+    # joint_position_command.cutoff_frequency; restored on disconnect).
+    joint_position_cutoff_frequency: float = 5.0
+
+    # ── Robot profile (dataset <-> inference consistency) ──────────────
+    # See lerobot_robot_rby1.profile and the README "Keeping robots consistent".
+    # profile_out : write the robot profile here on connect, e.g.
+    #               <dataset_root>/meta/rby1_profile.json while recording.
+    #               None -> ~/.cache/rby1_lerobot/profiles/<time>.json.
+    # profile_in  : reference profile to compare against on connect: a file,
+    #               a dataset root, or a Hugging Face dataset repo id.
+    # profile_mode: "check" (log differences; fail on feature / firmware
+    #               version mismatches), "apply" (also adopt the profile's
+    #               behaviour settings and core parameters for this session),
+    #               or "off".
+    # profile_force: when profile_out already holds a different profile, keep
+    #               it and write a time-stamped extra profile instead of failing.
+    profile_out: str | None = None
+    profile_in: str | None = None
+    profile_mode: str = "check"
+    profile_force: bool = False
 
     # ── Startup ramp ───────────────────────────────────────────────────
     # At the beginning of a teleop session the follower robot needs to
@@ -206,19 +234,16 @@ class Rby1Config(RobotConfig):
     # The fields below only apply when action_mode="ee".
     # ════════════════════════════════════════════════════════════════════
 
-    # Use a single whole-body Cartesian impedance solver for torso + arms.
-    # False → separate torso / right-arm / left-arm solvers (more stable).
-    ee_whole_body: bool = False
+    # The torso, right arm and left arm each run their own Cartesian
+    # impedance solver.
 
-    # Expected action period (s); Cartesian command minimum_time is
-    # ee_dt * min_time_factor_wb (whole-body / mobility) or
-    # ee_dt * min_time_factor_pc (per-component torso/arm).
+    # Expected action period (s); the torso / arm Cartesian commands use
+    # minimum_time = ee_dt * min_time_factor.
     ee_dt: float = 1 / 15
-    min_time_factor_wb: float = 1.01
-    min_time_factor_pc: float = 1.02
+    min_time_factor: float = 1.02
 
     # Cartesian commands keep holding for this long (s) if the stream stalls.
-    ee_hold_time: float = 30.0
+    ee_hold_time: float = 1.0
 
     # ── Reference reset (jump) detection ──────────────────────────────
     # When a new EE target jumps further than these thresholds from the
@@ -228,56 +253,42 @@ class Rby1Config(RobotConfig):
     ee_reset_position_threshold: float = 0.1   # metres
     ee_reset_rotation_threshold: float = 0.5   # radians
 
-    # ── Whole-body solver tuning (ee_whole_body=True) ──────────────────
-    # Stiffness / torque-limit arrays are laid out as
-    # [torso (6) | right arm (7) | left arm (7)].
-    wb_joint_stiffness: List[float] = field(
-        default_factory=lambda: [400.0] * 6 + [60.0] * 7 + [60.0] * 7
-    )
-    wb_joint_torque_limit: List[float] = field(
-        default_factory=lambda: [500.0] * 6 + [30.0] * 7 + [30.0] * 7
-    )
-    wb_joint_limits: JointLimits = field(
-        default_factory=lambda: dict(DEFAULT_WB_JOINT_LIMITS)
-    )
-
-    # ── Per-component solver tuning (ee_whole_body=False) ───────────────
+    # ── Torso / arm solver tuning ───────────────────────────────────────
     torso_stiffness: List[float] = field(default_factory=lambda: [1700.0] * 6)
     torso_torque_limit: List[float] = field(default_factory=lambda: [600.0] * 6)
-    torso_damping_ratio: float = 0.7
+    torso_damping_ratio: float = 1.0
     torso_joint_limits: JointLimits = field(
         default_factory=lambda: dict(DEFAULT_TORSO_JOINT_LIMITS)
     )
 
+    # Both arms share the same gains so left/right behave identically.
     right_arm_stiffness: List[float] = field(
-        default_factory=lambda: [90.0, 90.0, 90.0, 70.0, 70.0, 70.0, 70.0]
+        default_factory=lambda: [80.0, 80.0, 80.0, 60.0, 60.0, 60.0, 60.0]
     )
     right_arm_torque_limit: List[float] = field(
         default_factory=lambda: [40.0, 40.0, 40.0, 30.0, 30.0, 30.0, 30.0]
     )
-    right_arm_damping_ratio: float = 0.6
+    right_arm_damping_ratio: float = 1.0
     right_arm_joint_limits: JointLimits = field(
         default_factory=lambda: dict(DEFAULT_RIGHT_ARM_JOINT_LIMITS)
     )
 
     left_arm_stiffness: List[float] = field(
-        default_factory=lambda: [60.0, 60.0, 60.0, 50.0, 50.0, 50.0, 50.0]
+        default_factory=lambda: [80.0, 80.0, 80.0, 60.0, 60.0, 60.0, 60.0]
     )
     left_arm_torque_limit: List[float] = field(
         default_factory=lambda: [40.0, 40.0, 40.0, 30.0, 30.0, 30.0, 30.0]
     )
-    left_arm_damping_ratio: float = 0.4
+    left_arm_damping_ratio: float = 1.0
     left_arm_joint_limits: JointLimits = field(
         default_factory=lambda: dict(DEFAULT_LEFT_ARM_JOINT_LIMITS)
     )
 
     # ── Cartesian add_target gain tuples ─────────────────────────────
-    torso_target_gains_wb: Tuple[float, float, float, float] = TORSO_TARGET_GAINS_WB
-    torso_target_gains_pc: Tuple[float, float, float, float] = TORSO_TARGET_GAINS_PC
-    arm_target_gains_wb:   Tuple[float, float, float, float] = ARM_TARGET_GAINS_WB
-    arm_target_gains_pc:   Tuple[float, float, float, float] = ARM_TARGET_GAINS_PC
+    torso_target_gains: Tuple[float, float, float, float] = TORSO_TARGET_GAINS
+    arm_target_gains:   Tuple[float, float, float, float] = ARM_TARGET_GAINS
 
-    # ── Nullspace targets (per-component arm solvers) ─────────────────
+    # ── Nullspace targets (arm solvers) ───────────────────────────────
     null_right_arm_deg: List[float] = field(
         default_factory=lambda: list(DEFAULT_NULL_RIGHT_DEG)
     )
@@ -288,7 +299,7 @@ class Rby1Config(RobotConfig):
         default_factory=lambda: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]
     )
     nullspace_stiffness: float = 0.2
-    nullspace_damping_ratio: float = 0.3
+    nullspace_damping_ratio: float = 1.0
 
     # ------------------------------------------------------------------ #
 
@@ -298,20 +309,38 @@ class Rby1Config(RobotConfig):
             raise ValueError(
                 f'Rby1Config.action_mode must be "joint" or "ee", got "{self.action_mode}".'
             )
-        if self.model.strip().lower() not in ("a", "m", "ub", "auto"):
+        if self.profile_mode not in ("check", "apply", "off"):
             raise ValueError(
-                f'Rby1Config.model must be "a", "m", "ub" or "auto", got "{self.model}".'
+                f'Rby1Config.profile_mode must be "check", "apply" or "off", got "{self.profile_mode}".'
+            )
+        if not self.joint_position_cutoff_frequency > 0:
+            raise ValueError("Rby1Config.joint_position_cutoff_frequency must be > 0.")
+        if self.model.strip().lower() not in ("a", "m", "auto"):
+            raise ValueError(
+                f'Rby1Config.model must be "a", "m" or "auto", got "{self.model}" '
+                '(the upper-body "ub" model is not supported).'
             )
         if self.version.strip().lower() not in ("auto", "", "1.0", "1.1", "1.2", "1.3"):
             raise ValueError(
                 'Rby1Config.version must be "auto" or one of "1.0"/"1.1"/"1.2"/"1.3", '
                 f'got "{self.version}".'
             )
+        for name in (
+            "impedance_damping_ratio", "torso_damping_ratio",
+            "right_arm_damping_ratio", "left_arm_damping_ratio", "nullspace_damping_ratio",
+        ):
+            # The controller rejects commands with a non-positive damping ratio.
+            if not getattr(self, name) > 0:
+                raise ValueError(f"Rby1Config.{name} must be > 0, got {getattr(self, name)}.")
+        for name in (
+            "mobile_base_hold_time", "mobile_base_max_linear_velocity",
+            "mobile_base_max_angular_velocity", "ee_hold_time",
+        ):
+            if not getattr(self, name) > 0:
+                raise ValueError(f"Rby1Config.{name} must be > 0, got {getattr(self, name)}.")
         body_dof = TORSO_DOF + 2 * ARM_DOF
         self._check_len("impedance_stiffness", self.impedance_stiffness, body_dof)
         self._check_len("impedance_torque_limit", self.impedance_torque_limit, body_dof)
-        self._check_len("wb_joint_stiffness", self.wb_joint_stiffness, body_dof)
-        self._check_len("wb_joint_torque_limit", self.wb_joint_torque_limit, body_dof)
         self._check_len("torso_stiffness", self.torso_stiffness, TORSO_DOF)
         self._check_len("torso_torque_limit", self.torso_torque_limit, TORSO_DOF)
         self._check_len("right_arm_stiffness", self.right_arm_stiffness, ARM_DOF)

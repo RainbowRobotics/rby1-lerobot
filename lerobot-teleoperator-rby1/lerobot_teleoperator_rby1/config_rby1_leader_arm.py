@@ -50,19 +50,14 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # ── Joint group selection ─────────────────────────────────────────
     # Must match the corresponding flags in Rby1Config so that
     # action_features are consistent between teleoperator and robot.
-    use_torso: bool = False       # Leader arm has no torso DOFs
+    # The leader arm has no torso joints and the follower's joint-mode
+    # actions never include the torso, so this must stay False.
+    use_torso: bool = False
     use_right_arm: bool = True
     use_left_arm: bool = True
 
     # Enable gripper control via trigger buttons on the leader arm.
     use_gripper: bool = True
-
-    # ── Record reset selection ────────────────────────────────────────
-    # When lerobot-record calls teleop.reset() between episodes, only the
-    # enabled arms are moved back to the init pose. Disabled arms keep
-    # their current joint positions.
-    reset_right_arm_on_record: bool = False
-    reset_left_arm_on_record: bool = False
 
     # ── Initialisation trajectory ─────────────────────────────────────
     # Duration (seconds) for the smooth cosine interpolation from the
@@ -97,7 +92,10 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
         default_factory=lambda: [4.0, 4.0, 4.0, 4.0, 1.5, 1.5, 1.5] * 2
     )
 
-    # Viscous damping gain per joint.
+    # Viscous friction-compensation gain per joint (Nm per rad/s). The control
+    # loop adds +viscous_gain * qdot, i.e. torque in the direction of motion
+    # that cancels joint friction (as in rby1-sdk example 35). It is not
+    # damping: larger values make the arm feel lighter and eventually unstable.
     viscous_gain: List[float] = field(
         default_factory=lambda: [0.02, 0.02, 0.02, 0.02, 0.01, 0.01, 0.002] * 2
     )
@@ -125,9 +123,19 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # to reach the ready pose before returning from connect().
     startup_wait_time: float = 5.0
 
+    # Record this teleoperator's config in the robot profile file (use the
+    # same path as --robot.profile_out, e.g. <dataset_root>/meta/rby1_profile.json).
+    # It is stored under "teleop" for reproducibility and never compared.
+    profile_out: str | None = None
+
     # ------------------------------------------------------------------ #
 
     def __post_init__(self) -> None:
+        if self.use_torso:
+            raise ValueError(
+                "Rby1LeaderArmConfig.use_torso is not supported: the leader arm has no "
+                "torso joints and Rby1 joint-mode actions do not include the torso."
+            )
         version = self.version.strip()
         if version not in SUPPORTED_LEADER_VERSIONS:
             raise ValueError(

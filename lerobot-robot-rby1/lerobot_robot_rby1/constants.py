@@ -89,20 +89,11 @@ LEFT_ARM_Q_MAX = np.array(
 # EE action mode defaults (Cartesian impedance).
 # ---------------------------------------------------------------------------
 
-# Nullspace arm targets (degrees) used by the per-component Cartesian solver.
+# Nullspace arm targets (degrees) used by the EE arm solvers.
 DEFAULT_NULL_RIGHT_DEG = [40.0, -30.0, -5.0, -135.0, -10.0, 20.0,  40.0]
 DEFAULT_NULL_LEFT_DEG  = [40.0,  30.0, -5.0, -135.0,  10.0, 20.0, -40.0]
 
 # Joint limits enforced by the Cartesian impedance solvers (radians).
-DEFAULT_WB_JOINT_LIMITS: JointLimits = {
-    "right_arm_3": (-2.6, -0.5),
-    "right_arm_5": (0.2, 1.9),
-    "left_arm_3":  (-2.6, -0.5),
-    "left_arm_5":  (0.2, 1.9),
-    "torso_1":     (-0.523598776, 1.3),
-    "torso_2":     (-2.617993878, -0.2),
-}
-
 DEFAULT_TORSO_JOINT_LIMITS: JointLimits = {
     "torso_1": (-0.523598776, 1.6),
     "torso_2": (-2.617993878, -0.2),
@@ -111,13 +102,13 @@ DEFAULT_TORSO_JOINT_LIMITS: JointLimits = {
 DEFAULT_RIGHT_ARM_JOINT_LIMITS: JointLimits = {"right_arm_3": (-2.6, -0.5)}
 DEFAULT_LEFT_ARM_JOINT_LIMITS: JointLimits  = {"left_arm_3":  (-2.6, -0.5)}
 
-# Cartesian add_target gain tuples for rby1_sdk add_target(...):
-# (linear_acc_limit, linear_vel_limit, angular_acc_limit, angular_vel_limit).
+# Cartesian target limit tuples, passed positionally to rby1_sdk
+# CartesianImpedanceControlCommandBuilder.add_target(ref, link, T, ...):
+#   (linear_velocity_limit [m/s], angular_velocity_limit [rad/s],
+#    linear_acceleration_limit [m/s^2], angular_acceleration_limit [rad/s^2])
 _PI = math.pi
-TORSO_TARGET_GAINS_WB = (1.0, _PI * 0.5, 10.0, _PI * 20.0)
-TORSO_TARGET_GAINS_PC = (1.0, _PI * 0.5, 20.0, _PI * 40.0)
-ARM_TARGET_GAINS_WB   = (2.0, _PI * 2.0,  20.0, _PI * 80.0)
-ARM_TARGET_GAINS_PC   = (3.0, _PI * 2.0, 150.0, _PI * 80.0)
+TORSO_TARGET_GAINS = (1.0, _PI * 0.5, 20.0, _PI * 40.0)
+ARM_TARGET_GAINS   = (3.0, _PI * 2.0, 150.0, _PI * 80.0)
 
 # ---------------------------------------------------------------------------
 # Dynamixel gripper bus (two motors on /dev/rby1_gripper).
@@ -129,3 +120,4 @@ GRIPPER_IDS = [0, 1]
 GRIPPER_HOMING_TORQUE = 0.46     # Nm, applied during the homing sweeps
 GRIPPER_HOMING_STEPS = 30        # 0.1 s x 30 = 3 s per direction
 GRIPPER_POSITION_TORQUE = 0.46   # Nm, max torque in position mode
+GRIPPER_PING_TIMEOUT_S = 3.0     # wait for the motors to boot after flange power-on

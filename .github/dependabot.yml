@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Opens a PR when a new lerobot release is outside the pinned range, so CI
+  # runs the plugins against it before the pin is widened.
+  - package-ecosystem: pip
+    directories:
+      - /lerobot-robot-rby1
+      - /lerobot-teleoperator-rby1
+      - /lerobot-async-rby1
+    schedule:
+      interval: weekly
+    allow:
+      - dependency-name: lerobot
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

@@ -4,21 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lerobot_async_inference"
-version = "0.1.0"
+version = "0.2.0"
 description = "LeRobot async inference (gRPC / GR00T-ZMQ / Pi0.5-ZMQ) for RB-Y1"
 readme = "README.md"
 authors = [
   { name = "Rainbow Robotics" },
 ]
 license = { text = "Apache-2.0" }
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 classifiers = [
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "License :: OSI Approved :: Apache Software License",
   "Operating System :: OS Independent",
 ]
 dependencies = [
-  "lerobot>=0.5.2",
+  "lerobot>=0.6.1,<0.6.2",
   "grpcio>=1.71.0",
   "protobuf>=5.29.5",
   "pyzmq>=26.2.1",
@@ -28,10 +30,15 @@ dependencies = [
   "torch",
 ]
 
+[project.urls]
+Homepage = "https://github.com/RainbowRobotics/rby1-lerobot"
+Repository = "https://github.com/RainbowRobotics/rby1-lerobot"
+Issues = "https://github.com/RainbowRobotics/rby1-lerobot/issues"
+
 [project.scripts]
-lerobot-policy-server = "lerobot_async_inference.policy_server:serve"
-lerobot-robot-client = "lerobot_async_inference.robot_client:async_client"
-lerobot-robot-replay = "lerobot_async_inference.robot_replay:main"
+rby1-policy-server = "lerobot_async_inference.policy_server:serve"
+rby1-robot-client = "lerobot_async_inference.robot_client:async_client"
+rby1-robot-replay = "lerobot_async_inference.robot_replay:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
