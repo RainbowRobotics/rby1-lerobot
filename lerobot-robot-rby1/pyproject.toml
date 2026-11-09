@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lerobot_robot_rby1"
-version = "0.2.0"
+version = "0.3.0"
 description = "LeRobot RB-Y1 robot integration"
 readme = "README.md"
 authors = [
@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
   "numpy",
   "scipy",
-  "lerobot>=0.6.1,<0.7",
+  "lerobot>=0.7.0,<0.8",
   "rby1-sdk",
 ]
 

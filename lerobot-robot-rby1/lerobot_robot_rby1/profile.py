@@ -209,11 +209,26 @@ def _pid_gains(sdk_robot: Any) -> dict[str, Any]:
     return gains
 
 
+def default_semantics(model: str, version: str) -> str:
+    """The semantics tag RB-Y1 datasets, server configs and rollouts share.
+
+    lerobot's remote inference admits a client only when its semantics string
+    equals the deployment's; it names the units and conventions of the state /
+    action vectors (joint radians, gripper 0..1 open=1, base m/s and rad/s).
+    """
+    return f"rby1-{model}-v{version.replace('.', '')}-radians-gripper01-v1"
+
+
 def read_robot_section(sdk_robot: Any, model: str, version: str) -> dict[str, Any]:
     """Identity and model data of the connected robot (read-only calls)."""
     import rby1_sdk as rby
 
-    section: dict[str, Any] = {"model": model, "version": version, "sdk_version": getattr(rby, "__version__", None)}
+    section: dict[str, Any] = {
+        "model": model,
+        "version": version,
+        "semantics": default_semantics(model, version),
+        "sdk_version": getattr(rby, "__version__", None),
+    }
     try:
         info = sdk_robot.get_robot_info()
         section["core_version"] = getattr(info, "version", None)
@@ -331,7 +346,7 @@ def _severity(key: str) -> str | None:
         field = rest.split(".", 1)[0]
         if field == "version":
             return ERROR
-        if field in ("sdk_version", "core_version", "robot_version", "robot_model_name"):
+        if field in ("sdk_version", "core_version", "robot_version", "robot_model_name", "semantics"):
             return INFO
         return WARN  # model (A vs M), urdf_sha256, joint_limits, pid_gains
     if section == "core_parameters":

@@ -68,6 +68,25 @@ assert d['robot_config'] and d['core_parameters'] and d['teleop']['type']=='rby1
 check profile_matches grep -q "matches the reference profile" "$WORK/rollout.log"
 check profile_diff rby1-profile diff "$WORK/ds" "$PROFILE"
 
+# Remote inference (lerobot >= 0.7.0): serve the smoke checkpoint on loopback and run
+# lerobot-rollout --inference.type=remote against it. Skipped when lerobot[remote] is absent.
+if python -c "import zenoh, msgpack" 2>/dev/null; then
+  PORT=$(python -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1])")
+  check server_config rby1-profile server-config --checkpoint "$WORK/train/checkpoints/last/pretrained_model" \
+    --dataset "$WORK/ds" --out "$WORK/server.yaml" --device cpu --listen "tcp/127.0.0.1:$PORT"
+  SEMANTICS=$(python -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['semantics'])" "$WORK/server.yaml")
+  lerobot-policy-server --config_path="$WORK/server.yaml" >"$WORK/policy_server.log" 2>&1 &
+  SERVER_PID=$!
+  for _ in $(seq 1 60); do grep -q "Policy server ready" "$WORK/policy_server.log" && break; sleep 1; done
+  run rollout_remote 1 lerobot-rollout "${ROBOT[@]}" --robot.cameras="$CAM" \
+    --robot.profile_in="$WORK/ds" --inference.type=remote --inference.endpoint="tcp/127.0.0.1:$PORT" \
+    --inference.deployment=rby1 --inference.semantics="$SEMANTICS" --inference.mode=chunk \
+    --duration=4 --fps=30 --task="smoke task"
+  kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true
+else
+  echo "SKIP rollout_remote (lerobot[remote] not installed)"
+fi
+
 if ((${#failed[@]})); then
   echo "failed: ${failed[*]}"; exit 1
 fi

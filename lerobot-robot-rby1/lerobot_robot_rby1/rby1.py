@@ -109,11 +109,15 @@ class Rby1(Robot):
 
     config_class = Rby1Config
     name = "rby1"
+    # hold() re-sends the last applied targets (base velocity zeroed), so
+    # lerobot's rollout can hold the robot in every action mode, including EE
+    # and mobile-base configs that the generic position hold rejects.
+    supports_command_hold = True
 
     def __init__(self, config: Rby1Config) -> None:
         super().__init__(config)
         self._config = config
-        # Upstream rollout (lerobot > 0.6.1) only holds/retargets robots whose
+        # lerobot rollout (>= 0.7.0) only position-holds robots whose
         # actions are all position targets; the EE and mobile-base modes are not.
         self.supports_position_hold = (
             config.action_mode == "joint" and not config.use_mobile_base
@@ -132,6 +136,8 @@ class Rby1(Robot):
         # EE mode: last commanded Cartesian targets (None = next command
         # resets the impedance reference) and nullspace arm targets.
         self._last_ee_targets: cb.CartesianTargets | None = None
+        # The action send_action() last applied (as returned), for hold().
+        self._last_sent: dict[str, float] | None = None
         self._null_right: np.ndarray = np.deg2rad(config.null_right_arm_deg)
         self._null_left: np.ndarray = np.deg2rad(config.null_left_arm_deg)
         # Profile: reference loaded from profile_in, and functions that undo
@@ -474,6 +480,7 @@ class Rby1(Robot):
         self._is_connected = False
         self._action_start_time = None
         self._last_ee_targets = None
+        self._last_sent = None
         self._dyn_robot = None
         self._fk_state = None
         self._resolved_model = None
@@ -628,6 +635,7 @@ class Rby1(Robot):
             # robot likely moved away from the previously commanded target).
             self._stream = self._robot.create_command_stream(priority=1)
             self._last_ee_targets = None
+            self._last_sent = None
             # Re-arm the startup ramp: the next teleop/policy target can be far
             # from the ready pose.
             self._action_start_time = None
@@ -751,7 +759,32 @@ class Rby1(Robot):
         if self._config.use_mobile_base:
             linear, angular = self._base_velocity_from_action(action)
             sent.update({"x.vel": float(linear[0]), "y.vel": float(linear[1]), "theta.vel": angular})
+        self._last_sent = dict(sent)
         return sent
+
+    def hold(self) -> None:
+        """Keep the last commanded pose and stop the base (lerobot command hold).
+
+        Called by lerobot's rollout when no fresh action is available (remote
+        inference starvation, RTC hold). Re-sends the targets ``send_action``
+        last applied -- joint ``.pos`` / gripper targets, or the EE poses --
+        with every base velocity set to zero. Before the first action the
+        current joint positions are used, so the robot holds where it is.
+        """
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+        if self._last_sent is None:
+            # No action yet: hold the measured pose. The observation carries
+            # the joint .pos keys and, in EE mode, the FK end-effector poses
+            # under the same keys as the actions.
+            obs = self.get_observation()
+            target = {k: float(obs[k]) for k in self.action_features if k in obs}
+        else:
+            target = dict(self._last_sent)
+        for key in BASE_VEL_NAMES:
+            if key in self.action_features:
+                target[key] = 0.0
+        self.send_action(target)
 
     def _dispatch_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
         if self._config.action_mode == "ee":

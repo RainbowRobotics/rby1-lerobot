@@ -8,7 +8,7 @@
 ## Platform Requirements
 - **RB-Y1**: Currently, **only robots version 1.2 or lower are supported.** Support for version 1.3 is coming soon.
 - **Linux**: Tested on Ubuntu 22.04 (x86-64 and ARM64).
-- **Python 3.12+** and **LeRobot 0.6.1** (see [Compatibility](#compatibility)).
+- **Python 3.12+** and **LeRobot 0.7.0** (see [Compatibility](#compatibility)).
 - **Ethernet connection to RPC**: Ethernet connection to the RPC at `192.168.30.1` (or desired IP).
 - **Teleoperation device**: Leader arm connection via 4-Pin MOCO cable to the RB-Y1 UPC(VR-based teleoperation is not currently supported; this feature is coming soon).
 
@@ -60,11 +60,14 @@ conda activate lerobot
 ```bash
 # 0. Install the LeRobot CLI dependencies
 #    From PyPI:
-pip install 'lerobot[core_scripts]==0.6.1'
-#    or, inside a LeRobot source checkout (tag v0.6.1):
+pip install 'lerobot[core_scripts]==0.7.0'
+#    or, inside a LeRobot source checkout (tag v0.7.0):
 #    pip install -e ".[core_scripts]"
 #    Add the `training` extra (e.g. 'lerobot[core_scripts,training]') to train
 #    policies with lerobot-train on the same machine.
+#    LeRobot 0.7.0 installs CUDA 13 torch wheels on Linux (NVIDIA driver >= 580.65).
+#    On a machine without a GPU (e.g. the UPC) install CPU torch first, or with uv:
+#    UV_TORCH_BACKEND=cpu uv pip install 'lerobot[core_scripts]==0.7.0'
 
 # 1. Create a working directory and move into it
 #    (to avoid accidentally cloning inside the LeRobot package folder)
@@ -83,7 +86,7 @@ pip install -e lerobot-teleoperator-rby1
 
 # 5. (only for Intel RealSense cameras) Install pyrealsense2
 #    x86-64:
-pip install 'lerobot[intelrealsense]==0.6.1'
+pip install 'lerobot[intelrealsense]==0.7.0'
 #    RB-Y1's UPC (ARM64): the official pyrealsense2 package on PyPI does not
 #    support ARM64, so a pre-built wheel (ARM64, Python 3.12) is included here.
 pip install pyrealsense2-2.56.5-cp312-cp312-linux_aarch64.whl
@@ -234,15 +237,60 @@ lerobot-rollout \
 
 Limitations:
 
-- Requires **lerobot 0.6.1 or newer**. `lerobot-rollout` does not exist before 0.6.0,
-  and 0.6.0 keeps only `.pos` features, dropping the mobile-base (`x.vel`, …) and
-  `use_velocity` channels.
+- Requires **lerobot 0.7.0 or newer** (plugin 0.3.x). Plugin 0.2.x targets lerobot 0.6.1.
 - `action_mode="ee"` is **not supported**. Rollout keeps only `.pos` / `.vel` state and
   action features, and end-effector keys (`right_ee.x`, …) match neither — this is an
   upstream limitation that applies to LeRobot's own EE robots too.
 - `use_torque=True` datasets do not round-trip: rollout drops the `.torque` channels, so
   the state dimension will not match a policy trained on such a dataset. `connect()` logs
   a warning when this is set.
+
+## Remote inference
+
+Run the policy on a GPU machine and the robot loop on the UPC with lerobot's
+remote inference (lerobot >= 0.7.0; it replaces the gRPC `lerobot-async-rby1`
+package of plugin 0.2.x). The server loads a LeRobot checkpoint and admits one
+client whose feature names, shapes and `semantics` string match the deployment
+exactly, so generate the server config from the training dataset instead of
+writing it by hand:
+
+```bash
+# 1. Inference machine (GPU)
+pip install 'lerobot[core_scripts,remote]==0.7.0'
+pip install -e lerobot-robot-rby1            # registers robot_type "rby1"
+rby1-profile server-config --checkpoint <hf_user>/<policy> --out server.yaml
+#   --dataset <root or hf_user/dataset> if the checkpoint's train_config.json does not name it
+#   --semantics ... if the dataset has no RB-Y1 profile (default: the profile's semantics)
+lerobot-policy-server --config_path=server.yaml      # listens on tcp/0.0.0.0:7447
+
+# 2. Robot machine (UPC)
+pip install 'lerobot[core_scripts,remote]==0.7.0'    # plus the plugins as above
+lerobot-rollout \
+  --robot.type=rby1 --robot.address=192.168.30.1:50051 \
+  --robot.cameras='{...}' --robot.profile_in=<hf_user>/<dataset> \
+  --inference.type=remote --inference.endpoint=tcp/<inference-host>:7447 \
+  --inference.deployment=rby1 --inference.semantics=<semantics from server.yaml> \
+  --inference.mode=chunk --fps=30 --task="<task description>"
+```
+
+`rby1-profile server-config` prints the matching `lerobot-rollout` flags. The
+semantics string (e.g. `rby1-a-v12-radians-gripper01-v1`) is recorded in the
+dataset's robot profile, written into `server.yaml` and checked at admission, so
+a checkpoint trained on one robot configuration cannot be served to another.
+
+Notes:
+
+- RB-Y1 implements lerobot's command hold (`hold()`): when no fresh action is
+  available (network stall, server fault) the arms keep their last target and the
+  mobile base is stopped. This works in joint, EE and mobile-base configurations,
+  which the generic position hold would reject.
+- The 0.6.x async client's `aggregate_fn` / `chunk_size_threshold` have no
+  counterpart; tune `--inference.chunk_merge={auto,append,aligned}`,
+  `--inference.blend_steps/--inference.blend_weight` and `--inference.refill_seconds`
+  instead. `--inference.encoding=jpeg` reduces camera bandwidth over Wi-Fi.
+- Only LeRobot-native policies can be served. The old GR00T / Pi0.5 ZMQ backends
+  (which spoke to the NVIDIA GR00T and openpi servers directly) were removed with
+  the async package; `git show v0.2.0:lerobot-async-rby1/` has them.
 
 ## Keeping robots consistent (robot profile)
 
@@ -303,8 +351,9 @@ earlier versions wrote 5 Hz to the robot's stored parameters.
 
 | Plugin version | LeRobot | Python | Notes |
 |----------------|---------|--------|-------|
-| 0.2.x | 0.6.1 | 3.12, 3.13 | Tested in CI. `lerobot-async-rby1` requires `<0.6.2`. |
-| 0.2.x | `main` (next release) | 3.12 | Robot/teleop tested weekly in CI. `lerobot-async-rby1` is not supported (upstream removed the AsyncInference gRPC service). |
+| 0.3.x | 0.7.0 | 3.12, 3.13 | Tested in CI. Remote inference via lerobot's `lerobot-policy-server` / `--inference.type=remote`. |
+| 0.3.x | `main` (next release) | 3.12 | Robot/teleop tested weekly in CI. |
+| 0.2.x | 0.6.1 | 3.12, 3.13 | Legacy: last version with the gRPC `lerobot-async-rby1` package. |
 | 0.1.x | 0.4 – 0.6.0 | ≥ 3.10 | Bare joint keys (no `.pos` suffix), unmaintained. |
 
 ### Versioning and releases
@@ -332,8 +381,13 @@ Breaking changes in 0.2.0 (besides the `.pos` keys and the lerobot/Python pins):
 the `reset_*_arm_on_record` options and the EE whole-body solver (`ee_whole_body`,
 `wb_joint_*`, `*_target_gains_wb`, `min_time_factor_wb`) were removed, and
 `min_time_factor_pc` / `torso_target_gains_pc` / `arm_target_gains_pc` were renamed to
-`min_time_factor` / `torso_target_gains` / `arm_target_gains`; the async scripts are now
-`rby1-policy-server`, `rby1-robot-client` and `rby1-robot-replay`.
+`min_time_factor` / `torso_target_gains` / `arm_target_gains`.
+
+Breaking change in 0.3.0: the `lerobot-async-rby1` package (`rby1-policy-server`,
+`rby1-robot-client`, `rby1-robot-replay`, gRPC + GR00T/Pi0.5 ZMQ backends) was removed;
+lerobot 0.7.0 dropped the gRPC AsyncInference service it was built on. Use lerobot's remote
+inference instead (see [Remote inference](#remote-inference)). The old package is in the git
+history (`git show v0.2.0:lerobot-async-rby1/`).
 
 LeRobot commands that do not apply to RB-Y1:
 
@@ -348,7 +402,6 @@ LeRobot commands that do not apply to RB-Y1:
 |------|-------------|
 | [`lerobot-robot-rby1/`](lerobot-robot-rby1) | RB-Y1 follower robot plugin (`--robot.type=rby1`) |
 | [`lerobot-teleoperator-rby1/`](lerobot-teleoperator-rby1) | RB-Y1 teleoperator plugins (`--teleop.type=rby1_leader_arm`, `--teleop.type=rby1_vr`) |
-| [`lerobot-async-rby1/`](lerobot-async-rby1) | Async inference client/server (`rby1-policy-server`, `rby1-robot-client`, `rby1-robot-replay`) with gRPC, GR00T-ZMQ and Pi0.5-ZMQ backends |
 | [`tests/`](tests) | Hardware-free tests using a fake `rby1_sdk` |
 
 ## Resources

@@ -250,6 +250,7 @@ class _CommandStream:
             self._done = True
             raise RuntimeError("Command stream expired (fake)")
         self._robot.n_stream_commands += 1
+        self._robot.last_stream_command = cmd
         self._robot._apply(cmd)
         hold = _mobility_hold_time(cmd)
         self._mobility_deadline = None if hold is None else now + hold
@@ -328,6 +329,7 @@ class FakeRobot:
         self._ctrl = ControlManagerState.ControlState.Idle
         self.n_commands = 0
         self.n_stream_commands = 0
+        self.last_stream_command = None  # the last builder sent on a command stream
         _ROBOTS.append(self)
         # Stored (DB) values and session overrides set with write_db=False;
         # a new FakeRobot (= reconnect / core restart) starts from the DB again.
