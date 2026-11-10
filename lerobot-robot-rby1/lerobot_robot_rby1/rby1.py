@@ -4,10 +4,10 @@ Implements the :class:`lerobot.robots.robot.Robot` abstract class so the RB-Y1
 can be used with the standard LeRobot tools (data collection, teleoperation,
 imitation-learning inference).
 
-Joint layout (Model M, 26-DOF)::
+Joint layout (Model A and Model M; Model M shown, 26-DOF)::
 
     wheel_fr/fl/rr/rl   mobility            (excluded from obs/action)
-    torso_0 .. torso_5  torso, 6 DOF        (observation only by default)
+    torso_0 .. torso_5  torso, 6 DOF        (obs + action with use_torso)
     right_arm_0 .. _6   right arm, 7 DOF    (obs + action)
     left_arm_0 .. _6    left arm, 7 DOF     (obs + action)
     head_0, head_1      head                (excluded from obs/action)
@@ -46,6 +46,7 @@ from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnected
 from . import command_builders as cb
 from . import model_probe
 from . import profile as rprofile
+from .action_period import ActionPeriodEstimator
 from .config_rby1 import (
     READY_HEAD,
     READY_LEFT,
@@ -75,7 +76,7 @@ _IDX_BASE, _IDX_TORSO_5, _IDX_RIGHT_ARM_6, _IDX_LEFT_ARM_6 = range(4)
 
 
 class Rby1(Robot):
-    """LeRobot Robot implementation for the Rainbow Robotics RB-Y1 (Model M).
+    """LeRobot Robot implementation for the Rainbow Robotics RB-Y1 (Model A and M).
 
     Observation features
     --------------------
@@ -91,8 +92,8 @@ class Rby1(Robot):
 
     Action features
     ---------------
-    In joint mode, joint positions (radians) for the enabled arms plus the
-    enabled grippers; the torso is observation-only and is never commanded.
+    In joint mode, joint positions (radians) for the enabled groups -- the
+    torso when ``use_torso`` is set, then the arms -- plus the enabled grippers.
     In EE mode (``action_mode="ee"``), end-effector poses
     (``<group>_ee.x/y/z/wx/wy/wz``) for each enabled group — including the
     torso when ``use_torso`` is set — plus the enabled grippers.
@@ -126,6 +127,8 @@ class Rby1(Robot):
         self._model = None
         self._stream = None
         self._gripper: Rby1Gripper | None = None
+        self._q_lower: np.ndarray | None = None
+        self._q_upper: np.ndarray | None = None
         self._max_qdot: np.ndarray | None = None
         self._max_qddot: np.ndarray | None = None
         self._is_connected: bool = False
@@ -136,10 +139,13 @@ class Rby1(Robot):
         # EE mode: last commanded Cartesian targets (None = next command
         # resets the impedance reference) and nullspace arm targets.
         self._last_ee_targets: cb.CartesianTargets | None = None
+        # Measured interval between EE actions (see ee_auto_action_period).
+        self._ee_period = ActionPeriodEstimator(config.ee_action_period)
+        self._clock = time.monotonic
         # The action send_action() last applied (as returned), for hold().
         self._last_sent: dict[str, float] | None = None
-        self._null_right: np.ndarray = np.deg2rad(config.null_right_arm_deg)
-        self._null_left: np.ndarray = np.deg2rad(config.null_left_arm_deg)
+        self._null_right: np.ndarray = np.deg2rad(config.ee_null_right_arm_deg)
+        self._null_left: np.ndarray = np.deg2rad(config.ee_null_left_arm_deg)
         # Profile: reference loaded from profile_in, and functions that undo
         # session-only core parameter changes on disconnect.
         self._reference_profile: dict[str, Any] | None = None
@@ -190,7 +196,9 @@ class Rby1(Robot):
             if self._config.use_left_arm:
                 names += LEFT_EE_NAMES
             return {name: float for name in names}
-        # Joint mode: torso is observation-only and is intentionally excluded.
+        # Joint mode: same order as the observation (torso, right arm, left arm).
+        if self._config.use_torso:
+            names += TORSO_NAMES
         if self._config.use_right_arm:
             names += RIGHT_ARM_NAMES
         if self._config.use_left_arm:
@@ -366,23 +374,25 @@ class Rby1(Robot):
                     f"(state={cm_state.state}); check the robot's fault log."
                 )
 
-            # 4. Cache the model (joint index arrays) and URDF velocity / acceleration
-            #    limits from the dynamics model.
+            # 4. Cache the model (joint index arrays) and the URDF position /
+            #    velocity / acceleration limits from the dynamics model.
             self._model = self._robot.model()
             dyn_model = self._robot.get_dynamics()
             dyn_state = dyn_model.make_state([], self._model.robot_joint_names)
+            self._q_lower = np.asarray(dyn_model.get_limit_q_lower(dyn_state), dtype=np.float64)
+            self._q_upper = np.asarray(dyn_model.get_limit_q_upper(dyn_state), dtype=np.float64)
             self._max_qdot = dyn_model.get_limit_qdot_upper(dyn_state)
             self._max_qddot = dyn_model.get_limit_qddot_upper(dyn_state)
             # The wrist (last arm joint) needs extra velocity headroom in impedance mode.
-            if self._config.use_impedance:
-                scale = self._config.wrist_velocity_limit_scale
+            if self._config.use_joint_impedance:
+                scale = self._config.joint_impedance_wrist_velocity_limit_scale
                 self._max_qdot[self._model.right_arm_idx[-1]] *= scale
                 self._max_qdot[self._model.left_arm_idx[-1]] *= scale
             logger.info(
                 f"URDF limits loaded: max_qdot range=[{self._max_qdot.min():.2f}, "
                 f"{self._max_qdot.max():.2f}] rad/s, max_qddot range=["
                 f"{self._max_qddot.min():.2f}, {self._max_qddot.max():.2f}] rad/s^2 "
-                f"(acc scale={self._config.acceleration_limit_scale}x)"
+                f"(acc scale={self._config.joint_acceleration_limit_scale}x)"
             )
 
             # 4b. In EE mode, prepare a forward-kinematics state so the observation
@@ -475,6 +485,8 @@ class Rby1(Robot):
 
         self._model = None
         self._stream = None
+        self._q_lower = None
+        self._q_upper = None
         self._max_qdot = None
         self._max_qddot = None
         self._is_connected = False
@@ -485,95 +497,6 @@ class Rby1(Robot):
         self._fk_state = None
         self._resolved_model = None
         self._resolved_version = None
-
-    # ------------------------------------------------------------------ #
-    #  Calibration / configuration                                         #
-    # ------------------------------------------------------------------ #
-
-    def calibrate(self) -> None:
-        # RB-Y1 uses absolute encoders; no software calibration needed.
-        pass
-
-    def configure(self) -> None:
-        if not self.is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
-        # Low-pass filter on joint position commands to reduce jitter. Set for
-        # this session only (write_db=False) and restored on disconnect, so the
-        # robot's stored value is left alone.
-        name = "joint_position_command.cutoff_frequency"
-        cutoff = float(self._config.joint_position_cutoff_frequency)
-        previous = self._robot.get_parameter(name)
-        if self._robot.set_parameter(name, json.dumps(cutoff), write_db=False):
-            self._restore_fns.append(
-                lambda: self._robot.set_parameter(name, previous, write_db=False)
-            )
-            logger.info(f"RB-Y1 configured: {name}={cutoff:g} Hz (was {previous}).")
-        else:
-            logger.warning(f"RB-Y1 rejected {name}={cutoff:g}.")
-
-    # ------------------------------------------------------------------ #
-    #  Robot profile                                                       #
-    # ------------------------------------------------------------------ #
-
-    def _check_reference_config(self) -> None:
-        """Compare the config with profile_in before connecting (feature errors fail)."""
-        cfg = self._config
-        self._reference_profile = None
-        if not cfg.profile_in or cfg.profile_mode == "off":
-            return
-        path = rprofile.resolve_profile_source(cfg.profile_in)
-        ref = rprofile.load_profile(path)
-        self._reference_profile = ref
-        current = rprofile.build_profile(
-            cfg,
-            robot={"model": self._resolved_model, "version": self._resolved_version},
-            version=self._resolved_version,
-        )
-        diffs = [
-            d for d in rprofile.diff_profiles(ref, current)
-            if d.key.startswith(("robot_config", "robot.model", "robot.version"))
-        ]
-        errors = [d for d in diffs if d.severity == rprofile.ERROR]
-        if errors:
-            raise ValueError(
-                f"RB-Y1 config does not match the profile {path} (the policy's observation/"
-                f"action layout or joint meaning would differ):\n{rprofile.format_diffs(errors)}"
-            )
-        if cfg.profile_mode == "apply":
-            changed = rprofile.apply_robot_config(cfg, ref)
-            if changed:
-                logger.warning(f"profile apply: config fields taken from {path}: {', '.join(changed)}")
-                self._null_right = np.deg2rad(cfg.null_right_arm_deg)
-                self._null_left = np.deg2rad(cfg.null_left_arm_deg)
-        elif diffs:
-            logger.warning(f"RB-Y1 config differs from the profile {path}:\n{rprofile.format_diffs(diffs)}")
-
-    def _snapshot_profile(self) -> None:
-        """Compare the live robot with profile_in, apply core parameters, write profile_out."""
-        cfg = self._config
-        live_params = rprofile.read_core_parameters(self._robot)
-        ref = self._reference_profile
-        if ref is not None and cfg.profile_mode == "apply":
-            self._restore_fns.append(rprofile.apply_core_parameters(self._robot, ref, live_params))
-            live_params = rprofile.read_core_parameters(self._robot)
-        current = rprofile.build_profile(
-            cfg,
-            robot=rprofile.read_robot_section(self._robot, self._resolved_model, self._resolved_version),
-            core_parameters=live_params,
-            version=self._resolved_version,
-        )
-        if ref is not None:
-            diffs = [
-                d for d in rprofile.diff_profiles(ref, current)
-                if not d.key.startswith("robot_config")
-            ]
-            if diffs:
-                logger.warning(f"RB-Y1 robot differs from the reference profile:\n{rprofile.format_diffs(diffs)}")
-            else:
-                logger.info("RB-Y1 robot matches the reference profile.")
-        out = cfg.profile_out or rprofile.default_profile_path()
-        written = rprofile.write_profile(out, current, force=cfg.profile_force)
-        logger.info(f"RB-Y1 profile written to {written}.")
 
     def move_to_ready_pose(
         self,
@@ -643,6 +566,96 @@ class Rby1(Robot):
             # Callers (connect, scripts) must not carry on as if the robot were
             # at the ready pose.
             raise RuntimeError(f"RB-Y1 move_to_ready_pose failed: {exc}") from exc
+
+    # ------------------------------------------------------------------ #
+    #  Calibration / configuration                                         #
+    # ------------------------------------------------------------------ #
+
+    def calibrate(self) -> None:
+        # RB-Y1 uses absolute encoders; no software calibration needed.
+        pass
+
+    def configure(self) -> None:
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+        # Low-pass filter on joint position commands to reduce jitter. Set for
+        # this session only (write_db=False) and restored on disconnect, so the
+        # robot's stored value is left alone.
+        name = "joint_position_command.cutoff_frequency"
+        cutoff = float(self._config.joint_position_cutoff_frequency)
+        previous = self._robot.get_parameter(name)
+        if self._robot.set_parameter(name, json.dumps(cutoff), write_db=False):
+            self._restore_fns.append(
+                lambda: self._robot.set_parameter(name, previous, write_db=False)
+            )
+            logger.info(f"RB-Y1 configured: {name}={cutoff:g} Hz (was {previous}).")
+        else:
+            logger.warning(f"RB-Y1 rejected {name}={cutoff:g}.")
+
+    # ------------------------------------------------------------------ #
+    #  Robot profile                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _check_reference_config(self) -> None:
+        """Compare the config with profile_in before connecting (feature errors fail)."""
+        cfg = self._config
+        self._reference_profile = None
+        if not cfg.profile_in or cfg.profile_mode == "off":
+            return
+        path = rprofile.resolve_profile_source(cfg.profile_in)
+        ref = rprofile.load_profile(path)
+        self._reference_profile = ref
+        current = rprofile.build_profile(
+            cfg,
+            robot={"model": self._resolved_model, "version": self._resolved_version},
+            version=self._resolved_version,
+        )
+        diffs = [
+            d for d in rprofile.diff_profiles(ref, current)
+            if d.key.startswith(("robot_config", "robot.model", "robot.version"))
+        ]
+        errors = [d for d in diffs if d.severity == rprofile.ERROR]
+        if errors:
+            raise ValueError(
+                f"RB-Y1 config does not match the profile {path} (the policy's observation/"
+                f"action layout or joint meaning would differ):\n{rprofile.format_diffs(errors)}"
+            )
+        if cfg.profile_mode == "apply":
+            changed = rprofile.apply_robot_config(cfg, ref)
+            if changed:
+                logger.warning(f"profile apply: config fields taken from {path}: {', '.join(changed)}")
+                self._null_right = np.deg2rad(cfg.ee_null_right_arm_deg)
+                self._null_left = np.deg2rad(cfg.ee_null_left_arm_deg)
+                self._ee_period = ActionPeriodEstimator(cfg.ee_action_period)
+        elif diffs:
+            logger.warning(f"RB-Y1 config differs from the profile {path}:\n{rprofile.format_diffs(diffs)}")
+
+    def _snapshot_profile(self) -> None:
+        """Compare the live robot with profile_in, apply core parameters, write profile_out."""
+        cfg = self._config
+        live_params = rprofile.read_core_parameters(self._robot)
+        ref = self._reference_profile
+        if ref is not None and cfg.profile_mode == "apply":
+            self._restore_fns.append(rprofile.apply_core_parameters(self._robot, ref, live_params))
+            live_params = rprofile.read_core_parameters(self._robot)
+        current = rprofile.build_profile(
+            cfg,
+            robot=rprofile.read_robot_section(self._robot, self._resolved_model, self._resolved_version),
+            core_parameters=live_params,
+            version=self._resolved_version,
+        )
+        if ref is not None:
+            diffs = [
+                d for d in rprofile.diff_profiles(ref, current)
+                if not d.key.startswith("robot_config")
+            ]
+            if diffs:
+                logger.warning(f"RB-Y1 robot differs from the reference profile:\n{rprofile.format_diffs(diffs)}")
+            else:
+                logger.info("RB-Y1 robot matches the reference profile.")
+        out = cfg.profile_out or rprofile.default_profile_path()
+        written = rprofile.write_profile(out, current, force=cfg.profile_force)
+        logger.info(f"RB-Y1 profile written to {written}.")
 
     # ------------------------------------------------------------------ #
     #  Observation                                                         #
@@ -795,7 +808,7 @@ class Rby1(Robot):
     def _send_joint_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
         """Execute a joint-position action (``action_mode="joint"``).
 
-        Returns the arm targets actually commanded (clipped to joint limits).
+        Returns the joint targets actually commanded (clipped to the robot's joint limits).
         """
         # Start the startup ramp on the first command (after connect() and the
         # ready-pose motion are complete).
@@ -804,27 +817,31 @@ class Rby1(Robot):
             self._action_start_time = now
             logger.info(
                 f"Startup ramp started: minimum_time decreases from "
-                f"{self._config.startup_min_time:.2f}s -> "
-                f"{self._config.normal_min_time:.2f}s over "
-                f"{self._config.startup_ramp_duration:.1f}s."
+                f"{self._config.joint_startup_min_time:.2f}s -> "
+                f"{self._config.joint_min_time:.2f}s over "
+                f"{self._config.joint_startup_ramp_duration:.1f}s."
             )
         minimum_time = self._ramp_minimum_time(now)
 
-        if self._config.use_impedance:
+        if self._config.use_joint_impedance:
             logger.debug(
-                f"[impedance] stiffness={self._config.impedance_stiffness}, "
-                f"torque_limit={self._config.impedance_torque_limit}, "
-                f"damping={self._config.impedance_damping_ratio}"
+                f"[impedance] arm stiffness={self._config.joint_impedance_arm_stiffness}, "
+                f"torque_limit={self._config.joint_impedance_arm_torque_limit}, "
+                f"torso stiffness={self._config.joint_impedance_torso_stiffness}, "
+                f"torque_limit={self._config.joint_impedance_torso_torque_limit}, "
+                f"damping={self._config.joint_impedance_damping_ratio}"
             )
 
-        # Compose the per-tick command: enabled arms (held limbs are omitted)
+        # Compose the per-tick command: enabled groups (held limbs are omitted)
         # plus the optional mobile-base velocity. Both ride the same priority-1
         # stream so they are applied atomically.
-        body, has_body = cb.build_body_command(
+        body, has_body, sent = cb.build_body_command(
             rby,
             self._config,
             action,
             self._model,
+            self._q_lower,
+            self._q_upper,
             self._max_qdot,
             self._max_qddot,
             minimum_time,
@@ -834,12 +851,12 @@ class Rby1(Robot):
             cbc.set_body_command(body)
         if self._config.use_mobile_base:
             # The base does not follow the arm startup ramp: a stop must take
-            # effect at once, not after up to startup_min_time.
-            cbc.set_mobility_command(self._mobility_command(rby, action, self._config.normal_min_time))
+            # effect at once, not after up to joint_startup_min_time.
+            cbc.set_mobility_command(self._mobility_command(rby, action, self._config.joint_min_time))
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
         )
-        return cb.clipped_arm_action(self._config, action)
+        return sent
 
     def _send_ee_action(self, rby: Any, action: dict[str, Any]) -> None:
         """Execute an end-effector pose action (``action_mode="ee"``).
@@ -859,6 +876,14 @@ class Rby1(Robot):
             left_arm=cb.pose_from_action(action, "left_ee")
             if cfg.use_left_arm else np.eye(4),
         )
+        # minimum_time follows the rate the actions really arrive at. A new
+        # stream or a ready-pose motion (no previous target) starts over from
+        # the configured period.
+        if self._last_ee_targets is None:
+            self._ee_period.reset()
+        period = self._ee_period.update(self._clock())
+        if not cfg.ee_auto_action_period:
+            period = cfg.ee_action_period
         reset = self._detect_ee_reset(targets)
         if reset.any:
             logger.info(
@@ -867,12 +892,12 @@ class Rby1(Robot):
             )
 
         body = cb.build_ee_command(
-            rby, cfg, targets, reset, self._null_right, self._null_left
+            rby, cfg, targets, reset, self._null_right, self._null_left, period
         )
         cbc = rby.ComponentBasedCommandBuilder().set_body_command(body)
         if cfg.use_mobile_base:
             cbc.set_mobility_command(
-                self._mobility_command(rby, action, cfg.normal_min_time)
+                self._mobility_command(rby, action, cfg.joint_min_time)
             )
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
@@ -964,15 +989,15 @@ class Rby1(Robot):
 
         A large per-command ``minimum_time`` slows the robot at the start of a
         session so it converges smoothly to the first target instead of snapping
-        to it.  Returns ``normal_min_time`` immediately when the ramp is disabled.
+        to it.  Returns ``joint_min_time`` immediately when the ramp is disabled.
         """
         cfg = self._config
-        if cfg.startup_ramp_duration <= 0.0:
-            return cfg.normal_min_time
+        if cfg.joint_startup_ramp_duration <= 0.0:
+            return cfg.joint_min_time
         elapsed = now - self._action_start_time
-        progress = min(elapsed / cfg.startup_ramp_duration, 1.0)
-        minimum_time = cfg.startup_min_time + progress * (
-            cfg.normal_min_time - cfg.startup_min_time
+        progress = min(elapsed / cfg.joint_startup_ramp_duration, 1.0)
+        minimum_time = cfg.joint_startup_min_time + progress * (
+            cfg.joint_min_time - cfg.joint_startup_min_time
         )
         logger.debug(
             f"[ramp] elapsed={elapsed:.2f}s progress={progress:.3f} "

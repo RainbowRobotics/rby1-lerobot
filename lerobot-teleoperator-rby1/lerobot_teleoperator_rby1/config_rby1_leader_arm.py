@@ -8,7 +8,9 @@ from lerobot.teleoperators.config import TeleoperatorConfig
 from .constants import (
     ARM_DOF,
     SUPPORTED_LEADER_VERSIONS,
+    TORSO_DOF,
     leader_init_pose_for_version,
+    leader_torso_target_for_version,
 )
 
 _LEADER_DOF = 2 * ARM_DOF  # 14
@@ -44,17 +46,37 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # Rby1.connect()'s power_on(".*") has not run yet. Power the 12V rail
     # here so the Dynamixel bus answers initialize().
     auto_power_on_12v: bool = True
+    # Address of the follower robot. Used for the 12V rail above and to read
+    # the robot's joint limits (below); the connections are closed again
+    # before connect() returns.
     robot_address: str = "192.168.30.1:50051"
     connect_timeout_sec: float = 3.0
+
+    # ── Robot joint limits ────────────────────────────────────────────
+    # connect() reads the joint position limits from the robot at
+    # `robot_address` (its URDF, so they match the model and version) and
+    # get_action() clips the arm targets to them. The recorded action is the
+    # teleoperator's output, so it must not exceed what the robot accepts.
+    # True: connect() fails when the limits cannot be read.
+    # False: a warning only, and the arm targets are output unclipped -- for
+    # using the leader arm without a robot.
+    require_robot_joint_limits: bool = True
 
     # ── Joint group selection ─────────────────────────────────────────
     # Must match the corresponding flags in Rby1Config so that
     # action_features are consistent between teleoperator and robot.
-    # The leader arm has no torso joints and the follower's joint-mode
-    # actions never include the torso, so this must stay False.
     use_torso: bool = False
     use_right_arm: bool = True
     use_left_arm: bool = True
+
+    # The leader arm has no torso joints. With use_torso=True it outputs this
+    # fixed torso target (degrees, torso_0..5) on every action, so the robot
+    # holds the torso there and the dataset records it. None -> the torso of
+    # the robot's ready pose for `version`. If the robot's torso is elsewhere
+    # when teleoperation starts, it moves to this target during the robot's
+    # startup ramp (Rby1Config.joint_startup_min_time). connect() rejects a
+    # target outside the robot's torso joint limits.
+    torso_target_deg: List[float] | None = None
 
     # Enable gripper control via trigger buttons on the leader arm.
     use_gripper: bool = True
@@ -131,11 +153,6 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # ------------------------------------------------------------------ #
 
     def __post_init__(self) -> None:
-        if self.use_torso:
-            raise ValueError(
-                "Rby1LeaderArmConfig.use_torso is not supported: the leader arm has no "
-                "torso joints and Rby1 joint-mode actions do not include the torso."
-            )
         version = self.version.strip()
         if version not in SUPPORTED_LEADER_VERSIONS:
             raise ValueError(
@@ -153,6 +170,10 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
             self.right_init_q_deg = default_right
         if self.left_init_q_deg is None:
             self.left_init_q_deg = default_left
+
+        if self.torso_target_deg is None:
+            self.torso_target_deg = leader_torso_target_for_version(version)
+        self._check_len("torso_target_deg", self.torso_target_deg, TORSO_DOF)
 
         self._check_len("right_init_q_deg", self.right_init_q_deg, ARM_DOF)
         self._check_len("left_init_q_deg", self.left_init_q_deg, ARM_DOF)

@@ -1,0 +1,291 @@
+{
+  "format": "rby1-lerobot-profile",
+  "format_version": 1,
+  "created_at": "2026-11-09T00:00:00+0900",
+  "plugin_version": "0.3.0",
+  "lerobot_version": "0.7.0",
+  "robot": {
+    "model": "a",
+    "version": "1.2",
+    "semantics": "rby1-a-v12-radians-gripper01-v1"
+  },
+  "core_parameters": {},
+  "robot_config": {
+    "id": null,
+    "calibration_dir": null,
+    "address": "stub.invalid:1",
+    "model": "a",
+    "version": "1.2",
+    "connect_timeout_sec": 3.0,
+    "use_velocity": false,
+    "use_torque": false,
+    "use_gripper": true,
+    "cameras": {},
+    "use_torso": true,
+    "use_right_arm": true,
+    "use_left_arm": true,
+    "action_mode": "ee",
+    "use_mobile_base": false,
+    "mobile_base_hold_time": 0.5,
+    "mobile_base_max_linear_velocity": 0.6,
+    "mobile_base_max_angular_velocity": 1.4,
+    "use_impedance": false,
+    "impedance_stiffness": [
+      400.0,
+      400.0,
+      400.0,
+      400.0,
+      400.0,
+      400.0,
+      150.0,
+      150.0,
+      150.0,
+      150.0,
+      150.0,
+      150.0,
+      150.0,
+      120.0,
+      120.0,
+      120.0,
+      120.0,
+      120.0,
+      120.0,
+      120.0
+    ],
+    "impedance_torque_limit": [
+      500.0,
+      500.0,
+      500.0,
+      500.0,
+      500.0,
+      500.0,
+      40.0,
+      40.0,
+      40.0,
+      40.0,
+      40.0,
+      40.0,
+      40.0,
+      40.0,
+      40.0,
+      40.0,
+      40.0,
+      40.0,
+      40.0,
+      40.0
+    ],
+    "impedance_damping_ratio": 1.0,
+    "wrist_velocity_limit_scale": 10.0,
+    "acceleration_limit_scale": 30.0,
+    "move_to_ready_on_connect": true,
+    "joint_position_cutoff_frequency": 5.0,
+    "profile_out": null,
+    "profile_in": null,
+    "profile_mode": "check",
+    "profile_force": false,
+    "startup_ramp_duration": 5.0,
+    "startup_min_time": 5.0,
+    "normal_min_time": 0.07,
+    "ee_dt": 0.06666666666666667,
+    "min_time_factor": 1.02,
+    "ee_hold_time": 1.0,
+    "ee_reset_position_threshold": 0.1,
+    "ee_reset_rotation_threshold": 0.5,
+    "torso_stiffness": [
+      1700.0,
+      1700.0,
+      1700.0,
+      1700.0,
+      1700.0,
+      1700.0
+    ],
+    "torso_torque_limit": [
+      600.0,
+      600.0,
+      600.0,
+      600.0,
+      600.0,
+      600.0
+    ],
+    "torso_damping_ratio": 1.0,
+    "torso_joint_limits": {
+      "torso_1": [
+        -0.523598776,
+        1.6
+      ],
+      "torso_2": [
+        -2.617993878,
+        -0.2
+      ]
+    },
+    "right_arm_stiffness": [
+      80.0,
+      80.0,
+      80.0,
+      60.0,
+      60.0,
+      60.0,
+      60.0
+    ],
+    "right_arm_torque_limit": [
+      40.0,
+      40.0,
+      40.0,
+      30.0,
+      30.0,
+      30.0,
+      30.0
+    ],
+    "right_arm_damping_ratio": 1.0,
+    "right_arm_joint_limits": {
+      "right_arm_3": [
+        -2.6,
+        -0.5
+      ]
+    },
+    "left_arm_stiffness": [
+      80.0,
+      80.0,
+      80.0,
+      60.0,
+      60.0,
+      60.0,
+      60.0
+    ],
+    "left_arm_torque_limit": [
+      40.0,
+      40.0,
+      40.0,
+      30.0,
+      30.0,
+      30.0,
+      30.0
+    ],
+    "left_arm_damping_ratio": 0.8,
+    "left_arm_joint_limits": {
+      "left_arm_3": [
+        -2.6,
+        -0.5
+      ]
+    },
+    "torso_target_gains": [
+      1.0,
+      1.5707963267948966,
+      20.0,
+      125.66370614359172
+    ],
+    "arm_target_gains": [
+      3.0,
+      6.283185307179586,
+      150.0,
+      251.32741228718345
+    ],
+    "null_right_arm_deg": [
+      40.0,
+      -30.0,
+      -5.0,
+      -135.0,
+      -10.0,
+      20.0,
+      40.0
+    ],
+    "null_left_arm_deg": [
+      40.0,
+      30.0,
+      -5.0,
+      -135.0,
+      10.0,
+      20.0,
+      -40.0
+    ],
+    "nullspace_weight": [
+      2.0,
+      2.0,
+      2.0,
+      2.0,
+      2.0,
+      2.0,
+      1.0
+    ],
+    "nullspace_stiffness": 0.2,
+    "nullspace_damping_ratio": 1.0,
+    "type": "rby1"
+  },
+  "plugin_constants": {
+    "ready_pose": {
+      "body": [
+        0.0,
+        0.0,
+        0.0,
+        0.3490658503988659,
+        0.0,
+        0.0,
+        0.2617993877991494,
+        -1.1344640137963142,
+        -0.2617993877991494,
+        -2.007128639793479,
+        1.3089969389957472,
+        -1.1344640137963142,
+        -0.08726646259971647,
+        0.2617993877991494,
+        1.1344640137963142,
+        0.2617993877991494,
+        -2.007128639793479,
+        -1.3089969389957472,
+        -1.1344640137963142,
+        -0.08726646259971647
+      ],
+      "head": [
+        0.0,
+        0.8552113334772214
+      ]
+    },
+    "arm_q_limits": {
+      "right": [
+        [
+          -3.141592654,
+          -3.141592654,
+          -3.141592654,
+          -2.617993878,
+          -3.141592654,
+          -1.570796327,
+          -2.70526034
+        ],
+        [
+          3.141592654,
+          0.017453293,
+          3.141592654,
+          0.017453293,
+          3.141592654,
+          1.919862177,
+          2.70526034
+        ]
+      ],
+      "left": [
+        [
+          -3.141592654,
+          -0.017453293,
+          -3.141592654,
+          -2.617993878,
+          -3.141592654,
+          -1.570796327,
+          -2.70526034
+        ],
+        [
+          3.141592654,
+          3.141592654,
+          3.141592654,
+          0.017453293,
+          3.141592654,
+          1.919862177,
+          2.70526034
+        ]
+      ]
+    },
+    "joint_command_hold_time": 600.0,
+    "gripper": {
+      "homing_torque": 0.46,
+      "position_torque": 0.46
+    }
+  }
+}

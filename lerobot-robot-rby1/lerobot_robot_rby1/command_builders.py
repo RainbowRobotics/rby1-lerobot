@@ -19,22 +19,12 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from .constants import (
-    ARM_DOF,
     EE_SUFFIXES,
     LEFT_ARM_NAMES,
-    LEFT_ARM_Q_MAX,
-    LEFT_ARM_Q_MIN,
     POS_SUFFIX,
     RIGHT_ARM_NAMES,
-    RIGHT_ARM_Q_MAX,
-    RIGHT_ARM_Q_MIN,
-    TORSO_DOF,
+    TORSO_NAMES,
 )
-
-# Stiffness / torque-limit arrays are laid out as
-# [torso (6) | right arm (7) | left arm (7)].
-_RIGHT_ARM_SLICE = slice(TORSO_DOF, TORSO_DOF + ARM_DOF)          # 6:13
-_LEFT_ARM_SLICE = slice(TORSO_DOF + ARM_DOF, TORSO_DOF + 2 * ARM_DOF)  # 13:20
 
 # Joint commands keep holding for this long (seconds) if the stream stalls.
 _CONTROL_HOLD_TIME = 600.0
@@ -107,27 +97,33 @@ def build_ee_command(
     reset: ResetFlags,
     null_right: np.ndarray,
     null_left: np.ndarray,
+    action_period: float | None = None,
 ) -> Any:
-    """Cartesian impedance command with separate torso / right-arm / left-arm solvers."""
-    dt = cfg.ee_dt
+    """Cartesian impedance command with separate torso / right-arm / left-arm solvers.
+
+    ``action_period`` is the interval (s) at which targets arrive; the solvers
+    get ``minimum_time = action_period * ee_min_time_factor``. ``None`` uses
+    ``cfg.ee_action_period``.
+    """
+    dt = cfg.ee_action_period if action_period is None else action_period
     body = rby.BodyComponentBasedCommandBuilder()
 
     if cfg.use_torso:
         torso_builder = (
             rby.CartesianImpedanceControlCommandBuilder()
             .set_command_header(_ee_command_header(rby, cfg.ee_hold_time))
-            .set_minimum_time(dt * cfg.min_time_factor)
-            .set_joint_stiffness(cfg.torso_stiffness)
-            .set_joint_torque_limit(cfg.torso_torque_limit)
+            .set_minimum_time(dt * cfg.ee_min_time_factor)
+            .set_joint_stiffness(cfg.ee_torso_stiffness)
+            .set_joint_torque_limit(cfg.ee_torso_torque_limit)
             .set_stop_joint_position_tracking_error(0)
             .set_stop_orientation_tracking_error(0)
-            .set_joint_damping_ratio(cfg.torso_damping_ratio)
+            .set_joint_damping_ratio(cfg.ee_torso_damping_ratio)
             .set_reset_reference(reset.torso)
         )
-        _apply_joint_limits(torso_builder, cfg.torso_joint_limits)
+        _apply_joint_limits(torso_builder, cfg.ee_torso_joint_limits)
         torso_builder.add_target(
             "base", "link_torso_5", targets.torso,
-            *cfg.torso_target_gains,
+            *cfg.ee_torso_target_gains,
         )
         body.set_torso_command(torso_builder)
 
@@ -135,24 +131,24 @@ def build_ee_command(
         right_builder = (
             rby.CartesianImpedanceControlCommandBuilder()
             .set_command_header(_ee_command_header(rby, cfg.ee_hold_time))
-            .set_minimum_time(dt * cfg.min_time_factor)
-            .set_joint_stiffness(cfg.right_arm_stiffness)
-            .set_joint_torque_limit(cfg.right_arm_torque_limit)
+            .set_minimum_time(dt * cfg.ee_min_time_factor)
+            .set_joint_stiffness(cfg.ee_arm_stiffness)
+            .set_joint_torque_limit(cfg.ee_arm_torque_limit)
             .set_nullspace_joint_target(
                 null_right,
-                np.asarray(cfg.nullspace_weight),
-                cfg.nullspace_stiffness,
-                cfg.nullspace_damping_ratio,
+                np.asarray(cfg.ee_nullspace_weight),
+                cfg.ee_nullspace_stiffness,
+                cfg.ee_nullspace_damping_ratio,
             )
             .set_stop_joint_position_tracking_error(0)
             .set_stop_orientation_tracking_error(0)
-            .set_joint_damping_ratio(cfg.right_arm_damping_ratio)
+            .set_joint_damping_ratio(cfg.ee_arm_damping_ratio)
             .set_reset_reference(reset.right_arm)
         )
-        _apply_joint_limits(right_builder, cfg.right_arm_joint_limits)
+        _apply_joint_limits(right_builder, cfg.ee_right_arm_joint_limits)
         right_builder.add_target(
             "base", "link_right_arm_6", targets.right_arm,
-            *cfg.arm_target_gains,
+            *cfg.ee_arm_target_gains,
         )
         body.set_right_arm_command(right_builder)
 
@@ -160,24 +156,24 @@ def build_ee_command(
         left_builder = (
             rby.CartesianImpedanceControlCommandBuilder()
             .set_command_header(_ee_command_header(rby, cfg.ee_hold_time))
-            .set_minimum_time(dt * cfg.min_time_factor)
-            .set_joint_stiffness(cfg.left_arm_stiffness)
-            .set_joint_torque_limit(cfg.left_arm_torque_limit)
+            .set_minimum_time(dt * cfg.ee_min_time_factor)
+            .set_joint_stiffness(cfg.ee_arm_stiffness)
+            .set_joint_torque_limit(cfg.ee_arm_torque_limit)
             .set_nullspace_joint_target(
                 null_left,
-                np.asarray(cfg.nullspace_weight),
-                cfg.nullspace_stiffness,
-                cfg.nullspace_damping_ratio,
+                np.asarray(cfg.ee_nullspace_weight),
+                cfg.ee_nullspace_stiffness,
+                cfg.ee_nullspace_damping_ratio,
             )
             .set_stop_joint_position_tracking_error(0)
             .set_stop_orientation_tracking_error(0)
-            .set_joint_damping_ratio(cfg.left_arm_damping_ratio)
+            .set_joint_damping_ratio(cfg.ee_arm_damping_ratio)
             .set_reset_reference(reset.left_arm)
         )
-        _apply_joint_limits(left_builder, cfg.left_arm_joint_limits)
+        _apply_joint_limits(left_builder, cfg.ee_left_arm_joint_limits)
         left_builder.add_target(
             "base", "link_left_arm_6", targets.left_arm,
-            *cfg.arm_target_gains,
+            *cfg.ee_arm_target_gains,
         )
         body.set_left_arm_command(left_builder)
 
@@ -221,26 +217,26 @@ def build_limb_command(
     )
 
 
-def clip_arm_targets(
+def clip_joint_targets(
     action: dict[str, Any],
     names: list[str],
     q_min: np.ndarray,
     q_max: np.ndarray,
 ) -> np.ndarray:
-    """Joint targets for one arm from ``<name>.pos`` keys, clipped to the URDF limits."""
+    """Joint targets for one group from ``<name>.pos`` keys, clipped to ``q_min`` / ``q_max``."""
     return np.clip(np.array([action[f"{name}{POS_SUFFIX}"] for name in names]), q_min, q_max)
 
 
-def clipped_arm_action(cfg: Any, action: dict[str, Any]) -> dict[str, float]:
-    """The ``<arm joint>.pos`` targets ``build_body_command`` sends, after clipping."""
-    sent: dict[str, float] = {}
+def _joint_groups(cfg: Any) -> list[tuple[str, list[str]]]:
+    """``(group, joint names)`` of the groups joint mode commands, in action order."""
+    groups = []
+    if cfg.use_torso:
+        groups.append(("torso", TORSO_NAMES))
     if cfg.use_right_arm:
-        q = clip_arm_targets(action, RIGHT_ARM_NAMES, RIGHT_ARM_Q_MIN, RIGHT_ARM_Q_MAX)
-        sent.update({f"{n}{POS_SUFFIX}": float(v) for n, v in zip(RIGHT_ARM_NAMES, q)})
+        groups.append(("right_arm", RIGHT_ARM_NAMES))
     if cfg.use_left_arm:
-        q = clip_arm_targets(action, LEFT_ARM_NAMES, LEFT_ARM_Q_MIN, LEFT_ARM_Q_MAX)
-        sent.update({f"{n}{POS_SUFFIX}": float(v) for n, v in zip(LEFT_ARM_NAMES, q)})
-    return sent
+        groups.append(("left_arm", LEFT_ARM_NAMES))
+    return groups
 
 
 def build_body_command(
@@ -248,65 +244,54 @@ def build_body_command(
     cfg: Any,
     action: dict[str, Any],
     model: Any,
+    q_lower: np.ndarray,
+    q_upper: np.ndarray,
     max_qdot: np.ndarray,
     max_qddot: np.ndarray,
     minimum_time: float,
-) -> tuple[Any, bool]:
-    """Assemble a body command for the enabled arms.
+) -> tuple[Any, bool, dict[str, float]]:
+    """Assemble a joint-mode body command for the enabled groups.
 
-    Disabled limbs are omitted entirely so the SDK holds them at their current
-    position.  The torso is observation-only and is never commanded here.
-    Joint targets are clipped to the URDF limits before being sent.
+    The torso (when ``use_torso``), right arm and left arm each get their own
+    joint position / joint impedance command.  Disabled groups are omitted
+    entirely so the SDK holds them at their current position.  Joint targets
+    are clipped to the robot's position limits before being sent: ``q_lower``
+    / ``q_upper`` (like ``max_qdot`` / ``max_qddot``) are the limits of every
+    robot joint, read from the robot's dynamics model at connect.
 
     Returns
     -------
-    (body, has_command)
+    (body, has_command, sent)
         ``body`` is a ``BodyComponentBasedCommandBuilder``; ``has_command`` is
-        True when at least one arm command was added (so the caller can skip an
-        empty body).
+        True when at least one group command was added (so the caller can skip
+        an empty body); ``sent`` holds the ``<joint>.pos`` targets that were
+        put in the command, after clipping.
     """
-    stiffness = cfg.impedance_stiffness
-    torque_limit = cfg.impedance_torque_limit
-    acc_scale = cfg.acceleration_limit_scale
-
+    acc_scale = cfg.joint_acceleration_limit_scale
     body = rby.BodyComponentBasedCommandBuilder()
     has_command = False
+    sent: dict[str, float] = {}
 
-    if cfg.use_right_arm:
-        right_q = clip_arm_targets(action, RIGHT_ARM_NAMES, RIGHT_ARM_Q_MIN, RIGHT_ARM_Q_MAX)
-        body.set_right_arm_command(
-            build_limb_command(
-                rby,
-                position=right_q,
-                velocity_limit=max_qdot[model.right_arm_idx],
-                acceleration_limit=max_qddot[model.right_arm_idx] * acc_scale,
-                minimum_time=minimum_time,
-                use_impedance=cfg.use_impedance,
-                stiffness=stiffness[_RIGHT_ARM_SLICE],
-                torque_limit=torque_limit[_RIGHT_ARM_SLICE],
-                damping_ratio=cfg.impedance_damping_ratio,
-            )
+    for group, names in _joint_groups(cfg):
+        idx = getattr(model, f"{group}_idx")
+        kind = "torso" if group == "torso" else "arm"
+        position = clip_joint_targets(action, names, q_lower[idx], q_upper[idx])
+        limb = build_limb_command(
+            rby,
+            position=position,
+            velocity_limit=max_qdot[idx],
+            acceleration_limit=max_qddot[idx] * acc_scale,
+            minimum_time=minimum_time,
+            use_impedance=cfg.use_joint_impedance,
+            stiffness=getattr(cfg, f"joint_impedance_{kind}_stiffness"),
+            torque_limit=getattr(cfg, f"joint_impedance_{kind}_torque_limit"),
+            damping_ratio=cfg.joint_impedance_damping_ratio,
         )
+        getattr(body, f"set_{group}_command")(limb)
         has_command = True
+        sent.update({f"{n}{POS_SUFFIX}": float(v) for n, v in zip(names, position)})
 
-    if cfg.use_left_arm:
-        left_q = clip_arm_targets(action, LEFT_ARM_NAMES, LEFT_ARM_Q_MIN, LEFT_ARM_Q_MAX)
-        body.set_left_arm_command(
-            build_limb_command(
-                rby,
-                position=left_q,
-                velocity_limit=max_qdot[model.left_arm_idx],
-                acceleration_limit=max_qddot[model.left_arm_idx] * acc_scale,
-                minimum_time=minimum_time,
-                use_impedance=cfg.use_impedance,
-                stiffness=stiffness[_LEFT_ARM_SLICE],
-                torque_limit=torque_limit[_LEFT_ARM_SLICE],
-                damping_ratio=cfg.impedance_damping_ratio,
-            )
-        )
-        has_command = True
-
-    return body, has_command
+    return body, has_command, sent
 
 
 def build_mobility_command(
