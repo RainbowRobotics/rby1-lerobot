@@ -103,9 +103,15 @@ def build_ee_command(
     reset: ResetFlags,
     null_right: np.ndarray,
     null_left: np.ndarray,
+    action_period: float | None = None,
 ) -> Any:
-    """Cartesian impedance command with separate torso / right-arm / left-arm solvers."""
-    dt = cfg.ee_action_period
+    """Cartesian impedance command with separate torso / right-arm / left-arm solvers.
+
+    ``action_period`` is the interval (s) at which targets arrive; the solvers
+    get ``minimum_time = action_period * ee_min_time_factor``. ``None`` uses
+    ``cfg.ee_action_period``.
+    """
+    dt = cfg.ee_action_period if action_period is None else action_period
     body = rby.BodyComponentBasedCommandBuilder()
 
     if cfg.use_torso:

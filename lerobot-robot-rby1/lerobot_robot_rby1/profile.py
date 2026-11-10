@@ -532,6 +532,7 @@ def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
     if not old:
         return {**data, "format_version": FORMAT_VERSION}
     cfg = {_V1_RENAMES.get(k, k): v for k, v in old.items()}
+    cfg.setdefault("ee_auto_action_period", False)  # 0.3.x used the fixed ee_dt
     notes: dict[str, str] = {}
     for new, (right, left) in _V1_ARM_PAIRS.items():
         cfg.pop(right, None)
