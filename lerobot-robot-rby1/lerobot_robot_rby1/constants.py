@@ -121,3 +121,36 @@ GRIPPER_HOMING_TORQUE = 0.46     # Nm, applied during the homing sweeps
 GRIPPER_HOMING_STEPS = 30        # 0.1 s x 30 = 3 s per direction
 GRIPPER_POSITION_TORQUE = 0.46   # Nm, max torque in position mode
 GRIPPER_PING_TIMEOUT_S = 10.0    # wait for the motors to boot after flange power-on
+
+# ---------------------------------------------------------------------------
+# Ready pose (radians) — a safe, known configuration the robot moves to on
+# connect.
+#
+# RB-Y1 v1.2 and v1.3 differ in the joint configuration near the wrist, so each
+# version needs its own arm ready pose. The v1.3 pose zeroes the three wrist
+# joints (arm_4, arm_5, arm_6). The torso and head poses are version-independent.
+# ---------------------------------------------------------------------------
+
+READY_TORSO = np.deg2rad([0.0, 0.0, 0.0, 20.0, 0.0, 0.0])
+READY_HEAD = np.deg2rad([0.0, 49.0])  # head_0, head_1
+
+# v1.2 (and earlier) arm ready pose.
+READY_RIGHT = np.deg2rad([15.0, -65.0, -15.0, -115.0, 75.0, -65.0, -5.0])
+READY_LEFT = np.deg2rad([15.0, 65.0, 15.0, -115.0, -75.0, -65.0, -5.0])
+READY_POSE = np.concatenate([READY_TORSO, READY_RIGHT, READY_LEFT])  # (20,)
+
+# v1.3 arm ready pose: wrist joints (arm_4, arm_5, arm_6) are zeroed.
+READY_RIGHT_V13 = np.deg2rad([15.0, -65.0, -15.0, -115.0, 0.0, 0.0, 0.0])
+READY_LEFT_V13 = np.deg2rad([15.0, 65.0, 15.0, -115.0, 0.0, 0.0, 0.0])
+READY_POSE_V13 = np.concatenate([READY_TORSO, READY_RIGHT_V13, READY_LEFT_V13])  # (20,)
+
+
+def ready_pose_for_version(version: str):
+    """Return ``(body_pose, right_arm, left_arm, head)`` for a firmware version.
+
+    ``body_pose`` is the 20-DOF [torso | right arm | left arm] vector. v1.3 uses
+    the wrist-zeroed arm pose; every other version uses the v1.2 pose.
+    """
+    if (version or "").strip() == "1.3":
+        return READY_POSE_V13, READY_RIGHT_V13, READY_LEFT_V13, READY_HEAD
+    return READY_POSE, READY_RIGHT, READY_LEFT, READY_HEAD

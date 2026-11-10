@@ -46,7 +46,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 FORMAT = "rby1-lerobot-profile"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2  # 1: plugin 0.3.x field names (upgraded on load, see _upgrade_v1)
 PROFILE_FILENAME = "rby1_profile.json"
 # Where profiles go when Rby1Config.profile_out is not set (override with RBY1_PROFILE_DIR).
 DEFAULT_PROFILE_DIR = Path("~/.cache/rby1_lerobot/profiles")
@@ -130,7 +130,7 @@ _SEVERITY_ORDER = {ERROR: 0, WARN: 1, INFO: 2}
 
 @dataclass
 class Diff:
-    key: str  # dotted path, e.g. "robot_config.right_arm_stiffness"
+    key: str  # dotted path, e.g. "robot_config.ee_arm_stiffness"
     reference: Any
     current: Any
     severity: str
@@ -261,7 +261,7 @@ def plugin_constants(version: str) -> dict[str, Any]:
     """Behaviour-relevant values hard-coded in this plugin (not in Rby1Config)."""
     from . import command_builders as cb
     from . import constants as c
-    from .config_rby1 import ready_pose_for_version
+    from .constants import ready_pose_for_version
 
     body, right, left, head = ready_pose_for_version(version)
     return to_jsonable(
@@ -389,6 +389,13 @@ def diff_profiles(reference: dict[str, Any], current: dict[str, Any]) -> list[Di
             ref_v, cur_v = ref_flat.get(key, "<missing>"), cur_flat.get(key, "<missing>")
             if not _equal(ref_v, cur_v):
                 diffs.append(Diff(key, ref_v, cur_v, severity))
+    # Values a format-1 profile held that the current fields cannot express.
+    for side, other in ((reference, current), (current, reference)):
+        for name, note in (side.get(UPGRADE_NOTES_KEY) or {}).items():
+            if not any(d.key == f"robot_config.{name}" for d in diffs):
+                shown = (other.get("robot_config") or {}).get(name, "<missing>")
+                pair = (note, shown) if side is reference else (shown, note)
+                diffs.append(Diff(f"robot_config.{name}", *pair, WARN))
     for key in ("plugin_version", "lerobot_version"):
         if key in reference and key in current and reference[key] != current[key]:
             diffs.append(Diff(key, reference[key], current[key], INFO))
@@ -472,13 +479,86 @@ def apply_core_parameters(
 # ---------------------------------------------------------------------------
 # Files
 # ---------------------------------------------------------------------------
+# Format 1 (plugin 0.3.x) -> format 2 (plugin 0.4.0) Rby1Config field names.
+_V1_RENAMES = {
+    "startup_ramp_duration": "joint_startup_ramp_duration",
+    "startup_min_time": "joint_startup_min_time",
+    "normal_min_time": "joint_min_time",
+    "acceleration_limit_scale": "joint_acceleration_limit_scale",
+    "use_impedance": "use_joint_impedance",
+    "impedance_damping_ratio": "joint_impedance_damping_ratio",
+    "wrist_velocity_limit_scale": "joint_impedance_wrist_velocity_limit_scale",
+    "ee_dt": "ee_action_period",
+    "min_time_factor": "ee_min_time_factor",
+    "torso_stiffness": "ee_torso_stiffness",
+    "torso_torque_limit": "ee_torso_torque_limit",
+    "torso_damping_ratio": "ee_torso_damping_ratio",
+    "torso_joint_limits": "ee_torso_joint_limits",
+    "torso_target_gains": "ee_torso_target_gains",
+    "right_arm_joint_limits": "ee_right_arm_joint_limits",
+    "left_arm_joint_limits": "ee_left_arm_joint_limits",
+    "arm_target_gains": "ee_arm_target_gains",
+    "null_right_arm_deg": "ee_null_right_arm_deg",
+    "null_left_arm_deg": "ee_null_left_arm_deg",
+    "nullspace_weight": "ee_nullspace_weight",
+    "nullspace_stiffness": "ee_nullspace_stiffness",
+    "nullspace_damping_ratio": "ee_nullspace_damping_ratio",
+}
+# Format 1 had one value per arm; format 2 has one for both (the right arm's is kept).
+_V1_ARM_PAIRS = {
+    "ee_arm_stiffness": ("right_arm_stiffness", "left_arm_stiffness"),
+    "ee_arm_torque_limit": ("right_arm_torque_limit", "left_arm_torque_limit"),
+    "ee_arm_damping_ratio": ("right_arm_damping_ratio", "left_arm_damping_ratio"),
+}
+# Format 1 had 20-element [torso 6 | right arm 7 | left arm 7] arrays.
+_V1_BODY_ARRAYS = {
+    "impedance_stiffness": ("joint_impedance_torso_stiffness", "joint_impedance_arm_stiffness"),
+    "impedance_torque_limit": ("joint_impedance_torso_torque_limit", "joint_impedance_arm_torque_limit"),
+}
+# Top-level key: {field: note} for format-1 values the current fields cannot hold.
+UPGRADE_NOTES_KEY = "upgrade_notes"
+
+
+def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite a format-1 profile's ``robot_config`` with the current field names."""
+    old = data.get("robot_config") or {}
+    if not old:
+        return {**data, "format_version": FORMAT_VERSION}
+    cfg = {_V1_RENAMES.get(k, k): v for k, v in old.items()}
+    notes: dict[str, str] = {}
+    for new, (right, left) in _V1_ARM_PAIRS.items():
+        cfg.pop(right, None)
+        cfg.pop(left, None)
+        if right in old:
+            cfg[new] = old[right]
+            if left in old and not _equal(old[right], old[left]):
+                notes[new] = f"format-1 profile had a different left arm value: {_short(old[left])}"
+    for name, (torso, arm) in _V1_BODY_ARRAYS.items():
+        cfg.pop(name, None)
+        values = old.get(name)
+        if isinstance(values, list) and len(values) == 20:
+            cfg[torso], cfg[arm] = values[:6], values[6:13]
+            if not _equal(values[6:13], values[13:20]):
+                notes[arm] = f"format-1 profile had a different left arm value: {_short(values[13:20])}"
+    out = {**data, "format_version": FORMAT_VERSION, "upgraded_from_format": 1, "robot_config": cfg}
+    if notes:
+        out[UPGRADE_NOTES_KEY] = notes
+    return out
+
+
+def upgrade_profile(data: dict[str, Any], source: Any = "profile") -> dict[str, Any]:
+    """Bring a profile dict to the current format (older formats are converted)."""
+    version = int(data.get("format_version", 0))
+    if version > FORMAT_VERSION:
+        raise ValueError(f"{source} uses profile format {version}; this plugin reads {FORMAT_VERSION}.")
+    return _upgrade_v1(data) if version < 2 else data
+
+
 def load_profile(path: str | os.PathLike) -> dict[str, Any]:
     data = json.loads(Path(path).read_text())
     if data.get("format") != FORMAT:
         raise ValueError(f"{path} is not an RB-Y1 profile (format={data.get('format')!r}).")
-    if int(data.get("format_version", 0)) > FORMAT_VERSION:
-        raise ValueError(f"{path} uses profile format {data['format_version']}; this plugin reads {FORMAT_VERSION}.")
-    return data
+    return upgrade_profile(data, path)
 
 
 def resolve_profile_source(source: str) -> Path:
@@ -516,8 +596,10 @@ def write_profile(path: str | os.PathLike, profile: dict[str, Any], force: bool 
     path = Path(path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_file():
-        existing = json.loads(path.read_text())
+        existing = upgrade_profile(json.loads(path.read_text()), path)
         merged = {**existing, **{k: v for k, v in profile.items() if k != "teleop"}}
+        for key in (UPGRADE_NOTES_KEY, "upgraded_from_format"):
+            merged.pop(key, None)
         if existing.get("robot_config"):
             diffs = [d for d in diff_profiles(existing, profile) if d.severity in (ERROR, WARN)]
             if diffs:
@@ -541,7 +623,11 @@ def update_profile_section(path: str | os.PathLike, key: str, value: Any) -> Pat
     """Set one top-level section (e.g. ``teleop``) in a profile file, creating it if needed."""
     path = Path(path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = json.loads(path.read_text()) if path.is_file() else {"format": FORMAT, "format_version": FORMAT_VERSION}
+    data = (
+        upgrade_profile(json.loads(path.read_text()), path)
+        if path.is_file()
+        else {"format": FORMAT, "format_version": FORMAT_VERSION}
+    )
     data[key] = to_jsonable(value)
     path.write_text(json.dumps(data, indent=2) + "\n")
     return path
