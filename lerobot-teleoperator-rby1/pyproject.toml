@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lerobot_teleoperator_rby1"
-version = "0.4.0"
+version = "0.3.1"
 description = "LeRobot teleoperator integrations for the Rainbow Robotics RB-Y1 (Meta Quest VR + master arm)"
 readme = "README.md"
 authors = [
@@ -28,7 +28,7 @@ dependencies = [
   "numpy",
   "scipy",
   "lerobot>=0.7.0,<0.8",
-  "lerobot_robot_rby1>=0.4.0",
+  "lerobot_robot_rby1>=0.3.1",
 ]
 
 [project.urls]

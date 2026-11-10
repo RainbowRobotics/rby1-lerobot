@@ -46,7 +46,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 FORMAT = "rby1-lerobot-profile"
-FORMAT_VERSION = 2  # 1: plugin 0.3.x field names (upgraded on load, see _upgrade_v1)
+FORMAT_VERSION = 2  # 1: plugin 0.3.0 field names (upgraded on load, see _upgrade_v1)
 PROFILE_FILENAME = "rby1_profile.json"
 # Where profiles go when Rby1Config.profile_out is not set (override with RBY1_PROFILE_DIR).
 DEFAULT_PROFILE_DIR = Path("~/.cache/rby1_lerobot/profiles")
@@ -483,7 +483,7 @@ def apply_core_parameters(
 # ---------------------------------------------------------------------------
 # Files
 # ---------------------------------------------------------------------------
-# Format 1 (plugin 0.3.x) -> format 2 (plugin 0.4.0) Rby1Config field names.
+# Format 1 (plugin 0.3.0) -> format 2 (plugin 0.3.1 and later) Rby1Config field names.
 _V1_RENAMES = {
     "startup_ramp_duration": "joint_startup_ramp_duration",
     "startup_min_time": "joint_startup_min_time",
@@ -532,7 +532,7 @@ def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
     if not old:
         return {**data, "format_version": FORMAT_VERSION}
     cfg = {_V1_RENAMES.get(k, k): v for k, v in old.items()}
-    cfg.setdefault("ee_auto_action_period", False)  # 0.3.x used the fixed ee_dt
+    cfg.setdefault("ee_auto_action_period", False)  # 0.3.0 used the fixed ee_dt
     notes: dict[str, str] = {}
     for new, (right, left) in _V1_ARM_PAIRS.items():
         cfg.pop(right, None)
@@ -552,11 +552,11 @@ def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
     if notes:
         out[UPGRADE_NOTES_KEY] = notes
     if cfg.get("action_mode") == "joint" and cfg.get("use_torso"):
-        # Plugin 0.3.x observed the torso in joint mode but did not command it:
+        # Plugin 0.3.0 observed the torso in joint mode but did not command it:
         # such datasets have no torso_*.pos action keys.
         out[UPGRADE_ERRORS_KEY] = {
-            "use_torso": "true, torso observed but not commanded (plugin 0.3.x joint mode; "
-            "use plugin 0.3.x with this dataset)"
+            "use_torso": "true, torso observed but not commanded (plugin 0.3.0 joint mode; "
+            "use plugin 0.3.0, commit 13d68d4, with this dataset)"
         }
     return out
 

@@ -177,7 +177,7 @@ class Rby1Config(RobotConfig):
     # are ignored; kept within 0.01-0.2 s), so it follows --fps / the policy
     # rate. ee_action_period (s) is then only the starting value, used for the
     # first command and after a ready-pose motion. With False, ee_action_period
-    # is used as a fixed period (the behaviour of plugin 0.3.x).
+    # is used as a fixed period (the behaviour of plugin 0.3.0).
     ee_auto_action_period: bool = True
     ee_action_period: float = 1 / 15
     ee_min_time_factor: float = 1.02

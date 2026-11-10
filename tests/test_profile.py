@@ -152,7 +152,7 @@ def test_cli_export_is_read_only(tmp_path) -> None:
     assert data["core_parameters"]["joint_position_command.cutoff_frequency"]["value"] == 15.0
 
 
-# ── Format 1 (plugin 0.3.x) profiles ────────────────────────────────────────
+# ── Format 1 (plugin 0.3.0) profiles ────────────────────────────────────────
 V1_PROFILE = Path(__file__).parent / "data" / "profile_v1.json"  # written by the v0.3.0 code
 
 
@@ -179,7 +179,7 @@ def test_v1_profile_compares_and_applies(tmp_path, caplog) -> None:
     )
     diffs = [d for d in rprofile.diff_profiles(ref, cur) if d.severity != rprofile.INFO]
     # Same settings: only the left-arm values that no longer exist and the
-    # fixed EE period of 0.3.x are reported.
+    # fixed EE period of 0.3.0 are reported.
     assert sorted(d.key for d in diffs) == [
         "robot_config.ee_arm_damping_ratio", "robot_config.ee_auto_action_period",
         "robot_config.joint_impedance_arm_stiffness",
@@ -198,12 +198,12 @@ def test_v1_profile_compares_and_applies(tmp_path, caplog) -> None:
                      use_gripper=True)
     assert robot._config.ee_arm_stiffness == [70.0] * 7
     assert robot._config.ee_min_time_factor == 1.5
-    assert robot._config.ee_auto_action_period is False  # as recorded with 0.3.x
+    assert robot._config.ee_auto_action_period is False  # as recorded with 0.3.0
     robot.disconnect()
 
 
 def test_v1_joint_mode_torso_profile_is_rejected(tmp_path) -> None:
-    """0.3.x joint mode observed the torso without commanding it: other action keys."""
+    """0.3.0 joint mode observed the torso without commanding it: other action keys."""
     data = json.loads(V1_PROFILE.read_text())
     data["robot_config"]["action_mode"] = "joint"
     path = tmp_path / "v1.json"

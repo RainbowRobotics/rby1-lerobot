@@ -426,9 +426,8 @@ earlier versions wrote 5 Hz to the robot's stored parameters.
 
 | Plugin version | LeRobot | Python | Notes |
 |----------------|---------|--------|-------|
-| 0.4.x | 0.7.0 | 3.12, 3.13 | Tested in CI. Config fields grouped by controller, torso command in joint mode, measured EE action period. |
-| 0.4.x | `main` (next release) | 3.12 | Robot/teleop tested weekly in CI. |
-| 0.3.x | 0.7.0 | 3.12, 3.13 | Remote inference via lerobot's `lerobot-policy-server` / `--inference.type=remote`. |
+| 0.3.1 and later | 0.7.0 | 3.12, 3.13 | Tested in CI. Remote inference via lerobot's `lerobot-policy-server` / `--inference.type=remote`. Config fields grouped by controller, torso command in joint mode, measured EE action period, joint limits read from the robot. |
+| 0.3.1 and later | `main` (next release) | 3.12 | Robot/teleop tested weekly in CI. |
 | 0.2.x | 0.6.1 | 3.12, 3.13 | Legacy: last version with the gRPC `lerobot-async-rby1` package. |
 | 0.1.x | 0.4 – 0.6.0 | ≥ 3.10 | Bare joint keys (no `.pos` suffix), unmaintained. |
 
@@ -441,6 +440,9 @@ names the LeRobot release it was tested against, e.g. `v0.2.0 — LeRobot 0.6.1`
 - **Minor** (`0.2.0 → 0.3.0`): support for a new LeRobot release, or a breaking change in
   the plugins (config fields, observation/action keys).
 - **Patch** (`0.2.0 → 0.2.1`): fixes that keep the same LeRobot requirement and keys.
+- Exception: 0.3.0 was withdrawn one day after it was published, and 0.3.1 is the first
+  release of the 0.3 series. That is why 0.3.1 contains breaking changes (listed below).
+  The 0.3.0 code is commit `13d68d4`.
 
 To install the plugins for a given release, check out its tag:
 
@@ -465,12 +467,12 @@ lerobot 0.7.0 dropped the gRPC AsyncInference service it was built on. Use lerob
 inference instead (see [Remote inference](#remote-inference)). The old package is in the git
 history (`git show v0.2.0:lerobot-async-rby1/`).
 
-Breaking changes in 0.4.0:
+Breaking changes in 0.3.1 (compared with the withdrawn 0.3.0):
 
 - **`Rby1Config` fields renamed** so the name says which controller a field belongs to.
   Update `--robot.<field>` arguments and config files:
 
-  | 0.3.x | 0.4.0 |
+  | 0.3.0 | 0.3.1 |
   |-------|-------|
   | `startup_ramp_duration`, `startup_min_time`, `normal_min_time` | `joint_startup_ramp_duration`, `joint_startup_min_time`, `joint_min_time` |
   | `acceleration_limit_scale` | `joint_acceleration_limit_scale` |
@@ -485,9 +487,9 @@ Breaking changes in 0.4.0:
   | `null_right_arm_deg`, `null_left_arm_deg`, `nullspace_*` | the same names with an `ee_` prefix |
 
 - **Joint mode commands the torso** when `use_torso=True`: the action starts with
-  `torso_0..5.pos`. In 0.3.x the torso was only observed, so datasets and policies recorded
-  in joint mode with `use_torso=True` have a different action layout; use plugin 0.3.x
-  with them. The leader arm now accepts `use_torso=True` and outputs a fixed torso target.
+  `torso_0..5.pos`. In 0.3.0 the torso was only observed, so datasets and policies recorded
+  in joint mode with `use_torso=True` have a different action layout; use plugin 0.3.0
+  (commit `13d68d4`) with them. The leader arm now accepts `use_torso=True` and outputs a fixed torso target.
 - **EE mode measures the action period** instead of assuming 15 Hz
   (`ee_auto_action_period=False` restores the fixed period).
 - **Joint limits are read from the robot** instead of constants in the plugins. The old
@@ -495,7 +497,7 @@ Breaking changes in 0.4.0:
   Model M v1.3 wrist (`arm_5`, `arm_6`). The leader arm now needs to reach the robot at
   `--teleop.robot_address` on `connect()`; set `--teleop.require_robot_joint_limits=false`
   to use it without a robot.
-- Robot profiles written by 0.3.x are still read: field names are converted on load, and
+- Robot profiles written by 0.3.0 are still read: field names are converted on load, and
   `profile_mode=apply` restores the fixed EE period they were recorded with.
 
 LeRobot commands that do not apply to RB-Y1:
