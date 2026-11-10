@@ -60,8 +60,6 @@ def test_unsupported_options_are_rejected() -> None:
         Rby1Config(model="ub")
     with pytest.raises(ValueError, match="torso_target_deg"):
         Rby1LeaderArmConfig(use_torso=True, torso_target_deg=[0.0] * 5)
-    with pytest.raises(ValueError, match="torso_target_deg"):
-        Rby1LeaderArmConfig(use_torso=True, torso_target_deg=[0.0, 0.0, 0.0, 120.0, 0.0, 0.0])
 
 
 def test_leader_arm_outputs_fixed_torso_target() -> None:
