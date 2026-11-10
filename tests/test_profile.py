@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 import pytest
 import rby1_sdk as rby
@@ -38,7 +39,7 @@ def test_profile_contents(recorded) -> None:
     assert len(data["core_parameters"]) == len(rby.CORE_PARAMETERS)
     # Recorded after configure(): the plugin's cutoff, not the robot's stored 15 Hz.
     assert data["core_parameters"]["joint_position_command.cutoff_frequency"]["value"] == 5.0
-    assert data["robot_config"]["right_arm_stiffness"][0] == 80.0
+    assert data["robot_config"]["ee_arm_stiffness"][0] == 80.0
 
 
 def test_cutoff_is_session_only_and_restored() -> None:
@@ -78,23 +79,23 @@ def test_model_mismatch_is_only_a_warning(recorded, caplog) -> None:
 
 def test_behaviour_difference_warns_in_check_mode(recorded, caplog) -> None:
     with caplog.at_level(logging.WARNING):
-        robot = _connect(profile_in=str(recorded), right_arm_damping_ratio=0.5)
-        assert robot._config.right_arm_damping_ratio == 0.5  # check does not change it
+        robot = _connect(profile_in=str(recorded), ee_arm_damping_ratio=0.5)
+        assert robot._config.ee_arm_damping_ratio == 0.5  # check does not change it
         robot.disconnect()
-    assert "right_arm_damping_ratio" in caplog.text
+    assert "ee_arm_damping_ratio" in caplog.text
 
 
 def test_apply_adopts_config_and_core_parameters_for_the_session(recorded) -> None:
     data = json.loads(recorded.read_text())
-    data["robot_config"]["right_arm_stiffness"] = [70.0] * 7
-    data["robot_config"]["arm_target_gains"] = [1.0, 2.0, 3.0, 4.0]
+    data["robot_config"]["ee_arm_stiffness"] = [70.0] * 7
+    data["robot_config"]["ee_arm_target_gains"] = [1.0, 2.0, 3.0, 4.0]
     data["core_parameters"]["default.velocity_limit_scaling"]["value"] = 0.5
     recorded.write_text(json.dumps(data))
 
     robot = _connect(profile_in=str(recorded), profile_mode="apply", address="other.invalid:1")
     fake = robot._robot
-    assert robot._config.right_arm_stiffness == [70.0] * 7
-    assert robot._config.arm_target_gains == (1.0, 2.0, 3.0, 4.0)
+    assert robot._config.ee_arm_stiffness == [70.0] * 7
+    assert robot._config.ee_arm_target_gains == (1.0, 2.0, 3.0, 4.0)
     assert robot._config.address == "other.invalid:1"  # recorded-only, never applied
     assert json.loads(fake.get_parameter("default.velocity_limit_scaling")) == 0.5
     assert fake.params_db["default.velocity_limit_scaling"] == 1.0  # nothing persisted
@@ -104,12 +105,12 @@ def test_apply_adopts_config_and_core_parameters_for_the_session(recorded) -> No
 
 def test_one_profile_per_dataset(recorded) -> None:
     with pytest.raises(ValueError, match="one profile per dataset"):
-        _connect(profile_out=str(recorded), right_arm_damping_ratio=0.5)
-    robot = _connect(profile_out=str(recorded), right_arm_damping_ratio=0.5, profile_force=True)
+        _connect(profile_out=str(recorded), ee_arm_damping_ratio=0.5)
+    robot = _connect(profile_out=str(recorded), ee_arm_damping_ratio=0.5, profile_force=True)
     robot.disconnect()
     extras = [p for p in recorded.parent.glob("rby1_profile.*.json")]
     assert len(extras) == 1
-    assert json.loads(recorded.read_text())["robot_config"]["right_arm_damping_ratio"] == 1.0
+    assert json.loads(recorded.read_text())["robot_config"]["ee_arm_damping_ratio"] == 1.0
 
 
 def test_teleop_section_is_kept(tmp_path) -> None:
@@ -149,3 +150,47 @@ def test_cli_export_is_read_only(tmp_path) -> None:
     assert "power_on" not in calls and "servo_on" not in calls and "enable_control_manager" not in calls
     data = rprofile.load_profile(out)
     assert data["core_parameters"]["joint_position_command.cutoff_frequency"]["value"] == 15.0
+
+
+# ── Format 1 (plugin 0.3.x) profiles ────────────────────────────────────────
+V1_PROFILE = Path(__file__).parent / "data" / "profile_v1.json"  # written by the v0.3.0 code
+
+
+def test_v1_profile_is_upgraded_to_current_field_names() -> None:
+    assert json.loads(V1_PROFILE.read_text())["format_version"] == 1
+    data = rprofile.load_profile(V1_PROFILE)
+    cfg = data["robot_config"]
+    assert data["format_version"] == rprofile.FORMAT_VERSION
+    # Every field is a current Rby1Config field, and none is missing.
+    current = rprofile.to_jsonable(Rby1Config(address="stub.invalid:1"))
+    assert set(cfg) == set(current)
+    assert cfg["joint_impedance_torso_stiffness"] == [400.0] * 6
+    assert cfg["joint_impedance_arm_stiffness"] == [150.0] * 7
+    assert cfg["ee_arm_damping_ratio"] == 1.0 and cfg["ee_action_period"] == pytest.approx(1 / 15)
+    # The fixture's left arm differed from the right in two places.
+    assert set(data[rprofile.UPGRADE_NOTES_KEY]) == {"ee_arm_damping_ratio", "joint_impedance_arm_stiffness"}
+
+
+def test_v1_profile_compares_and_applies(tmp_path, caplog) -> None:
+    ref = rprofile.load_profile(V1_PROFILE)
+    cur = rprofile.build_profile(
+        Rby1Config(address="stub.invalid:1", model="a", version="1.2", use_torso=True, action_mode="ee"),
+        robot={"model": "a", "version": "1.2"}, version="1.2",
+    )
+    diffs = [d for d in rprofile.diff_profiles(ref, cur) if d.severity != rprofile.INFO]
+    # Same settings: only the left-arm values that no longer exist are reported.
+    assert sorted(d.key for d in diffs) == [
+        "robot_config.ee_arm_damping_ratio", "robot_config.joint_impedance_arm_stiffness",
+    ]
+    assert all(d.severity == rprofile.WARN for d in diffs)
+
+    data = json.loads(V1_PROFILE.read_text())
+    data["robot_config"]["right_arm_stiffness"] = [70.0] * 7
+    data["robot_config"]["min_time_factor"] = 1.5
+    path = tmp_path / "v1.json"
+    path.write_text(json.dumps(data))
+    robot = _connect(profile_in=str(path), profile_mode="apply", use_torso=True, action_mode="ee",
+                     use_gripper=True)
+    assert robot._config.ee_arm_stiffness == [70.0] * 7
+    assert robot._config.ee_min_time_factor == 1.5
+    robot.disconnect()

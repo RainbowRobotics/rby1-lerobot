@@ -138,8 +138,8 @@ class Rby1(Robot):
         self._last_ee_targets: cb.CartesianTargets | None = None
         # The action send_action() last applied (as returned), for hold().
         self._last_sent: dict[str, float] | None = None
-        self._null_right: np.ndarray = np.deg2rad(config.null_right_arm_deg)
-        self._null_left: np.ndarray = np.deg2rad(config.null_left_arm_deg)
+        self._null_right: np.ndarray = np.deg2rad(config.ee_null_right_arm_deg)
+        self._null_left: np.ndarray = np.deg2rad(config.ee_null_left_arm_deg)
         # Profile: reference loaded from profile_in, and functions that undo
         # session-only core parameter changes on disconnect.
         self._reference_profile: dict[str, Any] | None = None
@@ -374,15 +374,15 @@ class Rby1(Robot):
             self._max_qdot = dyn_model.get_limit_qdot_upper(dyn_state)
             self._max_qddot = dyn_model.get_limit_qddot_upper(dyn_state)
             # The wrist (last arm joint) needs extra velocity headroom in impedance mode.
-            if self._config.use_impedance:
-                scale = self._config.wrist_velocity_limit_scale
+            if self._config.use_joint_impedance:
+                scale = self._config.joint_impedance_wrist_velocity_limit_scale
                 self._max_qdot[self._model.right_arm_idx[-1]] *= scale
                 self._max_qdot[self._model.left_arm_idx[-1]] *= scale
             logger.info(
                 f"URDF limits loaded: max_qdot range=[{self._max_qdot.min():.2f}, "
                 f"{self._max_qdot.max():.2f}] rad/s, max_qddot range=["
                 f"{self._max_qddot.min():.2f}, {self._max_qddot.max():.2f}] rad/s^2 "
-                f"(acc scale={self._config.acceleration_limit_scale}x)"
+                f"(acc scale={self._config.joint_acceleration_limit_scale}x)"
             )
 
             # 4b. In EE mode, prepare a forward-kinematics state so the observation
@@ -543,8 +543,8 @@ class Rby1(Robot):
             changed = rprofile.apply_robot_config(cfg, ref)
             if changed:
                 logger.warning(f"profile apply: config fields taken from {path}: {', '.join(changed)}")
-                self._null_right = np.deg2rad(cfg.null_right_arm_deg)
-                self._null_left = np.deg2rad(cfg.null_left_arm_deg)
+                self._null_right = np.deg2rad(cfg.ee_null_right_arm_deg)
+                self._null_left = np.deg2rad(cfg.ee_null_left_arm_deg)
         elif diffs:
             logger.warning(f"RB-Y1 config differs from the profile {path}:\n{rprofile.format_diffs(diffs)}")
 
@@ -804,17 +804,17 @@ class Rby1(Robot):
             self._action_start_time = now
             logger.info(
                 f"Startup ramp started: minimum_time decreases from "
-                f"{self._config.startup_min_time:.2f}s -> "
-                f"{self._config.normal_min_time:.2f}s over "
-                f"{self._config.startup_ramp_duration:.1f}s."
+                f"{self._config.joint_startup_min_time:.2f}s -> "
+                f"{self._config.joint_min_time:.2f}s over "
+                f"{self._config.joint_startup_ramp_duration:.1f}s."
             )
         minimum_time = self._ramp_minimum_time(now)
 
-        if self._config.use_impedance:
+        if self._config.use_joint_impedance:
             logger.debug(
-                f"[impedance] stiffness={self._config.impedance_stiffness}, "
-                f"torque_limit={self._config.impedance_torque_limit}, "
-                f"damping={self._config.impedance_damping_ratio}"
+                f"[impedance] arm stiffness={self._config.joint_impedance_arm_stiffness}, "
+                f"torque_limit={self._config.joint_impedance_arm_torque_limit}, "
+                f"damping={self._config.joint_impedance_damping_ratio}"
             )
 
         # Compose the per-tick command: enabled arms (held limbs are omitted)
@@ -834,8 +834,8 @@ class Rby1(Robot):
             cbc.set_body_command(body)
         if self._config.use_mobile_base:
             # The base does not follow the arm startup ramp: a stop must take
-            # effect at once, not after up to startup_min_time.
-            cbc.set_mobility_command(self._mobility_command(rby, action, self._config.normal_min_time))
+            # effect at once, not after up to joint_startup_min_time.
+            cbc.set_mobility_command(self._mobility_command(rby, action, self._config.joint_min_time))
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
         )
@@ -872,7 +872,7 @@ class Rby1(Robot):
         cbc = rby.ComponentBasedCommandBuilder().set_body_command(body)
         if cfg.use_mobile_base:
             cbc.set_mobility_command(
-                self._mobility_command(rby, action, cfg.normal_min_time)
+                self._mobility_command(rby, action, cfg.joint_min_time)
             )
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
@@ -964,15 +964,15 @@ class Rby1(Robot):
 
         A large per-command ``minimum_time`` slows the robot at the start of a
         session so it converges smoothly to the first target instead of snapping
-        to it.  Returns ``normal_min_time`` immediately when the ramp is disabled.
+        to it.  Returns ``joint_min_time`` immediately when the ramp is disabled.
         """
         cfg = self._config
-        if cfg.startup_ramp_duration <= 0.0:
-            return cfg.normal_min_time
+        if cfg.joint_startup_ramp_duration <= 0.0:
+            return cfg.joint_min_time
         elapsed = now - self._action_start_time
-        progress = min(elapsed / cfg.startup_ramp_duration, 1.0)
-        minimum_time = cfg.startup_min_time + progress * (
-            cfg.normal_min_time - cfg.startup_min_time
+        progress = min(elapsed / cfg.joint_startup_ramp_duration, 1.0)
+        minimum_time = cfg.joint_startup_min_time + progress * (
+            cfg.joint_min_time - cfg.joint_startup_min_time
         )
         logger.debug(
             f"[ramp] elapsed={elapsed:.2f}s progress={progress:.3f} "
