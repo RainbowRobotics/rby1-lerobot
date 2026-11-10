@@ -384,6 +384,9 @@ class FakeRobot:
 
     # power / servo / control manager ----------------------------------
     def is_power_on(self, pattern):
+        # The real SDK cannot parse the state of another model.
+        if os.environ.get("RBY1_FAKE_MODEL", self._model_name).lower() != self._model_name:
+            raise RuntimeError("The size of the joint state does not match the DOF.")
         return self._power
 
     def power_on(self, pattern):

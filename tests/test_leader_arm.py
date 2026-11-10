@@ -91,3 +91,13 @@ def test_version_mismatch_is_a_warning(monkeypatch, caplog) -> None:
     with caplog.at_level(logging.WARNING):
         _with_limits(version="1.2")
     assert "reports version '1.3' but teleop.version is '1.2'" in caplog.text
+
+
+def test_connect_works_on_model_m(monkeypatch) -> None:
+    """The 12V check must use a handle of the robot's model, not Model A."""
+    monkeypatch.setenv("RBY1_FAKE_MODEL", "M")
+    leader = Rby1LeaderArm(Rby1LeaderArmConfig(**FAST))
+    n = len(rby.CALL_LOG)
+    leader.connect()
+    leader.disconnect()
+    assert "power_on" in [call[0] for call in rby.CALL_LOG[n:]]

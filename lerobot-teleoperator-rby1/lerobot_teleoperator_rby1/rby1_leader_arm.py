@@ -44,6 +44,7 @@ import numpy as np
 from lerobot.teleoperators.teleoperator import Teleoperator
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 from lerobot_robot_rby1.joint_limits import RobotJointLimits, read_joint_limits
+from lerobot_robot_rby1.model_probe import resolve_model_version
 
 from .config_rby1_leader_arm import Rby1LeaderArmConfig
 from .constants import (
@@ -365,8 +366,11 @@ class Rby1LeaderArm(Teleoperator):
             "lives elsewhere."
         )
 
+        # The handle must be of the robot's own model: a Model A handle on a
+        # Model M robot fails in is_power_on() (joint state size mismatch).
         try:
-            robot = rby.create_robot_a(cfg.robot_address)
+            model, _ = resolve_model_version("auto", "auto", cfg.robot_address, cfg.connect_timeout_sec)
+            robot = rby.create_robot(cfg.robot_address, model)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"{unreachable} ({exc})")
             return
