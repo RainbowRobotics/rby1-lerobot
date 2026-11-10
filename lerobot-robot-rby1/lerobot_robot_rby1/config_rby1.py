@@ -169,8 +169,16 @@ class Rby1Config(RobotConfig):
     # The torso, right arm and left arm each run their own solver.
     # ════════════════════════════════════════════════════════════════════
 
-    # Expected action period (s); the Cartesian commands use
-    # minimum_time = ee_action_period * ee_min_time_factor.
+    # The Cartesian commands use
+    #   minimum_time = <action period> * ee_min_time_factor,
+    # so the robot reaches each target just as the next one arrives.
+    # With ee_auto_action_period=True the period is measured from the interval
+    # between send_action calls (moving average; pauses such as episode saving
+    # are ignored; kept within 0.01-0.2 s), so it follows --fps / the policy
+    # rate. ee_action_period (s) is then only the starting value, used for the
+    # first command and after a ready-pose motion. With False, ee_action_period
+    # is used as a fixed period (the behaviour of plugin 0.3.x).
+    ee_auto_action_period: bool = True
     ee_action_period: float = 1 / 15
     ee_min_time_factor: float = 1.02
 

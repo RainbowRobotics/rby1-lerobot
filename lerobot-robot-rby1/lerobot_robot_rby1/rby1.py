@@ -46,6 +46,7 @@ from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnected
 from . import command_builders as cb
 from . import model_probe
 from . import profile as rprofile
+from .action_period import ActionPeriodEstimator
 from .config_rby1 import (
     READY_HEAD,
     READY_LEFT,
@@ -136,6 +137,9 @@ class Rby1(Robot):
         # EE mode: last commanded Cartesian targets (None = next command
         # resets the impedance reference) and nullspace arm targets.
         self._last_ee_targets: cb.CartesianTargets | None = None
+        # Measured interval between EE actions (see ee_auto_action_period).
+        self._ee_period = ActionPeriodEstimator(config.ee_action_period)
+        self._clock = time.monotonic
         # The action send_action() last applied (as returned), for hold().
         self._last_sent: dict[str, float] | None = None
         self._null_right: np.ndarray = np.deg2rad(config.ee_null_right_arm_deg)
@@ -547,6 +551,7 @@ class Rby1(Robot):
                 logger.warning(f"profile apply: config fields taken from {path}: {', '.join(changed)}")
                 self._null_right = np.deg2rad(cfg.ee_null_right_arm_deg)
                 self._null_left = np.deg2rad(cfg.ee_null_left_arm_deg)
+                self._ee_period = ActionPeriodEstimator(cfg.ee_action_period)
         elif diffs:
             logger.warning(f"RB-Y1 config differs from the profile {path}:\n{rprofile.format_diffs(diffs)}")
 
@@ -863,6 +868,14 @@ class Rby1(Robot):
             left_arm=cb.pose_from_action(action, "left_ee")
             if cfg.use_left_arm else np.eye(4),
         )
+        # minimum_time follows the rate the actions really arrive at. A new
+        # stream or a ready-pose motion (no previous target) starts over from
+        # the configured period.
+        if self._last_ee_targets is None:
+            self._ee_period.reset()
+        period = self._ee_period.update(self._clock())
+        if not cfg.ee_auto_action_period:
+            period = cfg.ee_action_period
         reset = self._detect_ee_reset(targets)
         if reset.any:
             logger.info(
@@ -871,7 +884,7 @@ class Rby1(Robot):
             )
 
         body = cb.build_ee_command(
-            rby, cfg, targets, reset, self._null_right, self._null_left
+            rby, cfg, targets, reset, self._null_right, self._null_left, period
         )
         cbc = rby.ComponentBasedCommandBuilder().set_body_command(body)
         if cfg.use_mobile_base:

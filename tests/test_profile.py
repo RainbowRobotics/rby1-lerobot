@@ -178,9 +178,11 @@ def test_v1_profile_compares_and_applies(tmp_path, caplog) -> None:
         robot={"model": "a", "version": "1.2"}, version="1.2",
     )
     diffs = [d for d in rprofile.diff_profiles(ref, cur) if d.severity != rprofile.INFO]
-    # Same settings: only the left-arm values that no longer exist are reported.
+    # Same settings: only the left-arm values that no longer exist and the
+    # fixed EE period of 0.3.x are reported.
     assert sorted(d.key for d in diffs) == [
-        "robot_config.ee_arm_damping_ratio", "robot_config.joint_impedance_arm_stiffness",
+        "robot_config.ee_arm_damping_ratio", "robot_config.ee_auto_action_period",
+        "robot_config.joint_impedance_arm_stiffness",
     ]
     assert all(d.severity == rprofile.WARN for d in diffs)
 
@@ -193,6 +195,7 @@ def test_v1_profile_compares_and_applies(tmp_path, caplog) -> None:
                      use_gripper=True)
     assert robot._config.ee_arm_stiffness == [70.0] * 7
     assert robot._config.ee_min_time_factor == 1.5
+    assert robot._config.ee_auto_action_period is False  # as recorded with 0.3.x
     robot.disconnect()
 
 
