@@ -183,6 +183,7 @@ class Rby1LeaderArm(Teleoperator):
             barrier=cfg.joint_limit_barrier,
             gravity_scale=cfg.gravity_comp_scale,
             init_duration=cfg.init_duration,
+            resync_speed=np.deg2rad(cfg.resync_speed_deg_s),
         )
         self._leader_arm.start_control(self._control_loop)
 

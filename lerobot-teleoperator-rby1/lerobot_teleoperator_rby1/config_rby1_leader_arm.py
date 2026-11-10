@@ -129,6 +129,14 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # free (current-control) mode (button pressed).
     gravity_comp_scale: float = 0.4
 
+    # ── Button press ──────────────────────────────────────────────────
+    # While the button is released the arm is held with `torque_limit` only,
+    # so it can be pushed away from the target it outputs. When the button is
+    # then pressed, the output moves to the arm's real joint angles at this
+    # speed (deg/s per joint) instead of in one step, and follows the arm
+    # directly once it has caught up.
+    resync_speed_deg_s: float = 60.0
+
     # ── Wrist offset (leader → robot mapping) ────────────────────────
     # Mechanical zero-offset for the last joint of each arm (degrees).
     # Leader-arm reads 0 → robot receives +offset.
@@ -185,6 +193,8 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
             raise ValueError("control_frequency must be > 0")
         if self.init_duration < 0:
             raise ValueError("init_duration must be >= 0")
+        if self.resync_speed_deg_s <= 0:
+            raise ValueError("resync_speed_deg_s must be > 0")
         if self.connect_timeout_sec <= 0:
             raise ValueError("connect_timeout_sec must be > 0")
 

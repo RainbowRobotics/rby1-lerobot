@@ -2,7 +2,9 @@
 
 Encapsulates the cosine-interpolated init trajectory, gravity compensation,
 joint-limit barriers, viscous friction compensation, and button-driven free/hold mode
-switching that runs inside the rby1_sdk control callback.  State that used
+switching that runs inside the rby1_sdk control callback.  The joint target
+handed to the teleoperator is rate-limited after a button press, so it has
+no step when the arm is not where its hold target was.  State that used
 to be carried via one-element-list closures in ``rby1_leader_arm.connect()``
 is now plain instance attributes on this class.
 
@@ -33,6 +35,9 @@ class _ArmTrajState:
     init_start_q: np.ndarray | None = None     # Initial joint state at t=0
     init_target_q: np.ndarray | None = None    # Target joint state at t=duration
     hold_q: np.ndarray | None = None           # Latest "hold" command
+    out_q: np.ndarray | None = None            # Target handed to the teleoperator
+    button: int = 0                            # Button value of the last tick
+    resync: bool = False                       # out_q is catching up with hold_q
 
 
 @dataclass
@@ -52,12 +57,14 @@ class LeaderArmControlLoop:
     barrier: float
     gravity_scale: float
     init_duration: float
+    resync_speed: float  # rad/s
 
     # Mutable runtime state
     init_t0: float | None = None
     right_state: _ArmTrajState = field(default_factory=_ArmTrajState)
     left_state: _ArmTrajState = field(default_factory=_ArmTrajState)
     init_done: bool = False
+    last_tick: float | None = None
 
     # ------------------------------------------------------------------ #
 
@@ -140,9 +147,34 @@ class LeaderArmControlLoop:
         self._fill_arm_command(ma_input, state, torque, side="right", slice_=slice(0, 7))
         self._fill_arm_command(ma_input, state, torque, side="left", slice_=slice(7, 14))
 
+        now = time.time()
+        dt = 0.0 if self.last_tick is None else now - self.last_tick
+        self.last_tick = now
+        self._update_output(self.right_state, dt)
+        self._update_output(self.left_state, dt)
+
         with self.teleop._lock:
-            self.teleop._right_q = self.right_state.hold_q.copy()
-            self.teleop._left_q = self.left_state.hold_q.copy()
+            self.teleop._right_q = self.right_state.out_q.copy()
+            self.teleop._left_q = self.left_state.out_q.copy()
+
+    def _update_output(self, arm_state: _ArmTrajState, dt: float) -> None:
+        """Move the teleoperator target ``out_q`` to the hold command.
+
+        Normally they are equal.  A button press can move ``hold_q`` far in
+        one tick: in hold mode the arm is only held with a limited torque, so
+        it may have been pushed away from the hold command.  From the press
+        on ``out_q`` approaches at ``resync_speed`` until it has caught up.
+        """
+        if arm_state.out_q is None or not arm_state.resync:
+            arm_state.out_q = arm_state.hold_q.copy()
+            return
+        delta = arm_state.hold_q - arm_state.out_q
+        step = self.resync_speed * dt
+        if np.max(np.abs(delta)) <= step:
+            arm_state.out_q = arm_state.hold_q.copy()
+            arm_state.resync = False
+        else:
+            arm_state.out_q = arm_state.out_q + np.clip(delta, -step, step)
 
     def _fill_arm_command(
         self,
@@ -154,6 +186,10 @@ class LeaderArmControlLoop:
     ) -> None:
         button = state.button_right.button if side == "right" else state.button_left.button
         arm_state = self.right_state if side == "right" else self.left_state
+
+        if button == 1 and arm_state.button != 1:
+            arm_state.resync = True
+        arm_state.button = button
 
         if button == 1:
             # Free mode: gravity compensation only.

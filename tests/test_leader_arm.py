@@ -101,3 +101,44 @@ def test_connect_works_on_model_m(monkeypatch) -> None:
     leader.connect()
     leader.disconnect()
     assert "power_on" in [call[0] for call in rby.CALL_LOG[n:]]
+
+
+def test_button_press_does_not_step_the_output() -> None:
+    """The arm was pushed 1 rad off its hold target; pressing the button
+    brings the output there at resync_speed, then the output follows the arm."""
+    import time
+    from types import SimpleNamespace
+    from threading import Lock
+    from lerobot_teleoperator_rby1.leader_arm_controller import LeaderArmControlLoop
+
+    teleop = SimpleNamespace(_lock=Lock(), _right_q=None, _left_q=None, _init_done=False,
+                             _right_trigger=0.0, _left_trigger=0.0)
+    speed = 2.0  # rad/s
+    loop = LeaderArmControlLoop(
+        teleop=teleop, rby=rby, right_init_q=np.zeros(7), left_init_q=np.zeros(7),
+        min_q=np.full(14, -3.0), max_q=np.full(14, 3.0), torque_limit=np.ones(14),
+        viscous_gain=np.zeros(14), barrier=0.0, gravity_scale=1.0, init_duration=0.0,
+        resync_speed=speed,
+    )
+    q = np.zeros(14)
+    q[3] = 1.0  # right arm, pushed while the button is released
+
+    def tick(button: int) -> np.ndarray:
+        state = rby.upc.LeaderArm.State(q)
+        state.button_right.button = button
+        loop(state)
+        return teleop._right_q.copy()
+
+    assert tick(0)[3] == 0.0  # hold mode: the output is the hold target
+    outputs, t0 = [tick(0)], time.time()
+    while outputs[-1][3] < 1.0:
+        assert time.time() - t0 < 2.0
+        time.sleep(0.005)
+        outputs.append(tick(1))
+    elapsed = time.time() - t0
+    steps = np.diff([o[3] for o in outputs])
+    assert len(outputs) > 20 and steps.max() < 0.1  # no step
+    assert 0.4 < elapsed < 1.0  # 1 rad at 2 rad/s
+    q[3] = 1.3  # caught up: the output follows the arm directly
+    assert tick(1)[3] == 1.3
+    assert tick(0)[3] == 1.3 and not loop.right_state.resync

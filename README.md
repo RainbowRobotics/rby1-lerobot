@@ -264,6 +264,7 @@ see [Keeping robots consistent](#keeping-robots-consistent-robot-profile).
 | `use_gripper` | `True` | Read gripper state from trigger buttons |
 | `control_frequency` | `100.0` | Leader arm control loop frequency (Hz) |
 | `init_duration` | `5.0` | Time (s) to reach ready pose on `connect()` |
+| `resync_speed_deg_s` | `60.0` | Speed (deg/s per joint) at which the output catches up with the arm after a button press, when the arm was moved while the button was released |
 | `robot_address` | `"192.168.30.1:50051"` | Address of the robot the leader arm drives: used to switch on the 12 V supply and to read the joint limits |
 | `auto_power_on_12v` | `True` | Switch on the robot's 12 V supply (leader arm power) on `connect()` |
 | `require_robot_joint_limits` | `True` | Fail `connect()` when the joint limits cannot be read from the robot. `False`: warn and output targets without clipping (leader arm used without a robot) |
