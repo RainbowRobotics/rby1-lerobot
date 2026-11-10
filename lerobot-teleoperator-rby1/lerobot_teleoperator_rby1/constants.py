@@ -105,3 +105,11 @@ def leader_init_pose_for_version(
     right_deg[6] -= right_wrist_offset_deg
     left_deg[6] -= left_wrist_offset_deg
     return [float(v) for v in right_deg], [float(v) for v in left_deg]
+
+
+def leader_torso_target_for_version(version: str) -> list[float]:
+    """Torso joints (degrees) of the follower robot's ready pose for ``version``."""
+    from lerobot_robot_rby1.config_rby1 import ready_pose_for_version
+
+    body, _, _, _ = ready_pose_for_version(version)
+    return [float(v) for v in np.rad2deg(body[:TORSO_DOF])]

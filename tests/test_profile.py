@@ -194,3 +194,13 @@ def test_v1_profile_compares_and_applies(tmp_path, caplog) -> None:
     assert robot._config.ee_arm_stiffness == [70.0] * 7
     assert robot._config.ee_min_time_factor == 1.5
     robot.disconnect()
+
+
+def test_v1_joint_mode_torso_profile_is_rejected(tmp_path) -> None:
+    """0.3.x joint mode observed the torso without commanding it: other action keys."""
+    data = json.loads(V1_PROFILE.read_text())
+    data["robot_config"]["action_mode"] = "joint"
+    path = tmp_path / "v1.json"
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="torso observed but not commanded"):
+        _connect(profile_in=str(path), use_torso=True, use_gripper=True)
