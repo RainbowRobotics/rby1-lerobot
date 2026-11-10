@@ -27,6 +27,9 @@ from .constants import (
     RIGHT_ARM_NAMES,
     RIGHT_ARM_Q_MAX,
     RIGHT_ARM_Q_MIN,
+    TORSO_NAMES,
+    TORSO_Q_MAX,
+    TORSO_Q_MIN,
 )
 
 # Joint commands keep holding for this long (seconds) if the stream stalls.
@@ -214,25 +217,34 @@ def build_limb_command(
     )
 
 
-def clip_arm_targets(
+def clip_joint_targets(
     action: dict[str, Any],
     names: list[str],
     q_min: np.ndarray,
     q_max: np.ndarray,
 ) -> np.ndarray:
-    """Joint targets for one arm from ``<name>.pos`` keys, clipped to the URDF limits."""
+    """Joint targets for one group from ``<name>.pos`` keys, clipped to the URDF limits."""
     return np.clip(np.array([action[f"{name}{POS_SUFFIX}"] for name in names]), q_min, q_max)
 
 
-def clipped_arm_action(cfg: Any, action: dict[str, Any]) -> dict[str, float]:
-    """The ``<arm joint>.pos`` targets ``build_body_command`` sends, after clipping."""
-    sent: dict[str, float] = {}
+def _joint_groups(cfg: Any) -> list[tuple[str, list[str], np.ndarray, np.ndarray]]:
+    """``(group, joint names, q_min, q_max)`` of the groups joint mode commands, in action order."""
+    groups = []
+    if cfg.use_torso:
+        groups.append(("torso", TORSO_NAMES, TORSO_Q_MIN, TORSO_Q_MAX))
     if cfg.use_right_arm:
-        q = clip_arm_targets(action, RIGHT_ARM_NAMES, RIGHT_ARM_Q_MIN, RIGHT_ARM_Q_MAX)
-        sent.update({f"{n}{POS_SUFFIX}": float(v) for n, v in zip(RIGHT_ARM_NAMES, q)})
+        groups.append(("right_arm", RIGHT_ARM_NAMES, RIGHT_ARM_Q_MIN, RIGHT_ARM_Q_MAX))
     if cfg.use_left_arm:
-        q = clip_arm_targets(action, LEFT_ARM_NAMES, LEFT_ARM_Q_MIN, LEFT_ARM_Q_MAX)
-        sent.update({f"{n}{POS_SUFFIX}": float(v) for n, v in zip(LEFT_ARM_NAMES, q)})
+        groups.append(("left_arm", LEFT_ARM_NAMES, LEFT_ARM_Q_MIN, LEFT_ARM_Q_MAX))
+    return groups
+
+
+def clipped_joint_action(cfg: Any, action: dict[str, Any]) -> dict[str, float]:
+    """The ``<joint>.pos`` targets ``build_body_command`` sends, after clipping."""
+    sent: dict[str, float] = {}
+    for _, names, q_min, q_max in _joint_groups(cfg):
+        q = clip_joint_targets(action, names, q_min, q_max)
+        sent.update({f"{n}{POS_SUFFIX}": float(v) for n, v in zip(names, q)})
     return sent
 
 
@@ -245,58 +257,39 @@ def build_body_command(
     max_qddot: np.ndarray,
     minimum_time: float,
 ) -> tuple[Any, bool]:
-    """Assemble a body command for the enabled arms.
+    """Assemble a joint-mode body command for the enabled groups.
 
-    Disabled limbs are omitted entirely so the SDK holds them at their current
-    position.  The torso is observation-only and is never commanded here.
-    Joint targets are clipped to the URDF limits before being sent.
+    The torso (when ``use_torso``), right arm and left arm each get their own
+    joint position / joint impedance command.  Disabled groups are omitted
+    entirely so the SDK holds them at their current position.  Joint targets
+    are clipped to the URDF limits before being sent.
 
     Returns
     -------
     (body, has_command)
         ``body`` is a ``BodyComponentBasedCommandBuilder``; ``has_command`` is
-        True when at least one arm command was added (so the caller can skip an
-        empty body).
+        True when at least one group command was added (so the caller can skip
+        an empty body).
     """
-    stiffness = cfg.joint_impedance_arm_stiffness
-    torque_limit = cfg.joint_impedance_arm_torque_limit
     acc_scale = cfg.joint_acceleration_limit_scale
-
     body = rby.BodyComponentBasedCommandBuilder()
     has_command = False
 
-    if cfg.use_right_arm:
-        right_q = clip_arm_targets(action, RIGHT_ARM_NAMES, RIGHT_ARM_Q_MIN, RIGHT_ARM_Q_MAX)
-        body.set_right_arm_command(
-            build_limb_command(
-                rby,
-                position=right_q,
-                velocity_limit=max_qdot[model.right_arm_idx],
-                acceleration_limit=max_qddot[model.right_arm_idx] * acc_scale,
-                minimum_time=minimum_time,
-                use_impedance=cfg.use_joint_impedance,
-                stiffness=stiffness,
-                torque_limit=torque_limit,
-                damping_ratio=cfg.joint_impedance_damping_ratio,
-            )
+    for group, names, q_min, q_max in _joint_groups(cfg):
+        idx = getattr(model, f"{group}_idx")
+        kind = "torso" if group == "torso" else "arm"
+        limb = build_limb_command(
+            rby,
+            position=clip_joint_targets(action, names, q_min, q_max),
+            velocity_limit=max_qdot[idx],
+            acceleration_limit=max_qddot[idx] * acc_scale,
+            minimum_time=minimum_time,
+            use_impedance=cfg.use_joint_impedance,
+            stiffness=getattr(cfg, f"joint_impedance_{kind}_stiffness"),
+            torque_limit=getattr(cfg, f"joint_impedance_{kind}_torque_limit"),
+            damping_ratio=cfg.joint_impedance_damping_ratio,
         )
-        has_command = True
-
-    if cfg.use_left_arm:
-        left_q = clip_arm_targets(action, LEFT_ARM_NAMES, LEFT_ARM_Q_MIN, LEFT_ARM_Q_MAX)
-        body.set_left_arm_command(
-            build_limb_command(
-                rby,
-                position=left_q,
-                velocity_limit=max_qdot[model.left_arm_idx],
-                acceleration_limit=max_qddot[model.left_arm_idx] * acc_scale,
-                minimum_time=minimum_time,
-                use_impedance=cfg.use_joint_impedance,
-                stiffness=stiffness,
-                torque_limit=torque_limit,
-                damping_ratio=cfg.joint_impedance_damping_ratio,
-            )
-        )
+        getattr(body, f"set_{group}_command")(limb)
         has_command = True
 
     return body, has_command

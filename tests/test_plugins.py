@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from dataclasses import dataclass
 
 import draccus
@@ -56,5 +58,31 @@ def test_unsupported_options_are_rejected() -> None:
 
     with pytest.raises(ValueError, match="ub"):
         Rby1Config(model="ub")
-    with pytest.raises(ValueError, match="use_torso"):
-        Rby1LeaderArmConfig(use_torso=True)
+    with pytest.raises(ValueError, match="torso_target_deg"):
+        Rby1LeaderArmConfig(use_torso=True, torso_target_deg=[0.0] * 5)
+    with pytest.raises(ValueError, match="torso_target_deg"):
+        Rby1LeaderArmConfig(use_torso=True, torso_target_deg=[0.0, 0.0, 0.0, 120.0, 0.0, 0.0])
+
+
+def test_leader_arm_outputs_fixed_torso_target() -> None:
+    """With use_torso the leader arm emits every key the robot's joint action needs."""
+    import numpy as np
+    from lerobot_robot_rby1 import Rby1, Rby1Config
+    from lerobot_robot_rby1.constants import READY_TORSO
+    from lerobot_teleoperator_rby1 import Rby1LeaderArm, Rby1LeaderArmConfig
+
+    robot = Rby1(Rby1Config(address="stub.invalid:1", use_torso=True))
+    leader = Rby1LeaderArm(Rby1LeaderArmConfig(use_torso=True))
+    assert list(leader.action_features) == list(robot.action_features)
+    assert list(leader.action_features)[:6] == [f"torso_{i}.pos" for i in range(6)]
+
+    leader._is_connected = True  # get_action only reads the shared state
+    action = leader.get_action()
+    assert list(action) == list(robot.action_features)
+    assert [action[f"torso_{i}.pos"] for i in range(6)] == pytest.approx(list(READY_TORSO))
+
+    custom = Rby1LeaderArm(Rby1LeaderArmConfig(use_torso=True, torso_target_deg=[0, 10, -20, 30, 0, 0]))
+    custom._is_connected = True
+    assert custom.get_action()["torso_3.pos"] == pytest.approx(np.deg2rad(30.0))
+    # Without use_torso nothing changes.
+    assert "torso_0.pos" not in Rby1LeaderArm(Rby1LeaderArmConfig()).action_features

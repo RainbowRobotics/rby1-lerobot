@@ -86,7 +86,9 @@ class Rby1Config(RobotConfig):
     action_mode: str = "joint"
 
     # Joint groups included in the observation and the action. A disabled
-    # group is not commanded and holds its position.
+    # group is not commanded and holds its position. With use_torso=True the
+    # torso is commanded in both action modes (torso_0..5.pos in joint mode,
+    # torso_ee.* in EE mode), so the teleoperator or policy must provide it.
     use_torso: bool = False
     use_right_arm: bool = True
     use_left_arm: bool = True

@@ -7,7 +7,7 @@ imitation-learning inference).
 Joint layout (Model M, 26-DOF)::
 
     wheel_fr/fl/rr/rl   mobility            (excluded from obs/action)
-    torso_0 .. torso_5  torso, 6 DOF        (observation only by default)
+    torso_0 .. torso_5  torso, 6 DOF        (obs + action with use_torso)
     right_arm_0 .. _6   right arm, 7 DOF    (obs + action)
     left_arm_0 .. _6    left arm, 7 DOF     (obs + action)
     head_0, head_1      head                (excluded from obs/action)
@@ -91,8 +91,8 @@ class Rby1(Robot):
 
     Action features
     ---------------
-    In joint mode, joint positions (radians) for the enabled arms plus the
-    enabled grippers; the torso is observation-only and is never commanded.
+    In joint mode, joint positions (radians) for the enabled groups -- the
+    torso when ``use_torso`` is set, then the arms -- plus the enabled grippers.
     In EE mode (``action_mode="ee"``), end-effector poses
     (``<group>_ee.x/y/z/wx/wy/wz``) for each enabled group — including the
     torso when ``use_torso`` is set — plus the enabled grippers.
@@ -190,7 +190,9 @@ class Rby1(Robot):
             if self._config.use_left_arm:
                 names += LEFT_EE_NAMES
             return {name: float for name in names}
-        # Joint mode: torso is observation-only and is intentionally excluded.
+        # Joint mode: same order as the observation (torso, right arm, left arm).
+        if self._config.use_torso:
+            names += TORSO_NAMES
         if self._config.use_right_arm:
             names += RIGHT_ARM_NAMES
         if self._config.use_left_arm:
@@ -795,7 +797,7 @@ class Rby1(Robot):
     def _send_joint_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
         """Execute a joint-position action (``action_mode="joint"``).
 
-        Returns the arm targets actually commanded (clipped to joint limits).
+        Returns the joint targets actually commanded (clipped to joint limits).
         """
         # Start the startup ramp on the first command (after connect() and the
         # ready-pose motion are complete).
@@ -814,10 +816,12 @@ class Rby1(Robot):
             logger.debug(
                 f"[impedance] arm stiffness={self._config.joint_impedance_arm_stiffness}, "
                 f"torque_limit={self._config.joint_impedance_arm_torque_limit}, "
+                f"torso stiffness={self._config.joint_impedance_torso_stiffness}, "
+                f"torque_limit={self._config.joint_impedance_torso_torque_limit}, "
                 f"damping={self._config.joint_impedance_damping_ratio}"
             )
 
-        # Compose the per-tick command: enabled arms (held limbs are omitted)
+        # Compose the per-tick command: enabled groups (held limbs are omitted)
         # plus the optional mobile-base velocity. Both ride the same priority-1
         # stream so they are applied atomically.
         body, has_body = cb.build_body_command(
@@ -839,7 +843,7 @@ class Rby1(Robot):
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
         )
-        return cb.clipped_arm_action(self._config, action)
+        return cb.clipped_joint_action(self._config, action)
 
     def _send_ee_action(self, rby: Any, action: dict[str, Any]) -> None:
         """Execute an end-effector pose action (``action_mode="ee"``).

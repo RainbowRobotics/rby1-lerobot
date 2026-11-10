@@ -63,6 +63,12 @@
       "left_gripper_0.pos"
     ],
     "action": [
+      "torso_0.pos",
+      "torso_1.pos",
+      "torso_2.pos",
+      "torso_3.pos",
+      "torso_4.pos",
+      "torso_5.pos",
       "right_arm_0.pos",
       "right_arm_1.pos",
       "right_arm_2.pos",

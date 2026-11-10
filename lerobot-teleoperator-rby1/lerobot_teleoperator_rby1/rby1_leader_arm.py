@@ -18,6 +18,8 @@ the follower's :meth:`send_action`'s job, per LeRobot convention.
 
 Action keys
 -----------
+    torso_0.pos … torso_5.pos           (rad; only with use_torso, a fixed
+                                         target: the leader arm has no torso)
     right_arm_0.pos … right_arm_6.pos   (rad)
     left_arm_0.pos  … left_arm_6.pos    (rad)
     right_gripper_0.pos                 (1.0 = open, 0.0 = closed)
@@ -52,6 +54,7 @@ from .constants import (
     RIGHT_ARM_NAMES,
     RIGHT_ARM_Q_MAX,
     RIGHT_ARM_Q_MIN,
+    TORSO_NAMES,
 )
 from .leader_arm_controller import LeaderArmControlLoop
 
@@ -106,6 +109,8 @@ class Rby1LeaderArm(Teleoperator):
     def action_features(self) -> dict[str, type]:
         cfg = self._config
         names: list[str] = []
+        if cfg.use_torso:
+            names += TORSO_NAMES
         if cfg.use_right_arm:
             names += RIGHT_ARM_NAMES
         if cfg.use_left_arm:
@@ -234,6 +239,11 @@ class Rby1LeaderArm(Teleoperator):
             left_trigger = self._left_trigger
 
         action: dict[str, Any] = {}
+
+        if cfg.use_torso:
+            # No torso on the leader arm: a fixed target (see torso_target_deg).
+            for name, deg in zip(TORSO_NAMES, cfg.torso_target_deg):
+                action[f"{name}{POS_SUFFIX}"] = float(np.deg2rad(deg))
 
         if cfg.use_right_arm:
             right_q_out = right_q.copy()

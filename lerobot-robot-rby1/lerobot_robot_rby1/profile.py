@@ -391,11 +391,15 @@ def diff_profiles(reference: dict[str, Any], current: dict[str, Any]) -> list[Di
                 diffs.append(Diff(key, ref_v, cur_v, severity))
     # Values a format-1 profile held that the current fields cannot express.
     for side, other in ((reference, current), (current, reference)):
-        for name, note in (side.get(UPGRADE_NOTES_KEY) or {}).items():
-            if not any(d.key == f"robot_config.{name}" for d in diffs):
+        for notes_key, severity in ((UPGRADE_NOTES_KEY, WARN), (UPGRADE_ERRORS_KEY, ERROR)):
+            for name, note in (side.get(notes_key) or {}).items():
+                if any(d.key == f"robot_config.{name}" for d in diffs):
+                    continue
+                if _equal(note, (other.get(notes_key) or {}).get(name)):
+                    continue  # both sides are the same old profile
                 shown = (other.get("robot_config") or {}).get(name, "<missing>")
                 pair = (note, shown) if side is reference else (shown, note)
-                diffs.append(Diff(f"robot_config.{name}", *pair, WARN))
+                diffs.append(Diff(f"robot_config.{name}", *pair, severity))
     for key in ("plugin_version", "lerobot_version"):
         if key in reference and key in current and reference[key] != current[key]:
             diffs.append(Diff(key, reference[key], current[key], INFO))
@@ -517,6 +521,9 @@ _V1_BODY_ARRAYS = {
 }
 # Top-level key: {field: note} for format-1 values the current fields cannot hold.
 UPGRADE_NOTES_KEY = "upgrade_notes"
+# Top-level key: {field: note} for format-1 settings whose meaning changed, so
+# the profile's dataset no longer matches the features of the same config.
+UPGRADE_ERRORS_KEY = "upgrade_errors"
 
 
 def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
@@ -543,6 +550,13 @@ def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
     out = {**data, "format_version": FORMAT_VERSION, "upgraded_from_format": 1, "robot_config": cfg}
     if notes:
         out[UPGRADE_NOTES_KEY] = notes
+    if cfg.get("action_mode") == "joint" and cfg.get("use_torso"):
+        # Plugin 0.3.x observed the torso in joint mode but did not command it:
+        # such datasets have no torso_*.pos action keys.
+        out[UPGRADE_ERRORS_KEY] = {
+            "use_torso": "true, torso observed but not commanded (plugin 0.3.x joint mode; "
+            "use plugin 0.3.x with this dataset)"
+        }
     return out
 
 
@@ -598,7 +612,7 @@ def write_profile(path: str | os.PathLike, profile: dict[str, Any], force: bool 
     if path.is_file():
         existing = upgrade_profile(json.loads(path.read_text()), path)
         merged = {**existing, **{k: v for k, v in profile.items() if k != "teleop"}}
-        for key in (UPGRADE_NOTES_KEY, "upgraded_from_format"):
+        for key in (UPGRADE_NOTES_KEY, UPGRADE_ERRORS_KEY, "upgraded_from_format"):
             merged.pop(key, None)
         if existing.get("robot_config"):
             diffs = [d for d in diff_profiles(existing, profile) if d.severity in (ERROR, WARN)]

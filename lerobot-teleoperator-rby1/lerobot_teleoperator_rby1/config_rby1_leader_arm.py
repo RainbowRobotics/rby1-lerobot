@@ -3,12 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List
 
+import numpy as np
 from lerobot.teleoperators.config import TeleoperatorConfig
 
 from .constants import (
     ARM_DOF,
     SUPPORTED_LEADER_VERSIONS,
+    TORSO_DOF,
+    TORSO_Q_MAX,
+    TORSO_Q_MIN,
     leader_init_pose_for_version,
+    leader_torso_target_for_version,
 )
 
 _LEADER_DOF = 2 * ARM_DOF  # 14
@@ -50,11 +55,17 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # ── Joint group selection ─────────────────────────────────────────
     # Must match the corresponding flags in Rby1Config so that
     # action_features are consistent between teleoperator and robot.
-    # The leader arm has no torso joints and the follower's joint-mode
-    # actions never include the torso, so this must stay False.
     use_torso: bool = False
     use_right_arm: bool = True
     use_left_arm: bool = True
+
+    # The leader arm has no torso joints. With use_torso=True it outputs this
+    # fixed torso target (degrees, torso_0..5) on every action, so the robot
+    # holds the torso there and the dataset records it. None -> the torso of
+    # the robot's ready pose for `version`. If the robot's torso is elsewhere
+    # when teleoperation starts, it moves to this target during the robot's
+    # startup ramp (Rby1Config.joint_startup_min_time).
+    torso_target_deg: List[float] | None = None
 
     # Enable gripper control via trigger buttons on the leader arm.
     use_gripper: bool = True
@@ -131,11 +142,6 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # ------------------------------------------------------------------ #
 
     def __post_init__(self) -> None:
-        if self.use_torso:
-            raise ValueError(
-                "Rby1LeaderArmConfig.use_torso is not supported: the leader arm has no "
-                "torso joints and Rby1 joint-mode actions do not include the torso."
-            )
         version = self.version.strip()
         if version not in SUPPORTED_LEADER_VERSIONS:
             raise ValueError(
@@ -153,6 +159,17 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
             self.right_init_q_deg = default_right
         if self.left_init_q_deg is None:
             self.left_init_q_deg = default_left
+
+        if self.torso_target_deg is None:
+            self.torso_target_deg = leader_torso_target_for_version(version)
+        self._check_len("torso_target_deg", self.torso_target_deg, TORSO_DOF)
+        lo, hi = np.rad2deg(TORSO_Q_MIN), np.rad2deg(TORSO_Q_MAX)
+        for i, value in enumerate(self.torso_target_deg):
+            if not lo[i] - 1e-6 <= value <= hi[i] + 1e-6:
+                raise ValueError(
+                    f"Rby1LeaderArmConfig.torso_target_deg[{i}] = {value} is outside the "
+                    f"torso joint limit [{lo[i]:.1f}, {hi[i]:.1f}] deg."
+                )
 
         self._check_len("right_init_q_deg", self.right_init_q_deg, ARM_DOF)
         self._check_len("left_init_q_deg", self.left_init_q_deg, ARM_DOF)
