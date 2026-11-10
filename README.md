@@ -264,6 +264,16 @@ see [Keeping robots consistent](#keeping-robots-consistent-robot-profile).
 | `use_gripper` | `True` | Read gripper state from trigger buttons |
 | `control_frequency` | `100.0` | Leader arm control loop frequency (Hz) |
 | `init_duration` | `5.0` | Time (s) to reach ready pose on `connect()` |
+| `robot_address` | `"192.168.30.1:50051"` | Address of the robot the leader arm drives: used to switch on the 12 V supply and to read the joint limits |
+| `auto_power_on_12v` | `True` | Switch on the robot's 12 V supply (leader arm power) on `connect()` |
+| `require_robot_joint_limits` | `True` | Fail `connect()` when the joint limits cannot be read from the robot. `False`: warn and output targets without clipping (leader arm used without a robot) |
+
+Joint limits are not stored in the plugins. The robot plugin and the leader arm both read
+them from the robot (its URDF, so they match the model and version) at `connect()` and
+clip joint targets to them. The leader arm connects to `robot_address` for this, reads
+only, and disconnects before the robot plugin connects. `lerobot-record` stores the
+teleoperator's action, so the recorded action is already inside the robot's limits.
+`torso_target_deg` outside the robot's torso limits is an error at `connect()`.
 
 The leader arm has no torso joints. With `use_torso=True` on both the robot and the
 leader arm, every action carries `torso_target_deg`, so the robot holds its torso there
@@ -370,8 +380,7 @@ inference time. The profile contains:
 - every core parameter (`get_parameter_list`), e.g. command cutoff frequencies,
   velocity / acceleration / torque limit scaling, canceling times, friction
   compensation
-- the full `Rby1Config` and the plugin's hard-coded constants (ready pose, joint
-  clip limits)
+- the full `Rby1Config` and the plugin's hard-coded constants (ready pose)
 - the teleoperator config (recorded only)
 
 The file lives in the dataset's `meta/` folder, which `LeRobotDataset` uploads
@@ -481,6 +490,11 @@ Breaking changes in 0.4.0:
   with them. The leader arm now accepts `use_torso=True` and outputs a fixed torso target.
 - **EE mode measures the action period** instead of assuming 15 Hz
   (`ee_auto_action_period=False` restores the fixed period).
+- **Joint limits are read from the robot** instead of constants in the plugins. The old
+  constants were wrong for `torso_2` (−150°..90°, the robot has −140°..80°) and for the
+  Model M v1.3 wrist (`arm_5`, `arm_6`). The leader arm now needs to reach the robot at
+  `--teleop.robot_address` on `connect()`; set `--teleop.require_robot_joint_limits=false`
+  to use it without a robot.
 - Robot profiles written by 0.3.x are still read: field names are converted on load, and
   `profile_mode=apply` restores the fixed EE period they were recorded with.
 
