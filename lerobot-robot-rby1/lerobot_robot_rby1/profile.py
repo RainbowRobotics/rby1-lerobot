@@ -267,10 +267,6 @@ def plugin_constants(version: str) -> dict[str, Any]:
     return to_jsonable(
         {
             "ready_pose": {"body": body, "head": head},
-            "arm_q_limits": {
-                "right": [c.RIGHT_ARM_Q_MIN, c.RIGHT_ARM_Q_MAX],
-                "left": [c.LEFT_ARM_Q_MIN, c.LEFT_ARM_Q_MAX],
-            },
             "joint_command_hold_time": cb._CONTROL_HOLD_TIME,
             "gripper": {
                 "homing_torque": c.GRIPPER_HOMING_TORQUE,
@@ -353,6 +349,10 @@ def _severity(key: str) -> str | None:
         name = rest.rsplit(".", 1)[0] if rest.endswith((".value", ".type")) else rest
         return WARN if name in COMPARED_CORE_PARAMETERS else None
     if section == "plugin_constants":
+        if rest.split(".", 1)[0] == "arm_q_limits":
+            # Recorded by older plugins, which clipped to hard-coded limits. The
+            # limits now come from the robot and are compared as robot.joint_limits.
+            return None
         return WARN
     if section in ("plugin_version", "lerobot_version"):
         return INFO

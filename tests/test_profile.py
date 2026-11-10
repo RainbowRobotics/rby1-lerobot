@@ -185,6 +185,9 @@ def test_v1_profile_compares_and_applies(tmp_path, caplog) -> None:
         "robot_config.joint_impedance_arm_stiffness",
     ]
     assert all(d.severity == rprofile.WARN for d in diffs)
+    # The old profile recorded hard-coded arm limits; the limits now come from
+    # the robot (robot.joint_limits), so the missing constant is not a difference.
+    assert "arm_q_limits" in ref["plugin_constants"] and "arm_q_limits" not in cur["plugin_constants"]
 
     data = json.loads(V1_PROFILE.read_text())
     data["robot_config"]["right_arm_stiffness"] = [70.0] * 7

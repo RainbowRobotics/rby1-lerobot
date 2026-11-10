@@ -172,6 +172,24 @@ class _DynState:
         return self.q.copy()
 
 
+# Joint position limits (radians) the fake dynamics model reports: the values of
+# the SDK URDFs for Model A / M up to v1.2. Tests may change entries (and must
+# restore them) to model another robot, e.g. the narrower M v1.3 wrist.
+_Q_LIMIT_DEFAULT = (-np.pi, np.pi)  # wheels and anything not listed
+_ARM_Q_LIMITS = [
+    (-3.141592654, 3.141592654), None, (-3.141592654, 3.141592654), (-2.617993878, 0.017453293),
+    (-3.141592654, 3.141592654), (-1.570796327, 1.919862177), (-2.705260340, 2.705260340),
+]
+JOINT_Q_LIMITS: dict[str, tuple[float, float]] = {
+    "torso_0": (-0.261799388, 0.261799388), "torso_1": (-0.523598776, 1.570796327),
+    "torso_2": (-2.4434609528, 1.3962634016), "torso_3": (-0.785398163, 1.570796327),
+    "torso_4": (-0.523598776, 0.523598776), "torso_5": (-2.35619449, 2.35619449),
+    **{f"right_arm_{i}": lim or (-3.141592654, 0.017453293) for i, lim in enumerate(_ARM_Q_LIMITS)},
+    **{f"left_arm_{i}": lim or (-0.017453293, 3.141592654) for i, lim in enumerate(_ARM_Q_LIMITS)},
+    "head_0": (-1.57, 1.57), "head_1": (-1.57, 1.57),
+}
+
+
 class _Dynamics:
     def __init__(self, model):
         self._model = model
@@ -186,10 +204,10 @@ class _Dynamics:
         return np.full(len(state.joints), 1.0)
 
     def get_limit_q_lower(self, state):
-        return np.full(len(state.joints), -np.pi)
+        return np.array([JOINT_Q_LIMITS.get(j, _Q_LIMIT_DEFAULT)[0] for j in state.joints])
 
     def get_limit_q_upper(self, state):
-        return np.full(len(state.joints), np.pi)
+        return np.array([JOINT_Q_LIMITS.get(j, _Q_LIMIT_DEFAULT)[1] for j in state.joints])
 
     def compute_forward_kinematics(self, state):
         pass

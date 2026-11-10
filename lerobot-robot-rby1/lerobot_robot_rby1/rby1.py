@@ -127,6 +127,8 @@ class Rby1(Robot):
         self._model = None
         self._stream = None
         self._gripper: Rby1Gripper | None = None
+        self._q_lower: np.ndarray | None = None
+        self._q_upper: np.ndarray | None = None
         self._max_qdot: np.ndarray | None = None
         self._max_qddot: np.ndarray | None = None
         self._is_connected: bool = False
@@ -372,11 +374,13 @@ class Rby1(Robot):
                     f"(state={cm_state.state}); check the robot's fault log."
                 )
 
-            # 4. Cache the model (joint index arrays) and URDF velocity / acceleration
-            #    limits from the dynamics model.
+            # 4. Cache the model (joint index arrays) and the URDF position /
+            #    velocity / acceleration limits from the dynamics model.
             self._model = self._robot.model()
             dyn_model = self._robot.get_dynamics()
             dyn_state = dyn_model.make_state([], self._model.robot_joint_names)
+            self._q_lower = np.asarray(dyn_model.get_limit_q_lower(dyn_state), dtype=np.float64)
+            self._q_upper = np.asarray(dyn_model.get_limit_q_upper(dyn_state), dtype=np.float64)
             self._max_qdot = dyn_model.get_limit_qdot_upper(dyn_state)
             self._max_qddot = dyn_model.get_limit_qddot_upper(dyn_state)
             # The wrist (last arm joint) needs extra velocity headroom in impedance mode.
@@ -481,6 +485,8 @@ class Rby1(Robot):
 
         self._model = None
         self._stream = None
+        self._q_lower = None
+        self._q_upper = None
         self._max_qdot = None
         self._max_qddot = None
         self._is_connected = False
@@ -802,7 +808,7 @@ class Rby1(Robot):
     def _send_joint_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
         """Execute a joint-position action (``action_mode="joint"``).
 
-        Returns the joint targets actually commanded (clipped to joint limits).
+        Returns the joint targets actually commanded (clipped to the robot's joint limits).
         """
         # Start the startup ramp on the first command (after connect() and the
         # ready-pose motion are complete).
@@ -829,11 +835,13 @@ class Rby1(Robot):
         # Compose the per-tick command: enabled groups (held limbs are omitted)
         # plus the optional mobile-base velocity. Both ride the same priority-1
         # stream so they are applied atomically.
-        body, has_body = cb.build_body_command(
+        body, has_body, sent = cb.build_body_command(
             rby,
             self._config,
             action,
             self._model,
+            self._q_lower,
+            self._q_upper,
             self._max_qdot,
             self._max_qddot,
             minimum_time,
@@ -848,7 +856,7 @@ class Rby1(Robot):
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
         )
-        return cb.clipped_joint_action(self._config, action)
+        return sent
 
     def _send_ee_action(self, rby: Any, action: dict[str, Any]) -> None:
         """Execute an end-effector pose action (``action_mode="ee"``).

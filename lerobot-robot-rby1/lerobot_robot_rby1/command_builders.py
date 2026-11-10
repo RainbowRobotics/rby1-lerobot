@@ -21,15 +21,9 @@ from scipy.spatial.transform import Rotation as R
 from .constants import (
     EE_SUFFIXES,
     LEFT_ARM_NAMES,
-    LEFT_ARM_Q_MAX,
-    LEFT_ARM_Q_MIN,
     POS_SUFFIX,
     RIGHT_ARM_NAMES,
-    RIGHT_ARM_Q_MAX,
-    RIGHT_ARM_Q_MIN,
     TORSO_NAMES,
-    TORSO_Q_MAX,
-    TORSO_Q_MIN,
 )
 
 # Joint commands keep holding for this long (seconds) if the stream stalls.
@@ -229,29 +223,20 @@ def clip_joint_targets(
     q_min: np.ndarray,
     q_max: np.ndarray,
 ) -> np.ndarray:
-    """Joint targets for one group from ``<name>.pos`` keys, clipped to the URDF limits."""
+    """Joint targets for one group from ``<name>.pos`` keys, clipped to ``q_min`` / ``q_max``."""
     return np.clip(np.array([action[f"{name}{POS_SUFFIX}"] for name in names]), q_min, q_max)
 
 
-def _joint_groups(cfg: Any) -> list[tuple[str, list[str], np.ndarray, np.ndarray]]:
-    """``(group, joint names, q_min, q_max)`` of the groups joint mode commands, in action order."""
+def _joint_groups(cfg: Any) -> list[tuple[str, list[str]]]:
+    """``(group, joint names)`` of the groups joint mode commands, in action order."""
     groups = []
     if cfg.use_torso:
-        groups.append(("torso", TORSO_NAMES, TORSO_Q_MIN, TORSO_Q_MAX))
+        groups.append(("torso", TORSO_NAMES))
     if cfg.use_right_arm:
-        groups.append(("right_arm", RIGHT_ARM_NAMES, RIGHT_ARM_Q_MIN, RIGHT_ARM_Q_MAX))
+        groups.append(("right_arm", RIGHT_ARM_NAMES))
     if cfg.use_left_arm:
-        groups.append(("left_arm", LEFT_ARM_NAMES, LEFT_ARM_Q_MIN, LEFT_ARM_Q_MAX))
+        groups.append(("left_arm", LEFT_ARM_NAMES))
     return groups
-
-
-def clipped_joint_action(cfg: Any, action: dict[str, Any]) -> dict[str, float]:
-    """The ``<joint>.pos`` targets ``build_body_command`` sends, after clipping."""
-    sent: dict[str, float] = {}
-    for _, names, q_min, q_max in _joint_groups(cfg):
-        q = clip_joint_targets(action, names, q_min, q_max)
-        sent.update({f"{n}{POS_SUFFIX}": float(v) for n, v in zip(names, q)})
-    return sent
 
 
 def build_body_command(
@@ -259,34 +244,41 @@ def build_body_command(
     cfg: Any,
     action: dict[str, Any],
     model: Any,
+    q_lower: np.ndarray,
+    q_upper: np.ndarray,
     max_qdot: np.ndarray,
     max_qddot: np.ndarray,
     minimum_time: float,
-) -> tuple[Any, bool]:
+) -> tuple[Any, bool, dict[str, float]]:
     """Assemble a joint-mode body command for the enabled groups.
 
     The torso (when ``use_torso``), right arm and left arm each get their own
     joint position / joint impedance command.  Disabled groups are omitted
     entirely so the SDK holds them at their current position.  Joint targets
-    are clipped to the URDF limits before being sent.
+    are clipped to the robot's position limits before being sent: ``q_lower``
+    / ``q_upper`` (like ``max_qdot`` / ``max_qddot``) are the limits of every
+    robot joint, read from the robot's dynamics model at connect.
 
     Returns
     -------
-    (body, has_command)
+    (body, has_command, sent)
         ``body`` is a ``BodyComponentBasedCommandBuilder``; ``has_command`` is
         True when at least one group command was added (so the caller can skip
-        an empty body).
+        an empty body); ``sent`` holds the ``<joint>.pos`` targets that were
+        put in the command, after clipping.
     """
     acc_scale = cfg.joint_acceleration_limit_scale
     body = rby.BodyComponentBasedCommandBuilder()
     has_command = False
+    sent: dict[str, float] = {}
 
-    for group, names, q_min, q_max in _joint_groups(cfg):
+    for group, names in _joint_groups(cfg):
         idx = getattr(model, f"{group}_idx")
         kind = "torso" if group == "torso" else "arm"
+        position = clip_joint_targets(action, names, q_lower[idx], q_upper[idx])
         limb = build_limb_command(
             rby,
-            position=clip_joint_targets(action, names, q_min, q_max),
+            position=position,
             velocity_limit=max_qdot[idx],
             acceleration_limit=max_qddot[idx] * acc_scale,
             minimum_time=minimum_time,
@@ -297,8 +289,9 @@ def build_body_command(
         )
         getattr(body, f"set_{group}_command")(limb)
         has_command = True
+        sent.update({f"{n}{POS_SUFFIX}": float(v) for n, v in zip(names, position)})
 
-    return body, has_command
+    return body, has_command, sent
 
 
 def build_mobility_command(
