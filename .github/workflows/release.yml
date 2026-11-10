@@ -18,7 +18,7 @@ jobs:
       lerobot_spec: ${{ steps.info.outputs.lerobot_spec }}
       lerobot_tested: ${{ steps.info.outputs.lerobot_tested }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Tag must be on main
@@ -41,7 +41,7 @@ jobs:
     needs: [check, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
