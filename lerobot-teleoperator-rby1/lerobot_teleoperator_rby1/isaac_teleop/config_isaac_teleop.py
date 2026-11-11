@@ -1,4 +1,4 @@
-"""Config dataclasses for the Isaac Teleop devices.
+"""Config dataclasses for the Isaac Capture devices.
 
 Adapted from the upstream LeRobot example
 ``examples/isaac_teleop_to_so101/isaac_teleop/config_isaac_teleop.py``.
@@ -42,7 +42,7 @@ VIZ_BRIDGE_CHOICES = ("auto", "identity")
 
 @dataclass(kw_only=True)
 class IsaacTeleopConfig(TeleoperatorConfig):
-    """Shared config for all Isaac Teleop-backed teleoperators."""
+    """Shared config for all Isaac Capture-backed teleoperators."""
 
     # Session name shown by the CloudXR runtime / OpenXR.
     app_name: str = "rby1_isaac"
@@ -244,7 +244,7 @@ class Rby1XRConfig(IsaacTeleopConfig):
     head_gaze_frame: str = "base"
 
     # ── Torso driver ──────────────────────────────────────────────────
-    # "body": Isaac Teleop FullBodySource (Quest 3 IOBT / Pico trackers),
+    # "body": Isaac Capture FullBodySource (Quest 3 IOBT / Pico trackers),
     # "head": headset pose, "none": torso target frozen at its start pose.
     torso_source: str = "body"
     # When the torso follows its driver: only while BOTH enabled arms are

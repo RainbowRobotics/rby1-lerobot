@@ -144,6 +144,209 @@ lerobot-teleoperate \
 Replace `XXXXXXXXX` with your RealSense serial number. You can add `right` and
 `left` cameras using the same pattern.
 
+## Teleoperate with NVIDIA Isaac Capture (XR headset)
+
+> [!WARNING]
+> This device was developed on an earlier branch and has been moved to the current
+> robot plugin and to `isaaccapture` 1.6 with offline tests only. It has **not been
+> run on a robot or a headset in this form**. The arm gains in EE mode are now the
+> stiff defaults (`ee_arm_stiffness` `[1075, …]`, about 13 times the 80 Nm/rad the
+> device was tuned with), so start with small, slow motions.
+
+`--teleop.type=rby1_isaac` drives the RB-Y1 from an XR headset through
+[NVIDIA Isaac Capture](https://github.com/NVIDIA/IsaacCapture) (the package formerly
+named Isaac Teleop): the CloudXR runtime runs on the host that runs
+`lerobot-teleoperate` / `lerobot-record`, and the headset connects with its
+**browser** (no app to install). Both controllers move the arms
+(end-effector space, executed by the robot's onboard Cartesian impedance solver), the
+headset orientation drives the head joints, body tracking drives the torso and the
+thumbsticks drive the mobile base.
+
+### Requirements
+
+- Host with an NVIDIA GPU: Ubuntu 22.04/24.04, Python 3.12. x86_64 workstations are
+  the documented target; `isaaccapture` also ships aarch64 wheels and selects an
+  experimental CloudXR runtime on **Jetson Orin** (the RB-Y1 UPC). On the UPC run the
+  preflight first (below).
+- Headset: Meta Quest 3 (controllers, head and inside-out body tracking) or Pico 4
+  Ultra (+ motion trackers for body tracking). The headset and the host must be on
+  the same network.
+
+### Install
+
+```bash
+pip install -e "lerobot-teleoperator-rby1[isaac]"   # isaaccapture[cloudxr,retargeters-lite] 1.6.x
+# once: accept the NVIDIA CloudXR EULA; downloads the runtime and starts the service
+python -m isaaccapture.cloudxr.service start --accept-eula
+```
+
+The CloudXR runtime is a **host service** that is separate from the teleoperation
+process. `rby1_isaac` attaches to a running service, or starts one when none runs, and
+leaves it running when the program ends, so the headset stays connected between runs.
+
+```bash
+python -m isaaccapture.cloudxr.service status
+python -m isaaccapture.cloudxr.service stop      # e.g. before changing the device profile or env file
+```
+
+- Without the EULA acceptance `connect()` stops with the command above instead of
+  asking on the terminal.
+- A running service keeps the device profile and env file it was started with;
+  `cloudxr_device_profile` / `cloudxr_env_file` only apply when this process starts
+  the service. Stop the service first to change them.
+- `--teleop.cloudxr_run_embedded=true` runs the runtime inside the teleoperation
+  process and stops it with the process (e.g. in a container). It is refused while a
+  service is running.
+
+### Jetson Orin (UPC) preflight
+
+With the in-process runtime of `isaacteleop` 1.4, the CloudXR runtime on Orin aborted
+the process when a Python thread was created after the runtime started;
+`lerobot-record` creates its keyboard and camera threads after `teleop.connect()`.
+Whether the detached service of 1.6 removes this is not yet confirmed on the UPC. The
+preflight runs each ordering in a subprocess and prints a verdict (`GO`,
+`GO-DEFERRED` → add `--teleop.session_start=first_action`, or `NO-GO` → run on an x86
+host). Every stage opens a session, which waits for the headset, so keep the CloudXR
+web client connected while it runs:
+
+```bash
+python lerobot-teleoperator-rby1/scripts/isaac_preflight_upc.py \
+  --robot 192.168.30.1:50051 --camera-serial XXXXXXXXX --record-dryrun
+```
+
+### Run
+
+```bash
+lerobot-teleoperate \
+  --robot.type=rby1 \
+  --robot.address=192.168.30.1:50051 \
+  --robot.action_mode=ee \
+  --robot.use_torso=true \
+  --robot.use_head=true \
+  --robot.use_mobile_base=true \
+  --robot.ee_ready_torso_deg='[0,45,-90,45,0,0]' \
+  --teleop.type=rby1_isaac \
+  --teleop.robot_address=192.168.30.1:50051
+```
+
+`--robot.ee_ready_torso_deg` is needed with `--robot.use_torso=true`: the default ready
+torso (`[0, 0, 0, 20, 0, 0]`, `torso_2` = 0) lies outside the torso solver's joint limits
+(`torso_2` ≤ −0.2 rad), and the teleoperator's torso box (`torso_pos_*`, `torso_rpy_*`)
+was measured around the crouched pose `[0, 45, -90, 45, 0, 0]`. The robot warns at
+connect when the ready torso is outside the limits.
+
+The arms use the absolute mapping (hand relative to your body-tracked shoulder, scaled
+onto the robot shoulder) with the elbow following your own (`arm_posture_hint`, default
+on). To disable the elbow hint:
+
+```bash
+lerobot-teleoperate ... --teleop.type=rby1_isaac --teleop.arm_posture_hint=false
+```
+
+#### Camera panels in the headset (Televiz)
+
+The robot cameras can be shown in the headset as floating panels (one per camera,
+rendered by Isaac Capture's Televiz through the same CloudXR connection). The frames
+come from the robot's own camera reads (`--robot.cameras`), so nothing is opened twice:
+
+```bash
+lerobot-teleoperate ... \
+  --robot.cameras='{"front": {...}, "left": {...}, "right": {...}}' \
+  --teleop.viz_enabled=true --teleop.viz_cameras='["front","left","right"]' \
+  --teleop.viz_offsets_x='[0.0,-1.1,1.1]'
+```
+
+Televiz takes frames as CUDA arrays. They are uploaded with **CuPy** (`cupy-cuda12x`,
+installed by `isaaccapture[cloudxr]`), as in the upstream `camera_viz` example. The
+teleoperator runs a small upload check when the Televiz session is created and stops
+with a hint if CuPy cannot reach the GPU:
+
+```bash
+python -c "import cupy; print(cupy.zeros(1).device)"
+```
+
+`cupy-cuda12x` has not been checked on the UPC (JetPack 6) yet.
+
+Panels follow your head position, yaw and pitch — never roll — (`viz_lock_mode=gimbal`;
+`viz_follow_pitch=false` for yaw only, `head` = full head lock including roll, `world` =
+fixed in the room) and turn to face you (`viz_face_head`).
+
+**Moving the panels in the headset.** Like the CloudXR web client's own control panel,
+every camera panel has a **grab bar** above it (`viz_grab_enabled`, default on). Point a
+*free* hand at the bar — free = squeeze released, arm not clutched — it brightens; **hold
+the trigger** and move the controller to drag the panel (the bar turns orange), push /
+pull it with that hand's thumbstick, release the trigger to drop it. While a free hand
+points at or holds a bar its trigger is a UI click: that gripper keeps its last value and
+the hand cannot clutch until it lets go. Moved panels keep the lock mode (gimbal: the new
+offsets follow your head) and are saved to `viz_layout_file`
+(`~/.cache/rby1_isaac/viz_layout.json`), restored on the next run; `--teleop.viz_layout_reset=true`
+starts from the config values again. The controller rays live in the tracking session's
+OpenXR space and the panels in Televiz's; the first 30 ticks estimate the transform
+between the two from the head pose seen by both (`viz_frame_bridge=auto`, logged as
+"frame bridge: translation … rotation …", identity when both spaces coincide). 
+
+On **Jetson Orin** keep `viz_openxr_composition=false` (default) and set the **Video
+Codec to H.264** in the CloudXR web client, otherwise the panels show a solid colour.
+This is the setting NVIDIA documents for Orin and it is still required in
+`isaaccapture` 1.6.152 (see "Jetson Orin, XR" in the
+[Televiz documentation](https://github.com/NVIDIA/IsaacCapture)). Run the preflight
+`--only V_viz --viz-seconds 15` first: three colour bars must be visible. Adding
+`--viz-openxr-composition` tests whether a newer runtime has fixed the native path.
+
+#### Wearing the headset around the neck (`wear_mode=neck`)
+
+For long sessions the headset can hang from the neck instead of being worn:
+
+```bash
+lerobot-teleoperate ... --teleop.wear_mode=neck --teleop.torso_engage=any_arm \
+  --teleop.arm_length_source=config
+```
+
+- The robot **head is held at the ready pose** and the **headset pose drives the torso**
+  (smoothed by `neck_torso_smoothing`), so bending forward with the headset on your
+  chest bends the robot.
+- The operator frame (Right A) comes from the body-tracking shoulder line when
+  available, otherwise from the headset → both-controllers direction; the absolute-EE
+  shoulder is estimated from the headset (`neck_shoulder_offset`).
+- **Disable the Quest proximity sensor first** (Meta Quest Developer Hub → Device
+  Actions → *Proximity Sensor* off — it re-enables ~10 min after MQDH disconnects — or
+  cover the sensor with tape). Otherwise the headset sleeps within seconds of being taken
+  off, the OpenXR session loses focus and the controllers stop streaming.
+
+`lerobot-record` takes the same `--robot.*` / `--teleop.*` arguments plus the
+`--dataset.*` ones from the sections below. The teleoperator's `use_torso`,
+`use_right_arm`, `use_left_arm`, `use_gripper`, `use_mobile_base` and `use_head`
+flags **must mirror the robot's** so the action keys match.
+
+The process prints the client address for each network interface and then **waits
+until the headset is connected** (`isaaccapture` opens the session only then; Ctrl-C
+aborts, `--teleop.xr_connect_timeout_s=<s>` gives up after that time):
+
+1. In the headset browser open `https://<host-ip>:48322/client/?serverIP=<host-ip>&port=48322`
+   (served by the CloudXR service on this host) and accept the self-signed certificate.
+2. Press Connect.
+3. Once the controllers are tracked the robot holds its pose until you squeeze a grip.
+
+If the host cannot serve the client, use `https://nvidia.github.io/IsaacCapture/client/`:
+enter the host IP there and first accept the certificate at `https://<host-ip>:48322/`.
+The old address `nvidia.github.io/IsaacTeleop/client` no longer exists.
+
+The status line (every `status_log_period_s`) shows the headset link, e.g.
+`- (disconnected)`. When the headset disconnects, the head pose is treated as lost and
+the targets are held, as for any tracking loss.
+
+| Input | Effect |
+|-------|--------|
+| Squeeze (grip) > `clutch_threshold` | Dead-man switch — while held, the hand position **relative to your shoulder** (body tracking) is mapped onto the robot shoulder (scaled by the reach ratio) and the controller orientation becomes the gripper orientation. The first squeeze after connect / Right A latches the position and orientation offsets so that the controller then ↦ the start-pose gripper (no motion on that squeeze); (re-)engaging ramps to the target over `engage_ramp_s` |
+| Trigger | Gripper (fully pressed = closed) |
+| Right thumbstick / left thumbstick | Base linear velocity / yaw rate |
+| Right **B** | Stop: freeze every target, zero the base |
+| Right **A** | Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; re-reference the operator frame so the direction you are facing becomes robot +X; also resumes after a stop and re-centres the head origin. The base is not moved |
+| Headset orientation | `head_0` (pan) / `head_1` (tilt) from the headset yaw / pitch in the operator frame. The target is a look direction in the **robot base frame**: the joints are re-solved for the measured torso orientation every tick, so bending or turning the torso does not move the gaze (`head_gaze_frame`). Like the EE offsets, the look direction at the moment of Right A (and of the first action) is latched onto the start-pose head joints (`head_latch_on_a`), so after a return the robot head is straight where you were looking |
+| Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, while **both** arms are clutched (`torso_engage=both_arms`, default; `any_arm` / `always` available) |
+| Headset pose (`wear_mode=neck`) | Torso pose (the robot head stays at the ready pose) |
+| Body tracking shoulder / elbow (`arm_posture_hint=true`) | The arm posture (shoulder + elbow angles) is retargeted to `arm_0..arm_3` and sent as a **nullspace hint** to the Cartesian solver: the elbow follows yours while the EE pose keeps priority. On squeeze the hint starts at the arm's measured joints and ramps (`posture_hint_max_vel`) towards your posture; it is frozen while released, kept through body-tracking dropouts and dropped on Right A. An elbow inward of the shoulder (beyond the robot's `arm_1` limit) is clipped to the nearest reachable posture. Not recorded unless `record_posture_hint` (both sides) |
+
 ## Record Data and upload to HF
 
 ```bash
@@ -200,6 +403,8 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `use_right_arm` | `True` | Include the right arm in observation / action |
 | `use_left_arm` | `True` | Include the left arm in observation / action |
 | `use_torso` | `False` | Include the torso in observation / action (commanded in both action modes) |
+| `use_head` | `False` | Include the head pan / tilt joints (`head_0.pos`, `head_1.pos`) in observation and action, in both action modes |
+| `record_posture_hint` | `False` | Put the arm posture hint keys (`<side>_arm_<i>.null`, i = 0..3, from `rby1_isaac`) into the action features so `lerobot-record` stores them (adds 8 action dims). The hints are applied either way |
 | `use_gripper` | `True` | Enable RB-Y1 grippers |
 | `use_mobile_base` | `False` | Enable base control (Model M/A) |
 | `use_velocity` | `False` | Add `.vel` channels to observations |
@@ -237,6 +442,8 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `ee_right_arm_joint_limits` / `ee_left_arm_joint_limits` | elbow `(-2.6, -0.5)` | Extra joint limits (rad) given to the arm solvers |
 | `ee_null_right_arm_deg` / `ee_null_left_arm_deg` | — | Nullspace joint target of each arm (deg) |
 | `ee_nullspace_weight` / `ee_nullspace_stiffness` / `ee_nullspace_damping_ratio` | `[2,2,2,2,2,2,1]` / `0.2` / `1.0` | Nullspace gains |
+| `ee_posture_hint_weight` | `4.0` | Nullspace weight of arm joints that carry a posture hint in the action |
+| `ee_ready_torso_deg` | `None` | Torso ready pose (deg, `torso_0..5`) used in EE mode instead of the default. The default (`torso_2` = 0) is outside `ee_torso_joint_limits`; use e.g. `[0, 45, -90, 45, 0, 0]` with `use_torso=True` |
 | `ee_torso_stiffness` / `ee_torso_torque_limit` / `ee_torso_damping_ratio` | `[1700]*6` / `[600]*6` / `1.0` | Torso solver joint gains |
 | `ee_torso_target_gains` | `(1.0, π/2, 20, 40π)` | Torso target limits (same order as the arm) |
 | `ee_torso_joint_limits` | — | Extra joint limits (rad) given to the torso solver |
@@ -248,6 +455,14 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `mobile_base_hold_time` | `0.5` | The base keeps the last velocity this long (s) after the stream stops |
 | `mobile_base_max_linear_velocity` | `0.6` | Clamp of the x / y speed (m/s) |
 | `mobile_base_max_angular_velocity` | `1.4` | Clamp of the yaw rate (rad/s) |
+
+**Robot log** — `forward_robot_logs` (`True`) forwards the robot's warnings and errors
+to the Python log, `forward_robot_logs_info` (`False`) adds the info lines,
+`robot_log_stream_rate` (`10.0` Hz) is the polling rate.
+
+An action may also carry `reset.cmd` (seconds, > 0): on that tick the robot runs its
+ready-pose motion instead of the commands (`rby1_isaac` sends it on Right A). It is
+not an action feature and is never recorded.
 
 **Robot profile** — `profile_out`, `profile_in`, `profile_mode`, `profile_force`:
 see [Keeping robots consistent](#keeping-robots-consistent-robot-profile).
@@ -284,6 +499,49 @@ and the dataset records the torso action a policy needs. If the torso is somewhe
 when teleoperation starts, the robot moves it to the target during the startup ramp
 (`joint_startup_min_time`, 5 s by default).
 
+### Teleoperator (`Rby1XRConfig`, `--teleop.type=rby1_isaac`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `robot_address`, `robot_model`, `robot_version` | `"192.168.30.1:50051"`, `"auto"`, `"auto"` | Read-only robot link (state + forward kinematics for the clutch); model `"m"` / `"a"` and version are detected with `"auto"` |
+| `profile_out` | `None` | Write this teleoperator's settings into the robot profile's `teleop` section (see [Keeping robots consistent](#keeping-robots-consistent-robot-profile)) |
+| `use_torso`, `use_right_arm`, `use_left_arm`, `use_gripper`, `use_mobile_base`, `use_head` | `True` | Must mirror `Rby1Config` |
+| `auto_launch_cloudxr` | `True` | Attach to the CloudXR service, starting it when none runs (`LEROBOT_CLOUDXR_SKIP_AUTOLAUNCH=1` also disables it) |
+| `cloudxr_run_embedded` | `False` | Run the CloudXR runtime inside this process and stop it on disconnect, instead of the detached service |
+| `cloudxr_install_dir`, `cloudxr_device_profile`, `cloudxr_env_file` | `~/.cloudxr`, `"Quest3"`, `None` | Runtime directory (holds the EULA marker), device profile and KEY=value env file (default: the packaged `default.env`). Profile and env file apply only when this process starts the runtime |
+| `xr_connect_timeout_s` | `0.0` | Opening the session waits for the headset; give up after this many seconds (0 = wait forever) |
+| `session_start` | `"connect"` | `"first_action"` opens the XR session on the first `get_action()` (Jetson Orin mitigation) |
+| `tracking_wait_timeout_s` | `0.0` | After the session is open: give up waiting for tracked controllers after this many seconds (0 = forever) |
+| `wear_mode` | `"head"` | `head` (worn) or `neck` (hanging from the neck: head joints held at the ready pose, headset pose → torso, headset-based operator frame / shoulder estimate) |
+| `neck_torso_smoothing`, `neck_shoulder_offset`, `shoulder_source` | `0.3`, `[-0.05,0.20,-0.15]`, `"auto"` | Neck mode: EMA on the headset pose driving the torso; shoulder position relative to the headset (left side, mirrored for right); absolute-EE shoulder from `body` / `headset` / `auto` |
+| `viz_enabled`, `viz_cameras`, `viz_offsets_x`, `viz_offset_y`, `viz_distance_m`, `viz_width_m` | `False`, `[front,left,right]`, `[0,-1.1,1.1]`, `0`, `1.5`, `1.0` | Televiz camera panels: robot camera names and their placement (m) |
+| `viz_lock_mode`, `viz_follow_pitch`, `viz_openxr_composition`, `viz_wait_headset_s` | `"gimbal"`, `True`, `False`, `-1` | Panel lock mode; gimbal also follows the head pitch (never roll); runtime vs Televiz compositing (keep False on Jetson Orin); wait for the headset when creating the XR session |
+| `viz_grab_enabled`, `viz_grab_threshold`, `viz_grab_push_rate_mps`, `viz_face_head` | `True`, `0.7`, `0.5`, `True` | Grab bars above the panels (free hand + trigger drags, thumbstick pushes / pulls); trigger level that starts a grab (release < 0.3); panels turn to face the head |
+| `viz_frame_bridge`, `viz_layout_file`, `viz_layout_reset` | `"auto"`, `~/.cache/rby1_isaac/viz_layout.json`, `False` | Televiz ← tracking-space transform from simultaneous head poses (`identity` to skip); where moved panels are saved / restored (`""` = off); ignore the saved layout once |
+| `engage_ramp_s`, `ee_max_linear_vel`, `ee_max_angular_vel` | `2.0`, `1.0`, `3.0` | Ramp to the absolute target on engage; rate limits (m/s, rad/s) |
+| `ee_position_scale`, `ee_reach_max_ratio` | `1.0`, `0.98` | Extra multiplier on the robot/human reach ratio; clamp of the hand-to-shoulder distance |
+| `arm_length_source`, `human_arm_length_m` | `"body"`, `0.62` | Human reach from body tracking (`|S-E|+|E-W|`) or from the config |
+| `ee_orientation_latch_on_a`, `ee_position_latch_on_a`, `ee_orientation_offset_rpy_deg` | `True`, `True`, `[0,0,0]` | Controller → gripper orientation / position offsets, latched at the **first squeeze** after connect and after Right A (the controller then ↦ the start-pose gripper, so squeezing without moving the hand does not move the arm; the posture used to press A is irrelevant); `[0,0,0]` fixed orientation offset when not latched |
+| `reference_source` | `"shoulders"` | Operator frame (+X) from the body-tracking shoulder line at the first action and on Right A alike (arms hold until both shoulders are valid; Right A without shoulders falls back to the gaze with a warning); `gaze` = headset look direction both times; `auto` = shoulder line when valid else gaze |
+| `arm_posture_hint`, `record_posture_hint` | `True`, `False` | IOBT shoulder / elbow → nullspace hint (`<side>_arm_<i>.null`, i = 0..3); record them (adds 8 action dims; set `--robot.record_posture_hint=true` too) |
+| `posture_hint_smoothing`, `posture_hint_max_vel`, `posture_hint_hold_s`, `hint_wrist_source` | `0.3`, `2.0`, `1.0`, `"controller"` | Hint filtering (EMA weight, rad/s ramp from the measured joints on squeeze, re-seed after this long without body tracking); wrist point from the controller (default) or the IOBT wrist |
+| `clutch_threshold` | `0.5` | Squeeze value above which an arm follows |
+| `thumbstick_deadzone`, `base_max_linear`, `base_max_angular` | `0.15`, `0.3`, `0.6` | Thumbstick → base velocity mapping |
+| `head_yaw_offset_deg`, `head_pitch_offset_deg` | `0`, `0` | Head joints = headset yaw / pitch in the operator frame + these offsets (only used without `head_latch_on_a`) |
+| `head_gaze_frame` | `"base"` | `base`: head joints compensate the measured torso orientation so the gaze stays put in the base frame while the torso moves (also for the held head in neck mode); `torso`: joints commanded directly |
+| `head_latch_on_a` | `True` | Right A / first action / re-sync: the look direction of that moment ↦ the start (or measured) head joints, like `ee_orientation_latch_on_a`; `False` = pure absolute mapping with the fixed offsets |
+| `head_yaw_sign`, `head_pitch_sign` | `1.0`, `-1.0` | Flip if the head moves the wrong way |
+| `head_yaw_limit_deg`, `head_pitch_min_deg`, `head_pitch_max_deg` | `80`, `-45`, `80` | Head joint clamps |
+| `head_smoothing` | `0.3` | EMA weight of the new head sample (1.0 = no filtering) |
+| `torso_source` | `"body"` | `"body"` (Isaac Capture body tracking), `"head"` or `"none"` |
+| `torso_engage` | `"both_arms"` | When the torso follows: `both_arms` (both grips squeezed), `any_arm`, or `always` |
+| `torso_body_joint` | `"SPINE3"` | Body joint driving the torso (XR_BD 24-joint names) |
+| `ready_return_duration_s` | `4.0` | Minimum time of the Right-A return: one `reset.cmd` action makes the follower run its joint-position ready-pose motion (as at connect; the loop blocks for the duration, base excluded) |
+| `resync_position_threshold_m`, `resync_rotation_threshold_deg` | `0.03`, `10` | Targets are re-seeded from the measured pose on the first action and whenever a component that is not clutched drifted past these (record reset, manual move) |
+| `status_log_period_s` | `5.0` | Log a one-line tracking / clutch status (controllers, head, body joints valid, why the torso holds); 0 = off |
+| `torso_pos_min`, `torso_pos_max` | `[-0.15,-0.20,0.80]`, `[0.45,0.20,1.20]` | Absolute box (m, base frame) for the torso target `link_torso_5` (the chest delta since engage is applied 1:1; this box is the only limit). The crouched ready pose (`--robot.ee_ready_torso_deg='[0,45,-90,45,0,0]'`) is x = y = 0, z = 1.10 |
+| `torso_rpy_min_deg`, `torso_rpy_max_deg` | `[-15,-20,-45]`, `[15,50,45]` | Absolute roll / pitch / yaw box (fixed-axis XYZ, deg; pitch + = leaning forward). Both boxes come from `scripts/torso_workspace.py` (reachable range with the chest above the knees, folded postures excluded); clipped axes show in the status log as `clamped[...]` |
+
 ### Observation / Action Keys
 
 Keys follow the LeRobot naming convention:
@@ -296,6 +554,8 @@ Keys follow the LeRobot naming convention:
 | Joint velocity (`use_velocity`) | `<joint>.vel` | `right_arm_0.vel` |
 | Joint torque (`use_torque`) | `<joint>.torque` | `right_arm_0.torque` |
 | End-effector pose (`action_mode="ee"`) | `<group>_ee.{x,y,z,wx,wy,wz}` | `right_ee.x` |
+| Head joints (`use_head`) | `head_0.pos`, `head_1.pos` | pan, tilt (rad) |
+| Arm posture hint (`record_posture_hint`, EE mode) | `<side>_arm_<i>.null`, i = 0..3 | `right_arm_3.null` (action only) |
 
 > [!WARNING]
 > Datasets recorded before the `.pos` suffix was introduced use bare keys
@@ -525,7 +785,7 @@ LeRobot commands that do not apply to RB-Y1:
 | Path | Description |
 |------|-------------|
 | [`lerobot-robot-rby1/`](lerobot-robot-rby1) | RB-Y1 follower robot plugin (`--robot.type=rby1`) |
-| [`lerobot-teleoperator-rby1/`](lerobot-teleoperator-rby1) | RB-Y1 teleoperator plugins (`--teleop.type=rby1_leader_arm`, `--teleop.type=rby1_vr`) |
+| [`lerobot-teleoperator-rby1/`](lerobot-teleoperator-rby1) | RB-Y1 teleoperator plugins (`--teleop.type=rby1_leader_arm`, `--teleop.type=rby1_vr`, `--teleop.type=rby1_isaac`) |
 | [`tests/`](tests) | Hardware-free tests using a fake `rby1_sdk` |
 
 ## Resources
@@ -535,4 +795,5 @@ LeRobot commands that do not apply to RB-Y1:
 - [RB-Y1 Documentation](https://rainbowrobotics.github.io/rby1-dev/)
 - [LeRobot Documentation](https://huggingface.co/docs/lerobot)
 - [LeRobot Installation Guide](https://huggingface.co/docs/lerobot/installation)
+- [NVIDIA Isaac Capture](https://github.com/NVIDIA/IsaacCapture) (XR teleoperation, `rby1_isaac`)
 

@@ -1,4 +1,4 @@
-"""RB-Y1 XR device for NVIDIA Isaac Teleop, exposed to LeRobot as ``rby1_isaac``.
+"""RB-Y1 XR device for NVIDIA Isaac Capture, exposed to LeRobot as ``rby1_isaac``.
 
 Control flow (one ``TeleopSession.step()`` per :meth:`get_action`)::
 

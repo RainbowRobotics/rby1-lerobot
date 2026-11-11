@@ -1,9 +1,9 @@
-"""Shared base for NVIDIA Isaac Teleop-backed LeRobot teleoperators.
+"""Shared base for NVIDIA Isaac Capture-backed LeRobot teleoperators.
 
 Adapted from the upstream LeRobot example
 ``examples/isaac_teleop_to_so101/isaac_teleop/base.py`` (Apache-2.0).
 
-:class:`IsaacTeleopTeleoperator` owns what Isaac Teleop devices share — the
+:class:`IsaacTeleopTeleoperator` owns what Isaac Capture devices share — the
 CloudXR runtime and ``TeleopSession`` lifecycle, the per-step worker-health
 guard, and the no-op calibration tracking devices need. A concrete device
 implements :meth:`_build_pipeline` (its retargeting graph) and
@@ -91,7 +91,7 @@ def default_cloudxr_env_file() -> str:
 
 
 class IsaacTeleopTeleoperator(Teleoperator):
-    """Abstract base for teleoperators backed by an Isaac Teleop ``TeleopSession``.
+    """Abstract base for teleoperators backed by an Isaac Capture ``TeleopSession``.
 
     Owns the session lifecycle and the per-step health guard; subclasses supply
     :meth:`_build_pipeline` and :meth:`get_action`.
@@ -201,7 +201,7 @@ class IsaacTeleopTeleoperator(Teleoperator):
             except Exception:
                 logger.exception("Failed to stop CloudXR runtime during connect() rollback")
             raise
-        logger.info("Isaac Teleop session started: %s", self.config.app_name)
+        logger.info("Isaac Capture session started: %s", self.config.app_name)
 
     def _enter_session(self, session: Any) -> None:
         """Enter the ``TeleopSession``; it blocks until a headset is connected.
@@ -276,7 +276,7 @@ class IsaacTeleopTeleoperator(Teleoperator):
                 session = self._session
                 self._session = None
                 session.__exit__(None, None, None)
-                logger.info("Isaac Teleop session ended")
+                logger.info("Isaac Capture session ended")
         finally:
             if self._viz is not None:
                 try:
@@ -419,11 +419,11 @@ class IsaacTeleopTeleoperator(Teleoperator):
         if info is not None:
             if getattr(info, "worker_exception", None) is not None:
                 raise RuntimeError(
-                    "Isaac Teleop retargeting worker raised an exception"
+                    "Isaac Capture retargeting worker raised an exception"
                 ) from info.worker_exception
             if getattr(info, "frame_deadline_miss", False):
                 logger.warning(
-                    "Isaac Teleop frame deadline miss (returned_age_frames=%s)",
+                    "Isaac Capture frame deadline miss (returned_age_frames=%s)",
                     getattr(info, "returned_age_frames", "?"),
                 )
         return result

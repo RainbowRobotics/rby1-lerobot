@@ -1,4 +1,4 @@
-"""Raw Isaac Teleop outputs -> a plain :class:`XRFrame`.
+"""Raw Isaac Capture outputs -> a plain :class:`XRFrame`.
 
 The device pipeline (see :func:`build_pipeline`) exposes the OpenXR
 controllers, head and (optionally) body-tracking sources verbatim, each

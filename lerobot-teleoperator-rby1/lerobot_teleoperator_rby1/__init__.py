@@ -7,7 +7,7 @@ This package provides three teleoperators registered with LeRobot:
                                 end-effector pose actions (executed by the
                                 follower robot in ``action_mode="ee"``),
                                 with optional mobile-base control.
-    * :class:`Rby1XR`        — an NVIDIA Isaac Teleop (CloudXR / OpenXR)
+    * :class:`Rby1XR`        — an NVIDIA Isaac Capture (CloudXR / OpenXR)
                                 device: both controllers → arm EE poses,
                                 headset → head joints, body tracking → torso.
 

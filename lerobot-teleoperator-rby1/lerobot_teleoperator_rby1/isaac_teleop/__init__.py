@@ -1,4 +1,4 @@
-"""NVIDIA Isaac Teleop devices for the RB-Y1, exposed as LeRobot teleoperators.
+"""NVIDIA Isaac Capture devices for the RB-Y1, exposed as LeRobot teleoperators.
 
 Mirrors the layout of the upstream LeRobot example
 ``examples/isaac_teleop_to_so101/isaac_teleop``:

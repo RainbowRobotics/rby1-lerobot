@@ -32,7 +32,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# NVIDIA Isaac Teleop device (--teleop.type=rby1_isaac). retargeters-lite is
+# NVIDIA Isaac Capture device (--teleop.type=rby1_isaac). retargeters-lite is
 # the aarch64-friendly extra (scipy only); cloudxr adds the runtime launcher.
 isaac = ["isaaccapture[cloudxr,retargeters-lite]~=1.6.152"]
 

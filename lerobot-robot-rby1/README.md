@@ -1,6 +1,7 @@
 # lerobot-robot-rby1
 
-LeRobot follower-robot plugin for the Rainbow Robotics RB-Y1 (`--robot.type=rby1`).
+LeRobot follower-robot plugin for the Rainbow Robotics RB-Y1 (`--robot.type=rby1`):
+joint and end-effector action modes, optional torso, head, grippers and mobile base.
 
 Requires Python 3.12+ and `lerobot>=0.7.0,<0.8`. See the
 [repository README](https://github.com/RainbowRobotics/rby1-lerobot) for setup,
