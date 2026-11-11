@@ -12,7 +12,7 @@ authors = [
 ]
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
-keywords = ["lerobot", "teleoperation", "rby1", "rainbow-robotics", "vr", "meta-quest", "robotics"]
+keywords = ["lerobot", "teleoperation", "rby1", "rainbow-robotics", "vr", "meta-quest", "isaac-teleop", "cloudxr", "robotics"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -31,6 +31,16 @@ dependencies = [
   "lerobot_robot_rby1>=0.3.1",
 ]
 
+[project.optional-dependencies]
+# NVIDIA Isaac Teleop device (--teleop.type=rby1_isaac). retargeters-lite is
+# the aarch64-friendly extra (scipy only); cloudxr adds the runtime launcher.
+isaac = ["isaacteleop[cloudxr,retargeters-lite]==1.4.142"]
+# Headset camera panels (Televiz, --teleop.viz_enabled / preflight V_viz): frames
+# must be CUDA arrays. The driver-API backend only needs libcuda (works with the
+# CUDA 12.x driver of JetPack 6 in a Python 3.12 environment, where no CUDA torch
+# wheel exists); torch (CUDA build) or cupy are picked up automatically instead.
+isaac-viz = ["isaacteleop[cloudxr,retargeters-lite]==1.4.142", "cuda-bindings>=12.6,<13"]
+
 [project.urls]
 Homepage = "https://github.com/RainbowRobotics/rby1-lerobot"
 Repository = "https://github.com/RainbowRobotics/rby1-lerobot"
@@ -40,3 +50,6 @@ Issues = "https://github.com/RainbowRobotics/rby1-lerobot/issues"
 where = ["."]
 include = ["lerobot_teleoperator_rby1*"]
 exclude = ["*.egg-info"]
+
+[tool.setuptools.package-data]
+"lerobot_teleoperator_rby1.isaac_teleop" = ["default.env"]

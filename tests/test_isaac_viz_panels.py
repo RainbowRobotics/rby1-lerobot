@@ -1,0 +1,385 @@
+import math
+import threading
+import time
+
+import numpy as np
+import pytest
+
+from lerobot_teleoperator_rby1.isaac_teleop.viz_panels import CameraPanels, PanelLayout, xr_panel_pose
+
+
+class _Obj:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class FakeLayer:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.submits = []
+        self.placements = []
+
+    def submit(self, frame):
+        self.submits.append(frame)
+
+    def set_placement(self, placement):
+        self.placements.append(placement)
+
+
+class FakeVizSession:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.layers = []
+        self.renders = 0
+        self.destroyed = False
+        self.close = False
+        self.head = _Obj(position=(0.0, 1.6, 0.0), orientation=(1.0, 0.0, 0.0, 0.0))
+
+    def add_quad_layer(self, cfg):
+        assert threading.current_thread().name == "televiz-render"
+        layer = FakeLayer(cfg)
+        self.layers.append(layer)
+        return layer
+
+    def render(self):
+        self.renders += 1
+        time.sleep(0.001)
+        return _Obj(should_render=True, reference_space_changed=False)
+
+    def should_close(self):
+        return self.close
+
+    def head_pose_now(self):
+        return self.head
+
+    def get_oxr_handles(self):
+        return (1, 2, 3, 4)
+
+    def get_frame_timing_stats(self):
+        return _Obj(fps=72.0, stale_layers=[])
+
+    def destroy(self):
+        # Destroyed on the render thread normally; the connect-time upload check
+        # tears down a session that never had a render thread.
+        self.destroyed = True
+
+
+class FakeTeleviz:
+    """Minimal stand-in for the `isaacteleop.viz` module."""
+
+    class DisplayMode:
+        kXr = 2
+
+    class PixelFormat:
+        kRGBA8 = 0
+
+    class VizSessionConfig(_Obj):
+        pass
+
+    class QuadLayerConfig(_Obj):
+        pass
+
+    class Resolution:
+        def __init__(self, w, h):
+            self.w, self.h = w, h
+
+    class Pose3D:
+        def __init__(self, position, orientation):
+            self.position, self.orientation = position, orientation
+
+    class QuadLayerPlacement:
+        def __init__(self, pose, size_meters):
+            self.pose, self.size_meters = pose, size_meters
+
+    class VizSession:
+        last = None
+
+        @staticmethod
+        def create(cfg):
+            FakeTeleviz.VizSession.last = FakeVizSession(cfg)
+            return FakeTeleviz.VizSession.last
+
+
+def test_xr_panel_pose_gimbal_and_head():
+    lay = PanelLayout("front", offset_x=0.5, offset_y=0.1, distance=1.5)
+    pos, q = xr_panel_pose(np.array([0, 1.6, 0]), np.array([1, 0, 0, 0]), lay, "gimbal")
+    np.testing.assert_allclose(pos, [0.5, 1.7, -1.5], atol=1e-9)
+    np.testing.assert_allclose(q, [1, 0, 0, 0], atol=1e-9)
+    # Head yawed 90 deg to the left (facing -X): the panel sits at -X, offset to the "right" = -Z.
+    yaw = math.pi / 2
+    q_head = np.array([math.cos(yaw / 2), 0, math.sin(yaw / 2), 0])
+    pos, q = xr_panel_pose(np.array([0, 1.6, 0]), q_head, lay, "gimbal")
+    np.testing.assert_allclose(pos, [-1.5, 1.7, -0.5], atol=1e-9)
+    np.testing.assert_allclose(q, q_head, atol=1e-9)
+    # Full head lock uses the head orientation for the offset too.
+    pos_h, q_h = xr_panel_pose(np.array([0, 1.6, 0]), q_head, lay, "head")
+    np.testing.assert_allclose(pos_h, [-1.5, 1.7, -0.5], atol=1e-9)
+    np.testing.assert_allclose(q_h, q_head, atol=1e-9)
+
+
+def test_camera_panels_thread_lifecycle_and_submits():
+    frames = {}
+    seq = {"n": 0}
+
+    def source(name):
+        return frames.get(name)
+
+    def push(name, h, w):
+        seq["n"] += 1
+        frames[name] = (np.zeros((h, w, 3), np.uint8), time.monotonic(), seq["n"])
+
+    panels = CameraPanels(
+        [PanelLayout("front", 0.0), PanelLayout("left", -1.1), PanelLayout("right", 1.1)],
+        source,
+        lock_mode="gimbal",
+        uploader=lambda f: ("uploaded", f.shape),
+        viz_module=FakeTeleviz,
+        daemon=True,
+    )
+    session = panels.create_session("test", ["XR_EXT_x"], -1)
+    assert session.cfg.required_extensions == ["XR_EXT_x"] and session.cfg.xr_system_wait_seconds == -1
+    assert panels.oxr_handles() == (1, 2, 3, 4)
+    panels.start_render_thread()
+    time.sleep(0.05)
+    assert session.renders == 0  # nothing before begin_rendering()
+    panels.begin_rendering()
+    push("front", 480, 640)
+    push("left", 480, 640)
+    deadline = time.time() + 2.0
+    while time.time() < deadline and len(session.layers) < 2:
+        time.sleep(0.01)
+    assert [l.cfg.name for l in session.layers] == ["front", "left"]  # lazy, in layout order; 'right' has no frame
+    assert session.layers[0].cfg.resolution.w == 640 and session.layers[0].cfg.resolution.h == 480
+    assert session.layers[0].cfg.openxr_composition is False
+    time.sleep(0.05)
+    n_front = len(session.layers[0].submits)
+    assert n_front == 1  # one submit per new frame (latest-wins), not per render
+    push("front", 480, 640)
+    time.sleep(0.05)
+    assert len(session.layers[0].submits) == 2
+    assert session.layers[0].submits[-1] == ("uploaded", (480, 640, 3))
+    # Placement follows the head (gimbal): front centred 1.5 m ahead at head height.
+    pl = session.layers[0].placements[-1]
+    np.testing.assert_allclose(pl.pose.position, [0.0, 1.6, -1.5], atol=1e-9)
+    np.testing.assert_allclose(pl.size_meters, [1.0, 0.75], atol=1e-9)
+    assert session.renders > 0
+    assert panels.stop_rendering(timeout=2.0)
+    assert not session.destroyed
+    assert panels.destroy(timeout=2.0)
+    assert session.destroyed and panels.session is None
+
+
+def test_camera_panels_detects_session_loss():
+    panels = CameraPanels([PanelLayout("front")], lambda n: None, viz_module=FakeTeleviz, daemon=True, uploader=lambda f: f)
+    session = panels.create_session("t", [], 0)
+    panels.start_render_thread()
+    panels.begin_rendering()
+    session.close = True
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not panels.lost:
+        time.sleep(0.01)
+    assert panels.lost
+    assert panels.destroy(timeout=2.0)
+
+
+def test_status_string():
+    panels = CameraPanels([PanelLayout("front")], lambda n: None, viz_module=FakeTeleviz)
+    assert panels.status().startswith("viz: 0/1 panels")
+    with pytest.raises(RuntimeError):
+        panels.start_render_thread()
+
+
+def test_cuda_upload_check_fails_fast(monkeypatch):
+    def broken(frame):
+        raise RuntimeError("The NVIDIA driver on your system is too old")
+
+    panels = CameraPanels([PanelLayout("front")], lambda n: None, viz_module=FakeTeleviz, uploader=broken, daemon=True)
+    with pytest.raises(RuntimeError, match="upload check failed"):
+        panels.create_session("t", [], 0)
+    assert panels.session is None and FakeTeleviz.VizSession.last.destroyed
+
+
+def test_driver_device_array_interface(monkeypatch):
+    """DriverDeviceArray against a fake `cuda.bindings.driver` (no GPU needed)."""
+    import sys
+    import types
+
+    from lerobot_teleoperator_rby1.isaac_teleop import viz_panels as vp
+
+    calls = []
+
+    class CUresult:
+        CUDA_SUCCESS = 0
+
+    drv = types.SimpleNamespace(
+        CUresult=CUresult,
+        cuInit=lambda f: (0,),
+        cuDeviceGet=lambda i: (0, "dev0"),
+        cuDevicePrimaryCtxRetain=lambda d: (0, "ctx"),
+        cuCtxSetCurrent=lambda c: (0,),
+        cuMemAlloc=lambda n: (calls.append(("alloc", n)) or (0, 0xDEAD0000)),
+        cuMemcpyHtoD=lambda dst, src, n: (calls.append(("copy", n)) or (0,)),
+        cuMemFree=lambda p: (0,),
+    )
+    pkg = types.ModuleType("cuda")
+    bindings = types.ModuleType("cuda.bindings")
+    bindings.driver = drv
+    pkg.bindings = bindings
+    monkeypatch.setitem(sys.modules, "cuda", pkg)
+    monkeypatch.setitem(sys.modules, "cuda.bindings", bindings)
+    monkeypatch.setitem(sys.modules, "cuda.bindings.driver", drv)
+    monkeypatch.setattr(vp.DriverDeviceArray, "_drv", None)
+    monkeypatch.setattr(vp.DriverDeviceArray, "_ctx", None)
+    monkeypatch.setattr(vp, "_driver_buffers", {})
+
+    frame = np.zeros((4, 6, 3), np.uint8)
+    out = vp._upload_cuda_driver(frame)
+    cai = out.__cuda_array_interface__
+    assert cai["shape"] == (4, 6, 4) and cai["typestr"] == "|u1" and cai["data"] == (0xDEAD0000, False)
+    assert calls == [("alloc", 96), ("copy", 96)]
+    vp._upload_cuda_driver(frame)  # buffer reused
+    assert calls[-1] == ("copy", 96) and len([c for c in calls if c[0] == "alloc"]) == 1
+
+
+def test_xr_panel_pose_gimbal_follows_pitch_but_not_roll():
+    from scipy.spatial.transform import Rotation
+
+    lay = PanelLayout("front", offset_x=0.5, offset_y=0.1, distance=1.5)
+    head = np.array([0, 1.6, 0])
+    # Looking 30 deg down (OpenXR: -Z forward, rotate about +X by -30 deg).
+    x, y, z, w = Rotation.from_euler("x", -30, degrees=True).as_quat()
+    q_down = np.array([w, x, y, z])
+    pos, q = xr_panel_pose(head, q_down, lay, "gimbal", follow_pitch=True)
+    s, c = math.sin(math.radians(30)), math.cos(math.radians(30))
+    np.testing.assert_allclose(pos, [0.5, 1.6 - 1.5 * s + 0.1 * c, -1.5 * c - 0.1 * s], atol=1e-9)
+    np.testing.assert_allclose(q, q_down, atol=1e-9)
+    # Without pitch following the old yaw-only placement is kept.
+    pos0, q0 = xr_panel_pose(head, q_down, lay, "gimbal", follow_pitch=False)
+    np.testing.assert_allclose(pos0, [0.5, 1.7, -1.5], atol=1e-9)
+    np.testing.assert_allclose(q0, [1, 0, 0, 0], atol=1e-9)
+    # Add 60 deg of roll: same panel pose (roll is dropped).
+    x, y, z, w = (Rotation.from_euler("x", -30, degrees=True) * Rotation.from_euler("z", 60, degrees=True)).as_quat()
+    pos_r, q_r = xr_panel_pose(head, np.array([w, x, y, z]), lay, "gimbal", follow_pitch=True)
+    np.testing.assert_allclose(pos_r, pos, atol=1e-9)
+    np.testing.assert_allclose(q_r, q, atol=1e-9)
+
+
+def _wait(cond, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if cond():
+            return True
+        time.sleep(0.005)
+    return cond()
+
+
+def _ray(origin, target):
+    o = np.asarray(origin, float)
+    d = np.asarray(target, float) - o
+    return o, d / np.linalg.norm(d)
+
+
+def test_grab_handles_hover_drag_release_and_callback():
+    from lerobot_teleoperator_rby1.isaac_teleop.viz_grab import HandInput
+
+    frames = {"front": (np.zeros((480, 640, 3), np.uint8), 0.0, 1)}
+    changed = []
+    panels = CameraPanels(
+        [PanelLayout("front", 0.0)],
+        lambda n: frames.get(n),
+        uploader=lambda f: ("uploaded", f.shape),
+        viz_module=FakeTeleviz,
+        daemon=True,
+        grab_enabled=True,
+        frame_bridge="identity",
+        on_layout_changed=lambda lays: changed.append(lays),
+    )
+    session = panels.create_session("t", [], 0)
+    panels.start_render_thread()
+    panels.begin_rendering()
+    assert _wait(lambda: len(session.layers) == 2)
+    cam, handle = session.layers
+    assert [cam.cfg.name, handle.cfg.name] == ["front", "front.handle"]
+    assert (handle.cfg.resolution.w, handle.cfg.resolution.h) == (256, 24)
+    assert handle.cfg.openxr_composition is False
+    assert _wait(lambda: len(handle.placements) > 0)
+    assert len(handle.submits) == 1 and handle.submits[0] == ("uploaded", (24, 256, 4))  # idle texture
+    # Handle bar sits above the panel: centre y = 1.6 + 0.75/2 + 0.03 + 0.03, size (1.0, 0.06).
+    hp = handle.placements[-1]
+    np.testing.assert_allclose(hp.pose.position, [0.0, 2.035, -1.5], atol=1e-9)
+    np.testing.assert_allclose(hp.size_meters, [1.0, 0.06], atol=1e-9)
+    head = (0.0, 1.6, 0.0)
+    # Hover.
+    o, d = _ray(head, (0.0, 2.035, -1.5))
+    panels.set_hands({"right": HandInput(o, d, 0.0, True)})
+    assert _wait(lambda: panels.hover()["right"] == "front")
+    assert _wait(lambda: len(handle.submits) == 2)  # hover texture
+    assert panels.ui_active() == {"right": True, "left": False}
+    # Grab (trigger rises while hovering with a free hand).
+    panels.set_hands({"right": HandInput(o, d, 0.9, True)})
+    assert _wait(lambda: panels.grabbing()["right"] == "front")
+    assert _wait(lambda: len(handle.submits) == 3)  # grab texture
+    # Drag 0.3 m to the right: the layout follows (x offset), distance about unchanged.
+    o2, d2 = _ray(head, (0.3, 2.035, -1.5))
+    panels.set_hands({"right": HandInput(o2, d2, 0.9, True)})
+    assert _wait(lambda: abs(panels.layout("front").offset_x - 0.3) < 0.03)
+    lay = panels.layout("front")
+    assert abs(lay.distance - 1.5) < 0.05 and abs(lay.offset_y) < 0.03
+    # Release -> callback with the new layout, texture back to idle/hover.
+    panels.set_hands({"right": HandInput(o2, d2, 0.0, True)})
+    assert _wait(lambda: len(changed) == 1)
+    assert changed[0][0].name == "front" and abs(changed[0][0].offset_x - 0.3) < 0.03
+    assert panels.grabbing()["right"] is None
+    assert "hover=" in panels.status() or "grab=" not in panels.status()
+    assert panels.stop_rendering(timeout=2.0) and panels.destroy(timeout=2.0)
+
+
+def test_engaged_hand_cannot_grab_and_face_head_orients_side_panels():
+    from lerobot_teleoperator_rby1.isaac_teleop.viz_grab import HandInput
+
+    frames = {"left": (np.zeros((480, 640, 3), np.uint8), 0.0, 1)}
+    panels = CameraPanels(
+        [PanelLayout("left", -1.1)], lambda n: frames.get(n), uploader=lambda f: f, viz_module=FakeTeleviz,
+        daemon=True, grab_enabled=True, frame_bridge="identity", face_head=True,
+    )
+    session = panels.create_session("t", [], 0)
+    panels.start_render_thread()
+    panels.begin_rendering()
+    assert _wait(lambda: len(session.layers) == 2 and len(session.layers[0].placements) > 0)
+    pl = session.layers[0].placements[-1]
+    w, x, y, z = pl.pose.orientation
+    assert y > 0.1  # yawed towards the viewer (panel on the left turns right)
+    # The handle follows the panel orientation.
+    hq = session.layers[1].placements[-1].pose.orientation
+    np.testing.assert_allclose(hq, pl.pose.orientation, atol=1e-9)
+    hpos = np.asarray(session.layers[1].placements[-1].pose.position)
+    o, d = _ray((0, 1.6, 0), hpos)
+    panels.set_hands({"left": HandInput(o, d, 0.9, False)})  # clutched hand
+    assert _wait(lambda: panels.hover()["left"] == "left")
+    time.sleep(0.05)
+    assert panels.grabbing()["left"] is None and panels.ui_active()["left"] is True
+    assert panels.stop_rendering(timeout=2.0) and panels.destroy(timeout=2.0)
+
+
+def test_frame_bridge_estimated_from_simultaneous_head_poses():
+    from lerobot_teleoperator_rby1.isaac_teleop.viz_grab import HandInput
+
+    frames = {"front": (np.zeros((48, 64, 3), np.uint8), 0.0, 1)}
+    panels = CameraPanels(
+        [PanelLayout("front")], lambda n: frames.get(n), uploader=lambda f: f, viz_module=FakeTeleviz,
+        daemon=True, grab_enabled=True, frame_bridge="auto",
+    )
+    session = panels.create_session("t", [], 0)
+    panels.start_render_thread()
+    panels.begin_rendering()
+    assert _wait(lambda: len(session.layers) == 2 and len(session.layers[0].placements) > 0)
+    # The teleop session sees the head 1 m to the -X of where Televiz sees it.
+    T_teleop = np.eye(4)
+    T_teleop[:3, 3] = [-1.0, 1.6, 0.0]
+    for _ in range(40):
+        panels.set_hands({"right": HandInput(np.zeros(3), np.array([0, 0, -1.0]), 0.0, True)}, T_teleop)
+        time.sleep(0.004)
+    assert _wait(lambda: panels._bridge_done)
+    np.testing.assert_allclose(panels._bridge[:3, 3], [1.0, 0.0, 0.0], atol=1e-9)
+    np.testing.assert_allclose(panels._bridge[:3, :3], np.eye(3), atol=1e-9)
+    assert panels.stop_rendering(timeout=2.0) and panels.destroy(timeout=2.0)

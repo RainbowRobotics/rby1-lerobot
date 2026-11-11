@@ -1,0 +1,345 @@
+"""Config dataclasses for the Isaac Teleop devices.
+
+Adapted from the upstream LeRobot example
+``examples/isaac_teleop_to_so101/isaac_teleop/config_isaac_teleop.py``.
+
+Unlike upstream, :class:`IsaacTeleopConfig` does **not** shadow the draccus
+``_choice_registry``: :class:`Rby1XRConfig` registers ``rby1_isaac`` in the
+global :class:`TeleoperatorConfig` registry, so the device is selectable with
+``--teleop.type=rby1_isaac`` from the stock ``lerobot-teleoperate`` and
+``lerobot-record`` CLIs.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from lerobot.teleoperators.config import TeleoperatorConfig
+
+# Static rebase from the OpenXR anchor frame (X=Right, Y=Up, Z=Backward) into the
+# robot base frame (X=Forward, Y=Left, Z=Up). A proper rotation (det=+1):
+# controller motion forward -> robot +X, right -> robot -Y, up -> robot +Z.
+DEFAULT_BASE_T_ANCHOR: list[list[float]] = [
+    [0.0, 0.0, -1.0, 0.0],
+    [-1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+]
+
+SESSION_START_CHOICES = ("connect", "first_action")
+TORSO_SOURCE_CHOICES = ("body", "head", "none")
+TORSO_ENGAGE_CHOICES = ("both_arms", "any_arm", "always")
+ARM_LENGTH_SOURCE_CHOICES = ("body", "config")
+HINT_WRIST_SOURCE_CHOICES = ("controller", "body")
+ROBOT_VERSION_CHOICES = ("auto", "1.2", "1.3")
+WEAR_MODE_CHOICES = ("head", "neck")
+HEAD_GAZE_FRAME_CHOICES = ("base", "torso")
+REFERENCE_SOURCE_CHOICES = ("shoulders", "gaze", "auto")
+SHOULDER_SOURCE_CHOICES = ("auto", "body", "headset")
+VIZ_LOCK_CHOICES = ("gimbal", "head", "world")
+VIZ_BRIDGE_CHOICES = ("auto", "identity")
+
+
+@dataclass(kw_only=True)
+class IsaacTeleopConfig(TeleoperatorConfig):
+    """Shared config for all Isaac Teleop-backed teleoperators."""
+
+    # Session name shown by the CloudXR runtime / OpenXR.
+    app_name: str = "rby1_isaac"
+
+    # Launch the CloudXR runtime from this process. Set False (or export
+    # LEROBOT_CLOUDXR_SKIP_AUTOLAUNCH=1) when the runtime is already running.
+    auto_launch_cloudxr: bool = True
+    # KEY=value profile passed to CloudXRLauncher(env_config=...). None uses the
+    # packaged ``default.env`` (Quest3 profile).
+    cloudxr_env_file: str | None = None
+    # Where CloudXRLauncher installs / finds the runtime.
+    cloudxr_install_dir: str = "~/.cloudxr"
+    # CloudXR device profile ("Quest3" also serves Pico / WebXR clients).
+    cloudxr_device_profile: str = "Quest3"
+
+    # Static anchor -> robot-base rebase applied in-graph to every tracked pose.
+    base_T_anchor: list[list[float]] = field(  # noqa: N815
+        default_factory=lambda: [row.copy() for row in DEFAULT_BASE_T_ANCHOR]
+    )
+
+
+@TeleoperatorConfig.register_subclass("rby1_isaac")
+@dataclass(kw_only=True)
+class Rby1XRConfig(IsaacTeleopConfig):
+    """RB-Y1 XR device: both controllers -> arm EE poses, headset -> head
+    joints, body tracking -> torso EE pose.
+
+    This teleoperator only *produces* actions; execution and all Cartesian
+    impedance tuning live in the follower ``Rby1Config`` (``action_mode="ee"``).
+    The ``use_*`` flags below must mirror the follower's so the action keys
+    match.
+    """
+
+    # ── Read-only robot link (state + forward kinematics for the clutch) ──
+    robot_address: str = "192.168.30.1:50051"
+    # "a" | "m" | "auto" (detect from the robot, like the follower does)
+    robot_model: str = "auto"
+
+    # Record this teleoperator's config in the robot profile file (use the
+    # same path as --robot.profile_out, e.g. <dataset_root>/meta/rby1_profile.json).
+    # It is stored under "teleop" for reproducibility and never compared.
+    profile_out: str | None = None
+
+    # ── Joint-group selection (mirror Rby1Config) ─────────────────────
+    use_torso: bool = True
+    use_right_arm: bool = True
+    use_left_arm: bool = True
+    use_gripper: bool = True
+    use_mobile_base: bool = True
+    use_head: bool = True
+
+    # ── Wear mode ─────────────────────────────────────────────────────
+    # "head": headset worn normally (head joints follow the gaze, torso from
+    #         body tracking / head, operator frame from the shoulder line).
+    # "neck": headset hanging from the neck. The robot head is held at the
+    #         start (ready) pose, the HEADSET pose drives the torso, the
+    #         operator frame is taken from the shoulder line or, when body
+    #         tracking is unavailable, from the headset→controllers direction,
+    #         and the absolute-EE shoulder is estimated from the headset pose.
+    #         Requires the Quest proximity sensor to be disabled (MQDH Device
+    #         Actions → Proximity Sensor off, or tape) so the session stays
+    #         FOCUSED and the controllers keep streaming.
+    wear_mode: str = "head"
+    neck_torso_smoothing: float = 0.3     # EMA on the headset pose driving the torso
+    neck_shoulder_offset: list[float] = field(default_factory=lambda: [-0.05, 0.20, -0.15])  # from the headset, left side (y mirrored for right)
+    shoulder_source: str = "auto"         # absolute mode: "body" | "headset" | "auto" (body when valid)
+
+    # ── Headset camera panels (Televiz) ──────────────────────────────
+    # One quad per robot camera name (as configured in --robot.cameras); the
+    # frames come from the in-process frame bus. Televiz then owns the OpenXR
+    # session (the tracking session attaches to it).
+    viz_enabled: bool = False
+    viz_cameras: list[str] = field(default_factory=lambda: ["front", "left", "right"])
+    viz_offsets_x: list[float] = field(default_factory=lambda: [0.0, -1.1, 1.1])  # m, per camera
+    viz_offset_y: float = 0.0
+    viz_distance_m: float = 1.5
+    viz_width_m: float = 1.0
+    viz_lock_mode: str = "gimbal"         # "gimbal" (position + yaw [+ pitch]) | "head" | "world"
+    viz_follow_pitch: bool = True         # gimbal: panels also follow the head pitch (never roll)
+    viz_openxr_composition: bool = False  # keep False on Jetson Orin (black quads otherwise)
+    viz_wait_headset_s: int = -1          # VizSession.create waits for the headset (-1 = forever)
+    # Grab handle above each panel (like the CloudXR client's control panel):
+    # point a FREE hand (squeeze released) at the bar and hold the trigger to
+    # drag it; the thumbstick of that hand pushes / pulls. That hand's gripper
+    # and thumbstick are held while grabbing.
+    viz_grab_enabled: bool = True
+    viz_grab_threshold: float = 0.7       # trigger value that starts a grab (release below 0.3)
+    viz_grab_push_rate_mps: float = 0.5   # thumbstick-y push / pull speed while grabbing
+    viz_face_head: bool = True            # panels turn to face the head (gimbal / world)
+    viz_frame_bridge: str = "auto"        # "auto": estimate Televiz<-teleop frame from head poses | "identity"
+    viz_layout_file: str = "~/.cache/rby1_isaac/viz_layout.json"  # "" = do not persist moved panels
+    viz_layout_reset: bool = False        # ignore the saved layout once (start from the config values)
+
+    # ── Arm mapping (absolute) ────────────────────────────────────────
+    # The hand position RELATIVE TO THE OPERATOR'S SHOULDER (IOBT body
+    # tracking) is scaled by the robot/human reach ratio onto the robot
+    # shoulder; the orientation is the controller orientation times an offset
+    # latched on Right A. Squeeze is a dead-man switch (follow while held,
+    # hold when released); (re-)engaging ramps to the absolute target over
+    # `engage_ramp_s`. Needs body tracking.
+    engage_ramp_s: float = 2.0
+    ee_position_scale: float = 1.0          # extra multiplier on the reach ratio
+    ee_reach_max_ratio: float = 0.98        # clamp |hand - shoulder| to this × robot reach
+    arm_length_source: str = "body"         # "body" (IOBT |S-E|+|E-W|) | "config"
+    human_arm_length_m: float = 0.62        # used when arm_length_source="config"
+    shoulder_smoothing: float = 0.2         # EMA on the IOBT shoulder position
+    ee_max_linear_vel: float = 1.0          # m/s rate limit of the absolute target
+    ee_max_angular_vel: float = 3.0         # rad/s
+    # Offsets between the controller and the gripper, latched at the FIRST
+    # SQUEEZE after Right A (and after connect) — not at the button press, so
+    # the hand posture used to press A does not leak into the mapping:
+    #   orientation: controller orientation then ↦ start-pose gripper orientation
+    #   position:    hand-relative-to-shoulder then ↦ start-pose gripper position
+    # so the arm does not move when you squeeze without moving your hand. The
+    # mapping stays absolute (constant offsets) so the IOBT elbow hint agrees.
+    ee_orientation_latch_on_a: bool = True
+    ee_position_latch_on_a: bool = True
+    # Right A (and the first action / a re-sync): the headset look direction
+    # of that moment ↦ the start-pose head joints, exactly like the EE
+    # orientation offsets. False = pure absolute mapping with the fixed
+    # head_*_offset_deg (the head jumps to the gaze after Right A).
+    head_latch_on_a: bool = True
+    ee_orientation_offset_rpy_deg: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    abs_hold_s: float = 1.0                 # keep following this long without body joints
+    # Robot version selects the reach constants ("auto" = probe the robot).
+    robot_version: str = "auto"
+
+    # ── IOBT arm posture → nullspace hint ─────────────────────────────
+    # Shoulder / elbow / hand positions are retargeted to arm_0..arm_3 and sent
+    # as `<side>_arm_<i>.null` keys; the follower uses them as the Cartesian
+    # solver's nullspace target (soft, EE has priority). Not recorded unless
+    # record_posture_hint (then the dataset action gains 8 dims).
+    arm_posture_hint: bool = True
+    record_posture_hint: bool = False
+    posture_hint_smoothing: float = 0.3
+    posture_hint_max_vel: float = 2.0       # rad/s per joint
+    posture_hint_hold_s: float = 1.0
+    hint_wrist_source: str = "controller"   # "controller" (grip position) | "body" (IOBT wrist)
+
+    # ── Operator frame (which direction is robot +X) ──────────────────
+    # "shoulders": the body-tracking shoulder line, at the first action and on
+    #              Right A alike (the arms hold until both shoulders are valid;
+    #              on Right A without valid shoulders the gaze is used with a
+    #              warning). Consistent between the two reference events.
+    # "gaze":      the headset look direction, both times.
+    # "auto":      shoulder line when valid, otherwise gaze (legacy).
+    # Neck mode: after the shoulder line, the headset→controllers direction is
+    # tried before the gaze (the head is not looking along the body).
+    reference_source: str = "shoulders"
+
+    # ── Dead-man switch / session ─────────────────────────────────────
+    # Squeeze value above which an arm follows its controller.
+    clutch_threshold: float = 0.5
+    # When to open the CloudXR/OpenXR session: at connect() (default) or lazily
+    # on the first get_action(). "first_action" is a mitigation for Jetson Orin
+    # hosts where creating Python threads after the CloudXR service starts can
+    # abort the process: lerobot-record creates its keyboard-listener and
+    # camera threads between teleop.connect() and the first get_action().
+    session_start: str = "connect"
+    # Seconds to wait for the headset controllers before giving up (0 = forever).
+    tracking_wait_timeout_s: float = 0.0
+
+    # ── Thumbsticks -> mobile base (body-frame velocity) ─────────────
+    thumbstick_deadzone: float = 0.15
+    base_max_linear: float = 0.3   # m/s at full deflection
+    base_max_angular: float = 0.6  # rad/s at full deflection
+
+    # ── Headset orientation -> head_0 (yaw) / head_1 (pitch) ─────────
+    # The gaze follows the headset yaw / pitch measured in the operator frame
+    # (Right A sets which direction is straight ahead and latches the look
+    # direction onto the start head joints; without the latch, looking
+    # straight ahead gives head_*_offset_deg).
+    head_yaw_offset_deg: float = 0.0
+    head_pitch_offset_deg: float = 0.0
+    head_yaw_sign: float = 1.0      # +head_0 = look left; flip if reversed on HW
+    head_pitch_sign: float = -1.0   # +head_1 = look down (READY_HEAD pitch = +49 deg)
+    head_yaw_gain: float = 1.0
+    head_pitch_gain: float = 1.0
+    head_yaw_limit_deg: float = 80.0
+    head_pitch_min_deg: float = -45.0
+    head_pitch_max_deg: float = 80.0
+    head_smoothing: float = 0.3     # EMA weight of the new sample (1.0 = none)
+    # "base": the head target is a look direction in the robot base frame and
+    # the joints are re-solved for the measured torso orientation every tick —
+    # the torso bending / turning does not move the gaze (the headset did not
+    # move). "torso": joints commanded directly (gaze rides with the torso).
+    head_gaze_frame: str = "base"
+
+    # ── Torso driver ──────────────────────────────────────────────────
+    # "body": Isaac Teleop FullBodySource (Quest 3 IOBT / Pico trackers),
+    # "head": headset pose, "none": torso target frozen at its start pose.
+    torso_source: str = "body"
+    # When the torso follows its driver: only while BOTH enabled arms are
+    # clutched (default, the operator has to "hold on" with both hands), while
+    # ANY arm is clutched, or ALWAYS (from the first valid driver frame on).
+    torso_engage: str = "both_arms"
+    # Body joint driving the torso (name from BodyJointIndex, XR_BD layout).
+    torso_body_joint: str = "SPINE3"
+    # Joints that must be valid for a body frame to drive the torso.
+    body_required_joints: list[str] = field(
+        default_factory=lambda: ["PELVIS", "SPINE3", "NECK"]
+    )
+    # Absolute workspace box of the torso target (link_torso_5 in the robot
+    # base frame): position [x, y, z] (m) and fixed-axis XYZ roll / pitch /
+    # yaw (deg, pitch + = leaning forward). Derived from the reachable range
+    # computed by scripts/torso_workspace.py (ready pose: x = y = 0,
+    # z = 1.10 m, rpy = 0) with margins that keep the chest above the knees
+    # and rule out folded postures. The chest pose delta since engage is
+    # applied 1:1 (no extra delta clamps); this box is the only limit.
+    torso_pos_min: list[float] = field(default_factory=lambda: [-0.15, -0.20, 0.80])
+    torso_pos_max: list[float] = field(default_factory=lambda: [0.45, 0.20, 1.20])
+    torso_rpy_min_deg: list[float] = field(default_factory=lambda: [-15.0, -20.0, -45.0])
+    torso_rpy_max_deg: list[float] = field(default_factory=lambda: [15.0, 50.0, 45.0])
+
+    # ── Right A: return to the start pose ─────────────────────────────
+    # The pose measured on the first action (the follower has just reached
+    # its ready pose) is remembered; Right A releases every clutch and sends
+    # one `reset.cmd` action: the follower runs its joint-position ready-pose
+    # motion (as at connect) with this minimum time, blocking for its
+    # duration, then re-references the EE solver. Base excluded.
+    ready_return_duration_s: float = 4.0
+
+    # ── Re-synchronisation with the robot ─────────────────────────────
+    # The targets are re-seeded from the measured robot pose on the first
+    # get_action() (the follower moves to its ready pose AFTER teleop.connect())
+    # and whenever a component that is NOT clutched is found further than these
+    # thresholds from its held target (record reset, manual move): the robot
+    # then stays where it is instead of being dragged back to a stale target.
+    resync_position_threshold_m: float = 0.03
+    resync_rotation_threshold_deg: float = 10.0
+    resync_head_threshold_deg: float = 5.0
+
+    # ── Diagnostics ───────────────────────────────────────────────────
+    # Log a one-line tracking / clutch status this often (seconds; 0 = off).
+    status_log_period_s: float = 5.0
+
+    def __post_init__(self) -> None:
+        parent_post_init = getattr(super(), "__post_init__", None)
+        if parent_post_init is not None:
+            parent_post_init()
+        if self.session_start not in SESSION_START_CHOICES:
+            raise ValueError(
+                f"session_start must be one of {SESSION_START_CHOICES}, got {self.session_start!r}"
+            )
+        if self.torso_source not in TORSO_SOURCE_CHOICES:
+            raise ValueError(
+                f"torso_source must be one of {TORSO_SOURCE_CHOICES}, got {self.torso_source!r}"
+            )
+        if self.torso_engage not in TORSO_ENGAGE_CHOICES:
+            raise ValueError(
+                f"torso_engage must be one of {TORSO_ENGAGE_CHOICES}, got {self.torso_engage!r}"
+            )
+        for name, value, choices in (
+            ("wear_mode", self.wear_mode, WEAR_MODE_CHOICES),
+            ("head_gaze_frame", self.head_gaze_frame, HEAD_GAZE_FRAME_CHOICES),
+            ("reference_source", self.reference_source, REFERENCE_SOURCE_CHOICES),
+            ("shoulder_source", self.shoulder_source, SHOULDER_SOURCE_CHOICES),
+            ("viz_lock_mode", self.viz_lock_mode, VIZ_LOCK_CHOICES),
+            ("viz_frame_bridge", self.viz_frame_bridge, VIZ_BRIDGE_CHOICES),
+            ("arm_length_source", self.arm_length_source, ARM_LENGTH_SOURCE_CHOICES),
+            ("hint_wrist_source", self.hint_wrist_source, HINT_WRIST_SOURCE_CHOICES),
+            ("robot_version", self.robot_version, ROBOT_VERSION_CHOICES),
+        ):
+            if value not in choices:
+                raise ValueError(f"{name} must be one of {choices}, got {value!r}")
+        if self.record_posture_hint and not self.arm_posture_hint:
+            raise ValueError("record_posture_hint requires arm_posture_hint=True")
+        if len(self.ee_orientation_offset_rpy_deg) != 3:
+            raise ValueError("ee_orientation_offset_rpy_deg must have 3 values")
+        if len(self.neck_shoulder_offset) != 3:
+            raise ValueError("neck_shoulder_offset must have 3 values")
+        for lo_name, hi_name in (("torso_pos_min", "torso_pos_max"), ("torso_rpy_min_deg", "torso_rpy_max_deg")):
+            lo, hi = getattr(self, lo_name), getattr(self, hi_name)
+            if len(lo) != 3 or len(hi) != 3:
+                raise ValueError(f"{lo_name} / {hi_name} must have 3 values")
+            if any(a > b for a, b in zip(lo, hi)):
+                raise ValueError(f"{lo_name} must be <= {hi_name} component-wise")
+        if any(abs(v) >= 180.0 for v in self.torso_rpy_min_deg + self.torso_rpy_max_deg):
+            raise ValueError("torso_rpy_*_deg must be within (-180, 180)")
+        if self.viz_enabled and len(self.viz_offsets_x) != len(self.viz_cameras):
+            raise ValueError("viz_offsets_x must have one entry per viz_cameras entry")
+        if not (0.0 < self.viz_grab_threshold <= 1.0):
+            raise ValueError("viz_grab_threshold must be in (0, 1]")
+        if self.robot_model.strip().lower() not in ("a", "m", "auto"):
+            raise ValueError(f'robot_model must be "a", "m" or "auto", got {self.robot_model!r}')
+        if not (0.0 < self.head_smoothing <= 1.0):
+            raise ValueError("head_smoothing must be in (0, 1]")
+        from .xr_frame import BodyJointIndex  # local import: keep this module lerobot-only
+
+        valid_joints = {m.name for m in BodyJointIndex}
+        for name in [self.torso_body_joint, *self.body_required_joints]:
+            if name not in valid_joints:
+                raise ValueError(
+                    f"Unknown body joint {name!r}; expected one of {sorted(valid_joints)}"
+                )
+
+    @property
+    def needs_body(self) -> bool:
+        """Whether the FullBodySource must be in the pipeline."""
+        return True  # the absolute arm mapping always needs the IOBT shoulder

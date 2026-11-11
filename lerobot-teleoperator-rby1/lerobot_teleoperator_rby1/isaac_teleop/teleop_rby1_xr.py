@@ -1,0 +1,1272 @@
+"""RB-Y1 XR device for NVIDIA Isaac Teleop, exposed to LeRobot as ``rby1_isaac``.
+
+Control flow (one ``TeleopSession.step()`` per :meth:`get_action`)::
+
+    controllers / head / body  ──►  XRFrame (robot base frame)
+        controller + IOBT shoulder ──► AbsoluteEeMapper ──► right_ee.* / left_ee.*
+        IOBT shoulder / elbow    ──► ArmPostureRetargeter ──► <side>_arm_<i>.null
+        body chest (or head)     ──► Clutch + clamp ──► torso_ee.*
+        headset look direction   ──► HeadRetargeter ──► head_0.pos / head_1.pos
+        triggers                 ──► *_gripper_0.pos   (1.0 = open)
+        thumbsticks              ──► x.vel / y.vel / theta.vel
+
+Following the LeRobot convention this teleoperator only *produces* actions;
+the paired ``lerobot_robot_rby1.Rby1`` follower (``action_mode="ee"``,
+``use_head=True`` …) executes them. The robot link held here is read-only
+(state + forward kinematics so the clutch latches on the *measured* pose).
+
+Button mapping (Meta Quest naming)
+----------------------------------
+    Squeeze (grip) > threshold   Dead-man switch: while held the hand position
+                                 relative to the operator's IOBT shoulder is
+                                 mapped onto the robot shoulder; release = hold
+    Trigger                      Gripper (1 = closed)
+    Right thumbstick             Base linear velocity; left thumbstick: yaw
+    Right B                      Stop: freeze every target, zero the base
+    Right A                      Release every clutch and return arms, torso and
+                                 head to the start pose (measured right after the
+                                 follower's ready-pose motion); re-reference the
+                                 operator frame (current facing direction = robot
+                                 +X); also resumes after a stop
+
+Operator frame
+--------------
+OpenXR reports poses in a reference space whose forward is wherever the
+headset looked when the session started. All poses are therefore rotated
+about the robot z axis by ``-yaw(head)`` taken at the first tracked head
+frame and again on every Right A, so "push the controller forward" always
+means robot +X for the operator as they currently stand.
+    Torso                        Follows the chest (body tracking) or the head
+                                 while BOTH arms are clutched
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import socket
+import subprocess
+import time
+from collections.abc import Callable
+from typing import Any
+
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+
+from ..constants import (
+    BASE_VEL_NAMES,
+    HEAD_NAMES,
+    LEFT_EE_NAMES,
+    NULL_SUFFIX,
+    RESET_CMD_KEY,
+    POS_SUFFIX,
+    RIGHT_EE_NAMES,
+    TORSO_EE_NAMES,
+)
+from .absolute_ee import AbsoluteEeMapper, rpy_deg_to_matrix
+from .arm_retargeter import ArmPostureRetargeter, robot_reach
+from .base import IsaacTeleopTeleoperator
+from .clutch import Clutch
+from .config_isaac_teleop import Rby1XRConfig
+from .retargeters import (
+    HeadRetargeter,
+    chest_pose_from_body,
+    clamp_pose_box,
+    head_yaw_pitch,
+    interpolate_pose,
+    se3_to_ee_action,
+    smoothstep,
+    thumbsticks_to_base_vel,
+)
+from .robot_state import Rby1StateReader, RobotSnapshot
+from .viz_grab import HandInput, hand_input, load_layouts, save_layouts
+from .viz_panels import CameraPanels, PanelLayout, bus_frame_source
+from .xr_frame import (
+    BodyJointIndex,
+    ButtonEdge,
+    ControllerState,
+    XRFrame,
+    build_external_inputs,
+    build_pipeline,
+    frame_from_outputs,
+    rotate_frame_about_z,
+)
+
+logger = logging.getLogger(__name__)
+
+CLOUDXR_WEB_CLIENT_URL = "https://nvidia.github.io/IsaacTeleop/client"
+CLOUDXR_WSS_PORT = 48322
+_XR_CONNECT_REMINDER_S = 15.0
+_SKIP_IFACE_PREFIXES = ("lo", "docker", "br-", "veth", "virbr", "l4tbr")
+
+
+class Rby1XR(IsaacTeleopTeleoperator):
+    """XR-controller / headset / body-tracking teleoperator for the RB-Y1.
+
+    The class name must be ``Rby1XRConfig`` minus ``Config``: LeRobot's
+    ``make_teleoperator_from_config`` resolves third-party device classes by
+    that rule, importing them from the config's parent package.
+    """
+
+    config_class = Rby1XRConfig
+    name = "rby1_isaac"
+
+    def __init__(
+        self,
+        config: Rby1XRConfig,
+        *,
+        session_factory: Any | None = None,
+        launcher_factory: Any | None = None,
+        state_reader_factory: Callable[[str, str], Any] | None = None,
+        viz_module: Any | None = None,
+        viz_uploader: Any | None = None,
+    ) -> None:
+        super().__init__(config, session_factory=session_factory, launcher_factory=launcher_factory)
+        self._viz_module_override = viz_module
+        self._viz_uploader_override = viz_uploader
+        self.config: Rby1XRConfig = config
+        self._reader_factory = state_reader_factory or Rby1StateReader
+        self._reader: Any = None
+        self._connected = False
+
+        self._external_inputs: dict[str, Any] | None = None
+        self._body_transform: np.ndarray | None = None
+        self._edges = ButtonEdge()
+
+        self._clutch: dict[str, Clutch | None] = {"right": None, "left": None, "torso": None}
+        self._torso_target: np.ndarray | None = None
+        self._head = self._make_head_retargeter()
+        self._gripper = {"right": 1.0, "left": 1.0}  # dataset convention: 1 = open
+        self._base_vel = (0.0, 0.0, 0.0)
+        self._stopped = False
+        self._tracking = False
+        self._warned_no_body = False
+        self._last_status_log = 0.0
+        self._torso_hold_reason = "not started"
+        self._needs_initial_resync = True
+        # Start pose (first action) and the interpolated return motion (Right A).
+        self._start_snapshot: RobotSnapshot | None = None
+        self._return_motion: _ReturnMotion | None = None
+        # Operator-frame yaw correction (rad about robot z) applied to every
+        # incoming pose; taken from the raw head yaw at reference time.
+        self._yaw_correction = 0.0
+        self._needs_reference = True
+        self._last_raw_frame: XRFrame | None = None
+        self._warned_waiting_shoulders = False
+
+        self._torso_joint = int(BodyJointIndex[config.torso_body_joint])
+        self._torso_required = [int(BodyJointIndex[n]) for n in config.body_required_joints]
+
+        # Absolute arm mode / posture hints (created in connect() once the robot
+        # version, hence the reach constants, is known).
+        self._abs: dict[str, AbsoluteEeMapper] = {}
+        self._abs_ramp: dict[str, tuple[float, np.ndarray, float] | None] = {"right": None, "left": None}
+        self._abs_state: dict[str, str] = {"right": "hold", "left": "hold"}
+        self._abs_last_body_t: dict[str, float | None] = {"right": None, "left": None}
+        self._posture: dict[str, ArmPostureRetargeter] = {}
+        self._hints: dict[str, np.ndarray | None] = {"right": None, "left": None}
+        self._last_snapshot: RobotSnapshot | None = None
+        # Per arm: latch the controller↦gripper offsets at the next engage.
+        self._needs_offset_latch: dict[str, bool] = {"right": True, "left": True}
+        # Head joints the current look direction must map onto (latched on the
+        # next tracked head frame; None = nothing pending).
+        # (head joints, base->torso_5 pose those joints were measured / defined under)
+        self._head_latch_target: tuple[np.ndarray, np.ndarray] | None = None
+        self._last_tick_t: float | None = None
+        # Neck mode: smoothed headset pose driving the torso.
+        self._neck_driver: np.ndarray | None = None
+        self._warned_neck_torso = False
+
+    # ------------------------------------------------------------------
+    # Features
+    # ------------------------------------------------------------------
+
+    @property
+    def action_features(self) -> dict[str, type]:
+        cfg = self.config
+        names: list[str] = []
+        if cfg.use_torso:
+            names += TORSO_EE_NAMES
+        if cfg.use_right_arm:
+            names += RIGHT_EE_NAMES
+        if cfg.use_left_arm:
+            names += LEFT_EE_NAMES
+        features: dict[str, type] = {n: float for n in names}
+        if cfg.use_gripper:
+            if cfg.use_right_arm:
+                features[f"right_gripper_0{POS_SUFFIX}"] = float
+            if cfg.use_left_arm:
+                features[f"left_gripper_0{POS_SUFFIX}"] = float
+        if cfg.use_mobile_base:
+            for n in BASE_VEL_NAMES:
+                features[n] = float
+        if cfg.use_head:
+            for n in HEAD_NAMES:
+                features[f"{n}{POS_SUFFIX}"] = float
+        if cfg.arm_posture_hint and cfg.record_posture_hint:
+            for side, enabled in (("right", cfg.use_right_arm), ("left", cfg.use_left_arm)):
+                if enabled:
+                    for i in range(4):
+                        features[f"{side}_arm_{i}{NULL_SUFFIX}"] = float
+        return features
+
+    @property
+    def feedback_features(self) -> dict[str, type]:
+        return {}
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    @property
+    def is_tracking(self) -> bool:
+        """Whether the last frame carried at least one tracked controller."""
+        return self._tracking
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._stopped
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def connect(self, calibrate: bool = True) -> None:  # noqa: ARG002
+        if self._connected:
+            raise DeviceAlreadyConnectedError(f"{self} already connected.")
+        cfg = self.config
+        logger.info("rby1_isaac: opening read-only robot link at %s …", cfg.robot_address)
+        self._reader = self._reader_factory(cfg.robot_address, cfg.robot_model)
+        logger.info("rby1_isaac: wear_mode=%s", cfg.wear_mode)
+        if cfg.wear_mode == "neck":
+            logger.warning(
+                "wear_mode=neck: the headset must NOT go to sleep while hanging from the neck — "
+                "disable the Quest proximity sensor (MQDH → Device Actions → Proximity Sensor off, "
+                "or cover the sensor). The robot head is held at the start pose and the headset "
+                "pose drives the torso."
+            )
+        if cfg.viz_enabled:
+            layouts = [
+                PanelLayout(name, offset_x=ox, offset_y=cfg.viz_offset_y, distance=cfg.viz_distance_m, width=cfg.viz_width_m)
+                for name, ox in zip(cfg.viz_cameras, cfg.viz_offsets_x)
+            ]
+            if cfg.viz_layout_file and not cfg.viz_layout_reset:
+                layouts = load_layouts(cfg.viz_layout_file, layouts)
+            self._viz = CameraPanels(
+                layouts,
+                bus_frame_source,
+                lock_mode=cfg.viz_lock_mode,
+                follow_pitch=cfg.viz_follow_pitch,
+                face_head=cfg.viz_face_head,
+                openxr_composition=cfg.viz_openxr_composition,
+                viz_module=self._viz_module_override,
+                uploader=self._viz_uploader_override,
+                daemon=self._viz_module_override is not None,  # test doubles must not pin the process
+                grab_enabled=cfg.viz_grab_enabled,
+                grab_threshold=cfg.viz_grab_threshold,
+                grab_push_rate_mps=cfg.viz_grab_push_rate_mps,
+                frame_bridge=cfg.viz_frame_bridge,
+                on_layout_changed=self._save_panel_layout if cfg.viz_layout_file else None,
+            )
+            if cfg.viz_grab_enabled:
+                logger.info(
+                    "Camera panels can be moved: point a free hand (squeeze released) at the bar above a "
+                    "panel and hold the trigger; thumbstick pushes / pulls. Layout file: %s",
+                    cfg.viz_layout_file or "(not persisted)",
+                )
+        try:
+            self._reader.connect()
+            self._init_arm_mappers()
+            if cfg.session_start == "connect":
+                self._open_session()
+            else:
+                logger.info(
+                    "rby1_isaac: session_start=first_action — the CloudXR/OpenXR session "
+                    "opens on the first get_action() call."
+                )
+        except Exception:
+            self._close_reader()
+            raise
+        self._connected = True
+        if cfg.profile_out:
+            from lerobot_robot_rby1.profile import update_profile_section
+
+            path = update_profile_section(cfg.profile_out, "teleop", {"type": self.name, "config": cfg})
+            logger.info("%s config recorded in %s.", self, path)
+        logger.info("%s connected.", self)
+
+    def disconnect(self) -> None:
+        if not self._connected:
+            return
+        try:
+            super().disconnect()
+        finally:
+            self._close_reader()
+            self._external_inputs = None
+            self._connected = False
+            self._tracking = False
+            logger.info("%s disconnected.", self)
+
+    def _close_reader(self) -> None:
+        if self._reader is not None:
+            try:
+                self._reader.close()
+            finally:
+                self._reader = None
+
+    def _open_session(self) -> None:
+        """Launch CloudXR + TeleopSession, wait for the headset, latch the start pose."""
+        if self._viz is not None:
+            # VizSession.create() blocks until the headset connects: show the
+            # connection instructions before that.
+            print_xr_connect_help()
+        super().connect()
+        try:
+            self._external_inputs = build_external_inputs(self.config.base_T_anchor)
+            self._wait_for_tracking()
+            self._latch_initial()
+        except Exception:
+            # No half-state: a live session behind a raised connect would leak
+            # the CloudXR runtime.
+            super().disconnect()
+            raise
+
+    def _init_arm_mappers(self) -> None:
+        cfg = self.config
+        version = cfg.robot_version if cfg.robot_version != "auto" else getattr(self._reader, "version", "1.3")
+        if version not in ("1.2", "1.3"):
+            version = "1.3"
+        self._robot_version = version
+        reach = robot_reach(version)
+        offset = rpy_deg_to_matrix(cfg.ee_orientation_offset_rpy_deg)
+        for side, enabled in (("right", cfg.use_right_arm), ("left", cfg.use_left_arm)):
+            if not enabled:
+                continue
+            self._abs[side] = AbsoluteEeMapper(
+                side,
+                robot_reach=reach,
+                human_reach=cfg.human_arm_length_m if cfg.arm_length_source == "config" else None,
+                position_scale=cfg.ee_position_scale,
+                reach_max_ratio=cfg.ee_reach_max_ratio,
+                shoulder_smoothing=cfg.shoulder_smoothing,
+                max_linear_vel=cfg.ee_max_linear_vel,
+                max_angular_vel=cfg.ee_max_angular_vel,
+                orientation_offset=offset,
+                fallback_reach=cfg.human_arm_length_m,
+            )
+            if cfg.arm_posture_hint:
+                self._posture[side] = ArmPostureRetargeter(
+                    side,
+                    version=version,
+                    smoothing=cfg.posture_hint_smoothing,
+                    max_vel=cfg.posture_hint_max_vel,
+                    hold_s=cfg.posture_hint_hold_s,
+                )
+        logger.info(
+            "rby1_isaac: absolute arm mapping, posture_hint=%s (robot version %s, reach %.3f m)",
+            cfg.arm_posture_hint, version, reach,
+        )
+
+    def _build_pipeline(self) -> Any:
+        pipeline, body_in_graph = build_pipeline(with_body=self.config.needs_body)
+        self._body_transform = (
+            None if body_in_graph else np.asarray(self.config.base_T_anchor, dtype=float)
+        )
+        return pipeline
+
+    # ------------------------------------------------------------------
+    # Frame acquisition
+    # ------------------------------------------------------------------
+
+    def _read_frame(self) -> XRFrame:
+        outputs = self._step(
+            execution_events=self._running_events(), external_inputs=self._external_inputs
+        )
+        raw = frame_from_outputs(
+            outputs,
+            want_body=self.config.needs_body,
+            body_transform=self._body_transform,
+        )
+        self._last_raw_frame = raw
+        self._tracking = raw.any_controller
+        return rotate_frame_about_z(raw, self._yaw_correction)
+
+    def _set_reference_from_head(self, raw: XRFrame, on_button: bool = False) -> bool:
+        """Make the operator's current facing direction robot +X. Returns True if taken.
+
+        The facing direction is taken from the body-tracking shoulder line
+        when both shoulders are valid (robust to where the operator looks),
+        otherwise from the head gaze.
+        """
+        yaw: float | None = None
+        source = ""
+        src = self.config.reference_source
+        if src != "gaze" and raw.body is not None:
+            ls, rs = int(BodyJointIndex.LEFT_SHOULDER), int(BodyJointIndex.RIGHT_SHOULDER)
+            if bool(raw.body.valid[ls]) and bool(raw.body.valid[rs]):
+                across = raw.body.positions[ls] - raw.body.positions[rs]  # right -> left
+                fwd = np.cross(across, np.array([0.0, 0.0, 1.0]))
+                if np.linalg.norm(fwd[:2]) > 1e-3:
+                    yaw = math.atan2(fwd[1], fwd[0])
+                    source = "shoulder line"
+        if yaw is None and src == "shoulders" and self.config.wear_mode != "neck":
+            if not on_button:
+                # First reference: wait for the shoulders (the arms hold meanwhile).
+                if not self._warned_waiting_shoulders:
+                    logger.info("Waiting for body tracking (both shoulders) to reference the operator frame …")
+                    self._warned_waiting_shoulders = True
+                return False
+            logger.warning("Right A without valid shoulders: operator frame referenced from the head gaze instead.")
+        if yaw is None and self.config.wear_mode == "neck" and raw.head is not None:
+            # Both controllers are needed: a single hand sits ~0.2 m off-centre
+            # and would bias the facing direction by tens of degrees.
+            if raw.right is not None and raw.left is not None:
+                mid = 0.5 * (raw.right.position + raw.left.position)
+                fwd = mid - raw.head.position
+                if np.linalg.norm(fwd[:2]) > 0.05:
+                    yaw = math.atan2(fwd[1], fwd[0])
+                    source = "headset→controllers direction"
+        if yaw is None:
+            if raw.head is None:
+                return False
+            yaw, _ = head_yaw_pitch(raw.head.pose)
+            source = "head gaze"
+        old = self._yaw_correction
+        self._yaw_correction = -yaw
+        self._needs_reference = False
+        logger.info(
+            "Operator frame re-referenced from the %s: yaw %.1f deg in the XR anchor frame is now robot +X.",
+            source,
+            math.degrees(yaw),
+        )
+        if abs(_wrap_angle(self._yaw_correction - old)) > 1e-6 or on_button:
+            self._on_reference_changed()
+        return True
+
+    def _on_reference_changed(self) -> None:
+        """Everything derived from the operator frame must start over."""
+        for mapper in self._abs.values():
+            mapper.reset_shoulder()
+        for retargeter in self._posture.values():
+            retargeter.reset()
+        # Hints derived from the old frame must not be emitted any more.
+        self._hints = {side: None for side in self._hints}
+        self._needs_offset_latch = {side: True for side in self._needs_offset_latch}
+
+    def _wait_for_tracking(self) -> None:
+        """Block until a controller is tracked (user-paced; Ctrl-C aborts)."""
+        print_xr_connect_help()
+        logger.info("Waiting for the headset controllers to start streaming …")
+        t0 = time.monotonic()
+        last_reminder = t0
+        timeout = self.config.tracking_wait_timeout_s
+        while True:
+            frame = self._read_frame()
+            if frame.any_controller:
+                logger.info("Headset connected — controllers are streaming.")
+                return
+            now = time.monotonic()
+            if now - last_reminder >= _XR_CONNECT_REMINDER_S:
+                print_xr_connect_help()
+                logger.info("… still waiting for the headset to connect (Ctrl-C to abort).")
+                last_reminder = now
+            if timeout > 0.0 and now - t0 > timeout:
+                raise TimeoutError(
+                    f"No XR controller tracked within {timeout:.0f}s "
+                    f"(tracking_wait_timeout_s)."
+                )
+            time.sleep(0.01)
+
+    def _latch_initial(self) -> None:
+        """Seed every target from the measured robot pose so nothing moves yet."""
+        snap: RobotSnapshot = self._reader.read()
+        cfg = self.config
+        self._clutch["right"] = Clutch(snap.right_ee) if cfg.use_right_arm else None
+        self._clutch["left"] = Clutch(snap.left_ee) if cfg.use_left_arm else None
+        self._clutch["torso"] = Clutch(snap.torso) if cfg.use_torso else None
+        self._torso_target = snap.torso.copy()
+        self._head.hold(snap.head_q, snap.torso)
+        self._gripper = {"right": 1.0, "left": 1.0}
+        self._base_vel = (0.0, 0.0, 0.0)
+        self._stopped = False
+        # The follower connects (and moves to its ready pose) after this, so
+        # the targets are re-seeded again on the first get_action().
+        self._needs_initial_resync = True
+        self._needs_reference = True
+        logger.info("rby1_isaac: targets latched to the current robot pose (squeeze to follow).")
+
+    # ------------------------------------------------------------------
+    # get_action — main per-tick entry point
+    # ------------------------------------------------------------------
+
+    def get_action(self) -> dict[str, Any]:
+        if not self._connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+        if self._session is None:  # session_start == "first_action"
+            self._open_session()
+
+        frame = self._read_frame()
+        events = self._edges.update(frame)
+        raw = self._last_raw_frame
+
+        # Operator frame: reference on the first tracked head frame and on Right A.
+        if raw is not None and (events["right_a"] or self._needs_reference):
+            if self._set_reference_from_head(raw, on_button=bool(events["right_a"])):
+                frame = rotate_frame_about_z(raw, self._yaw_correction)
+
+        # One robot read per tick: engage edges latch from it and disengaged
+        # components are re-synchronised to it when the robot moved on its own.
+        snap = self._reader.read()
+        self._last_snapshot = snap
+
+        def get_snap() -> RobotSnapshot:
+            return snap
+
+        self._resync_disengaged(snap)
+        # Camera-panel grab: feed the aim rays; a grabbing hand neither clutches
+        # nor drives its gripper / thumbstick while it holds a panel.
+        grabbing = self._feed_panel_hands(raw)
+        frame = _mask_grabbing_hands(frame, grabbing)
+
+        if any(events.values()):
+            logger.info("xr button edge: %s", [k for k, v in events.items() if v])
+        if events["right_b"]:
+            logger.info("Right B — stopping: targets frozen, base zeroed.")
+            self._stopped = True
+            for clutch in self._clutch.values():
+                if clutch is not None:
+                    clutch.disengage()
+        elif events["right_a"]:
+            if self._stopped:
+                logger.info("Right A — resuming.")
+            self._stopped = False
+            self._start_return_motion(snap)
+            if self.config.use_head and self.config.head_latch_on_a and self._start_snapshot is not None:
+                start = self._start_snapshot
+                self._head_latch_target = (start.head_q.copy(), start.torso.copy())
+
+        now = time.monotonic()
+        dt = 1.0 / 60.0 if self._last_tick_t is None else float(np.clip(now - self._last_tick_t, 1e-3, 0.1))
+        self._last_tick_t = now
+
+        if self._head_latch_target is not None:
+            self._latch_head_offset(frame)
+
+        self._advance_return_motion(frame, snap)
+        self._update_arm_absolute("right", frame, snap, now, dt)
+        self._update_arm_absolute("left", frame, snap, now, dt)
+        self._update_posture_hints(frame, snap, now, dt)
+        self._update_torso(frame, get_snap)
+        self._update_head(frame, get_snap)
+        self._update_grippers(frame)
+        self._update_base(frame)
+        self._log_status(frame)
+        return self._build_action()
+
+    # ------------------------------------------------------------------
+    # Per-tick helpers
+    # ------------------------------------------------------------------
+
+    def _resync_disengaged(self, snap: RobotSnapshot) -> None:
+        """Re-seed held targets from the measured pose when the robot moved on its own.
+
+        On the first tick this is unconditional: the follower reaches its ready
+        pose only after ``teleop.connect()`` latched the targets, so commanding
+        those would drag the robot straight back. Afterwards it triggers only
+        while nothing is clutched, per component whose measured pose drifted
+        past the ``resync_*`` thresholds (record reset, manual move).
+        """
+        cfg = self.config
+        force = self._needs_initial_resync
+        self._needs_initial_resync = False
+        if force:
+            # The follower has just reached its ready pose: remember it as the
+            # start pose Right A returns to.
+            self._start_snapshot = snap
+            if cfg.use_torso:
+                _, clipped = self._clamp_torso_box(snap.torso)
+                if clipped:
+                    logger.warning(
+                        "Start torso pose is outside torso_pos/rpy limits (%s): the torso will be "
+                        "pulled into the box as soon as it engages. The default box is computed for the "
+                        "crouched torso (--robot.ee_ready_torso_deg='[0,45,-90,45,0,0]'); use that ready "
+                        "torso or adjust torso_pos_min/max, torso_rpy_*_deg.",
+                        ",".join(clipped),
+                    )
+        # While any clutch is engaged the robot is being driven by us: the
+        # torso carries the free arm along and the solvers lag behind the
+        # targets, so drift is expected and must not be "corrected". The same
+        # holds while (and shortly after) a Right-A return motion drives it.
+        if not force and (
+            any(c is not None and c.engaged for c in self._clutch.values())
+            or (self._return_motion is not None and not self._return_motion.settled())
+        ):
+            return
+        pos_thr = cfg.resync_position_threshold_m
+        rot_thr = math.radians(cfg.resync_rotation_threshold_deg)
+        synced: list[str] = []
+
+        for side, measured in (("right", snap.right_ee), ("left", snap.left_ee)):
+            clutch = self._clutch[side]
+            if clutch is None or clutch.engaged:
+                continue
+            if force or _pose_drift(clutch.last_commanded, measured, pos_thr, rot_thr):
+                clutch.hold_at(measured)
+                synced.append(side)
+
+        torso = self._clutch["torso"]
+        if torso is not None and not torso.engaged and self._torso_target is not None:
+            if force or _pose_drift(self._torso_target, snap.torso, pos_thr, rot_thr):
+                torso.hold_at(snap.torso)
+                self._torso_target = snap.torso.copy()
+                synced.append("torso")
+
+        # The head is re-seeded only on the first tick or together with an arm /
+        # torso re-sync (a reset event): a plain lag between the commanded and
+        # measured head joints during a fast head turn must not reset its origin.
+        if cfg.use_head and (force or synced):
+            target = self._head.target
+            head_thr = math.radians(cfg.resync_head_threshold_deg)
+            if force or (
+                target is not None and float(np.max(np.abs(target - snap.head_q))) > head_thr
+            ):
+                # Hold the measured head joints; the look-direction origin is
+                # re-latched on the next tracked head frame.
+                self._head = self._make_head_retargeter()
+                self._head.hold(snap.head_q, snap.torso)
+                if cfg.head_latch_on_a:
+                    # Current look direction ↦ the measured head joints.
+                    self._head_latch_target = (snap.head_q.copy(), snap.torso.copy())
+                synced.append("head")
+
+        if synced:
+            logger.info(
+                "rby1_isaac: targets re-synced to the measured robot pose (%s)%s.",
+                ", ".join(synced),
+                " after connect / ready pose" if force else " — robot moved while not clutched",
+            )
+
+    # ------------------------------------------------------------------
+    # Right A: return to the start pose
+    # ------------------------------------------------------------------
+
+    def _start_return_motion(self, snap: RobotSnapshot) -> None:
+        """Release every clutch and ask the follower for its joint-space ready-pose motion."""
+        if self._start_snapshot is None:
+            logger.warning("Right A — no start pose recorded yet; nothing to return to.")
+            return
+        for clutch in self._clutch.values():
+            if clutch is not None:
+                clutch.disengage()
+        # The arms go back to the start pose: drop the teleop posture hints so
+        # the solver's nullspace target is not fighting the return motion.
+        for retargeter in self._posture.values():
+            retargeter.reset()
+        self._hints = {side: None for side in self._hints}
+        cfg = self.config
+        self._return_motion = _ReturnMotion(duration=max(cfg.ready_return_duration_s, 0.5))
+        logger.info(
+            "Right A — returning arms / torso / head to the start pose: follower joint-position "
+            "motion over %.1fs (clutches released; squeeze again afterwards to follow).",
+            self._return_motion.duration,
+        )
+
+    def _advance_return_motion(self, frame: XRFrame, snap: RobotSnapshot) -> None:
+        """Hold every target at the start pose while the follower moves there.
+
+        The follower performs the motion itself (blocking inside its
+        send_action for ``duration``): ``reset.cmd`` is emitted once and the
+        motion is considered finished on the next tick, so the first EE
+        command afterwards is the pose the robot has just reached.
+        """
+        motion = self._return_motion
+        if motion is None or motion.finished:
+            return
+        goal = self._start_snapshot if self._start_snapshot is not None else snap
+        for side in ("right", "left"):
+            clutch = self._clutch.get(side)
+            if clutch is not None:
+                clutch.hold_at(goal.right_ee if side == "right" else goal.left_ee)
+        if self._clutch.get("torso") is not None:
+            self._torso_target = goal.torso.copy()
+            self._clutch["torso"].hold_at(goal.torso)
+        if self.config.use_head:
+            self._head.hold(goal.head_q, goal.torso)
+        if not motion.reset_emitted:
+            motion.reset_emitted = True  # _build_action adds reset.cmd this tick
+            return
+        motion.finished = True
+        motion.t_done = time.monotonic()
+        if self.config.use_head and not self.config.head_latch_on_a:
+            # Fresh head origin at the start pose: the current view becomes centre.
+            self._head = self._make_head_retargeter()
+            self._head.hold(goal.head_q, goal.torso)
+        logger.info("Start pose reached — squeeze to follow again.")
+
+    def _make_head_retargeter(self) -> HeadRetargeter:
+        cfg = self.config
+        return HeadRetargeter(
+            yaw_sign=cfg.head_yaw_sign,
+            pitch_sign=cfg.head_pitch_sign,
+            yaw_gain=cfg.head_yaw_gain,
+            pitch_gain=cfg.head_pitch_gain,
+            yaw_limit=math.radians(cfg.head_yaw_limit_deg),
+            pitch_min=math.radians(cfg.head_pitch_min_deg),
+            pitch_max=math.radians(cfg.head_pitch_max_deg),
+            smoothing=cfg.head_smoothing,
+            yaw_offset=math.radians(cfg.head_yaw_offset_deg),
+            pitch_offset=math.radians(cfg.head_pitch_offset_deg),
+            compensate_torso=cfg.head_gaze_frame == "base",
+        )
+
+    @property
+    def _returning(self) -> bool:
+        return self._return_motion is not None and not self._return_motion.finished
+
+    # ------------------------------------------------------------------
+    # Absolute arm mode (dead-man) and IOBT posture hints
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _body_points(frame: XRFrame, side: str) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+        """IOBT shoulder / elbow / wrist positions of one side (None when invalid)."""
+        body = frame.body
+        if body is None:
+            return None, None, None
+        idx = {
+            "right": (BodyJointIndex.RIGHT_SHOULDER, BodyJointIndex.RIGHT_ELBOW, BodyJointIndex.RIGHT_WRIST),
+            "left": (BodyJointIndex.LEFT_SHOULDER, BodyJointIndex.LEFT_ELBOW, BodyJointIndex.LEFT_WRIST),
+        }[side]
+        out = []
+        for i in idx:
+            out.append(body.positions[int(i)].copy() if bool(body.valid[int(i)]) else None)
+        return out[0], out[1], out[2]
+
+    def _latch_ee_offsets(self, side: str, ctrl: ControllerState, snap: RobotSnapshot) -> None:
+        """Controller now ↦ the START pose gripper (orientation and position offsets).
+
+        Called at the first engage after connect / Right A, so the offsets come
+        from the hand posture the operator actually works with, not from the
+        posture used to press the button. Right A returns the arms to the
+        start pose, so the controller is mapped onto that pose: squeezing
+        without moving the hand leaves the arm where it is.
+        """
+        cfg = self.config
+        mapper = self._abs.get(side)
+        if mapper is None:
+            return
+        ref = self._start_snapshot if self._start_snapshot is not None else snap
+        target = ref.right_ee if side == "right" else ref.left_ee
+        what = []
+        if cfg.ee_orientation_latch_on_a:
+            mapper.latch_orientation_offset(ctrl.pose[:3, :3], target[:3, :3])
+            what.append("orientation")
+        if cfg.ee_position_latch_on_a:
+            if mapper.latch_position_offset(ctrl.position, snap.torso, target[:3, 3]):
+                what.append("position")
+            else:
+                return  # shoulder not known yet: retry at the next engage
+        self._needs_offset_latch[side] = False
+        if what:
+            logger.info("%s arm: controller ↦ start-pose gripper %s offset latched at engage.", side, " + ".join(what))
+
+    # ------------------------------------------------------------------
+    # Camera-panel grab (Televiz)
+    # ------------------------------------------------------------------
+
+    def _feed_panel_hands(self, raw: XRFrame | None) -> dict[str, str | None]:
+        """Send the controller aim rays (XR anchor frame) to the panels; return who is grabbing."""
+        viz = self._viz
+        none = {"right": None, "left": None}
+        if viz is None or not self.config.viz_grab_enabled:
+            return none
+        if raw is None:
+            viz.set_hands({}, None)
+            return viz.grabbing()
+        # raw = base_T_anchor · anchor pose (no yaw correction): undo the anchor transform.
+        anchor_T_base = np.linalg.inv(np.asarray(self.config.base_T_anchor, dtype=float))
+        hands: dict[str, HandInput | None] = {}
+        for side, ctrl in (("right", raw.right), ("left", raw.left)):
+            if ctrl is None:
+                hands[side] = None
+                continue
+            clutch = self._clutch.get(side)
+            hands[side] = hand_input(
+                ctrl.aim_pose, anchor_T_base, ctrl.trigger,
+                free=clutch is None or not clutch.engaged, thumb_y=ctrl.thumbstick[1],
+            )
+        head = None if raw.head is None else anchor_T_base @ raw.head.pose
+        viz.set_hands(hands, head)
+        return viz.grabbing()
+
+    def _save_panel_layout(self, layouts: list[PanelLayout]) -> None:
+        if save_layouts(self.config.viz_layout_file, layouts):
+            logger.info("Camera panel layout saved to %s.", self.config.viz_layout_file)
+
+    def _latch_head_offset(self, frame: XRFrame) -> None:
+        """Headset look direction now ↦ ``_head_latch_target`` (start / measured head joints).
+
+        The head counterpart of :meth:`_latch_orientation_offsets`: after Right
+        A the view at the moment of the press is the robot head's straight
+        ahead, whatever the operator-frame yaw reference (shoulder line) is.
+        Waits for a tracked head frame; nothing happens in neck mode.
+        """
+        target = self._head_latch_target
+        if target is None:
+            return
+        if not self.config.use_head or self.config.wear_mode == "neck":
+            self._head_latch_target = None
+            return
+        if frame.head is None:
+            return  # retry on the next tracked head frame
+        head_q, torso = target
+        self._head.latch_offset(frame.head.pose, head_q, torso)
+        self._head_latch_target = None
+        logger.info("Head offset latched (headset look direction ↦ head joints %s).", np.round(head_q, 3).tolist())
+
+    def _update_arm_absolute(self, side: str, frame: XRFrame, snap: RobotSnapshot, t: float, dt: float) -> None:
+        clutch = self._clutch[side]
+        mapper = self._abs.get(side)
+        if clutch is None or mapper is None:
+            return
+        ctrl = frame.right if side == "right" else frame.left
+        measured = snap.right_ee if side == "right" else snap.left_ee
+        cfg = self.config
+
+        S, E, W = self._body_points(frame, side)
+        src = cfg.shoulder_source
+        use_body = src in ("auto", "body") and S is not None
+        if use_body:
+            mapper.observe_body(S, E, W)
+            self._abs_last_body_t[side] = t
+        elif src in ("auto", "headset") and frame.head is not None:
+            # Estimate the shoulder from the headset position (operator frame
+            # is yaw-referenced: +x forward, +y left).
+            ox, oy, oz = cfg.neck_shoulder_offset
+            est = frame.head.position + np.array([ox, oy if side == "left" else -oy, oz])
+            mapper.set_shoulder(est)
+            self._abs_last_body_t[side] = t
+        body_ok = self._abs_last_body_t[side] is not None and t - self._abs_last_body_t[side] <= cfg.abs_hold_s
+
+        def release(state: str) -> None:
+            if clutch.engaged:
+                clutch.disengage()
+                logger.debug("%s arm released — holding.", side)
+            self._abs_ramp[side] = None
+            mapper.reset_rate_limit(None)
+            self._abs_state[side] = state
+
+        if self._stopped or self._returning or ctrl is None:
+            release("hold")
+            return
+        if self._needs_reference and cfg.reference_source == "shoulders":
+            release("hold (waiting for shoulders)")
+            return
+        if ctrl.squeeze <= cfg.clutch_threshold:
+            release("hold")
+            return
+        if not body_ok:
+            release("hold (no body)")
+            return
+        if not clutch.engaged and self._needs_offset_latch[side]:
+            self._latch_ee_offsets(side, ctrl, snap)
+        target = mapper.target(ctrl.position, ctrl.orientation, snap.torso)
+        if target is None:
+            release("hold (no shoulder)")
+            return
+
+        if not clutch.engaged:
+            clutch.engage(ctrl.position, ctrl.orientation, measured, latch_orientation="measured")
+            self._abs_ramp[side] = (t, clutch.last_commanded.copy(), max(cfg.engage_ramp_s, 0.05))
+            mapper.reset_rate_limit(None)
+            logger.debug("%s arm dead-man engaged — ramping to the absolute target.", side)
+
+        ramp = self._abs_ramp[side]
+        if ramp is not None:
+            t0, T_start, dur = ramp
+            a = smoothstep((t - t0) / dur)
+            T = interpolate_pose(T_start, target, a)
+            self._abs_state[side] = "ramp"
+            if a >= 1.0:
+                self._abs_ramp[side] = None
+                mapper.reset_rate_limit(T)
+                self._abs_state[side] = "track"
+        else:
+            T = mapper.rate_limit(target, dt)
+            self._abs_state[side] = "track"
+        clutch.set_commanded(T)
+
+    def _update_posture_hints(self, frame: XRFrame, snap: RobotSnapshot, t: float, dt: float) -> None:
+        """Retarget the arm posture only while that arm is engaged (squeeze held).
+
+        A released arm must not move at all, so its nullspace hint is frozen
+        at the last value together with its EE target. The retargeter is seeded
+        with the robot's measured ``arm_0..arm_3`` so the first hint starts at
+        the actual posture (and on the solver branch nearest to it) and ramps
+        towards the operator's posture instead of jumping. Body-tracking
+        dropouts while engaged keep the last hint (no fall-back to the robot's
+        default nullspace pose mid-motion).
+        """
+        if not self._posture or self._stopped or self._returning:
+            return
+        for side, retargeter in self._posture.items():
+            clutch = self._clutch.get(side)
+            if clutch is None or not clutch.engaged:
+                continue
+            S, E, Wb = self._body_points(frame, side)
+            ctrl = frame.right if side == "right" else frame.left
+            W = ctrl.position if (self.config.hint_wrist_source == "controller" and ctrl is not None) else Wb
+            seed = snap.right_q if side == "right" else snap.left_q
+            h = retargeter.update(S, E, W, snap.torso, t, dt, seed=seed)
+            if h is not None:
+                self._hints[side] = h
+
+    def _torso_engage_allowed(self) -> bool:
+        """Apply ``torso_engage``: both / any enabled arm clutched, or always."""
+        policy = self.config.torso_engage
+        if policy == "always":
+            return True
+        arms = [c for k, c in self._clutch.items() if k != "torso" and c is not None]
+        if not arms:
+            return False
+        if policy == "any_arm":
+            return any(c.engaged for c in arms)
+        return all(c.engaged for c in arms)
+
+    def _torso_driver_pose(self, frame: XRFrame) -> np.ndarray | None:
+        src = self.config.torso_source
+        if self.config.wear_mode == "neck":
+            if src == "body" and not self._warned_neck_torso:
+                logger.warning("wear_mode=neck: torso_source=body is replaced by the headset pose.")
+                self._warned_neck_torso = True
+            if frame.head is None:
+                return None
+            pose = frame.head.pose
+            a = self.config.neck_torso_smoothing
+            if self._neck_driver is None or a >= 1.0:
+                self._neck_driver = pose
+            else:
+                self._neck_driver = interpolate_pose(self._neck_driver, pose, a)
+            return self._neck_driver
+        if src == "body":
+            pose = chest_pose_from_body(frame.body, self._torso_joint, self._torso_required)
+            if pose is None and not self._warned_no_body:
+                logger.warning(
+                    "torso_source=body but no valid body-tracking frame yet — the torso "
+                    "holds until body tracking is available (Quest 3: enable body "
+                    "tracking in the headset; Pico: pair the motion trackers)."
+                )
+                self._warned_no_body = True
+            return pose
+        if src == "head":
+            return frame.head.pose if frame.head is not None else None
+        return None
+
+    def _update_torso(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot]) -> None:
+        clutch = self._clutch["torso"]
+        if clutch is None:
+            return
+        driver = None
+        if self._stopped:
+            self._torso_hold_reason = "stopped (Right B)"
+        elif self._returning:
+            self._torso_hold_reason = "returning to start pose (Right A)"
+        elif not self._torso_engage_allowed():
+            self._torso_hold_reason = f"arms not clutched (torso_engage={self.config.torso_engage})"
+        else:
+            driver = self._torso_driver_pose(frame)
+            if driver is None:
+                src = self.config.torso_source
+                if src == "body":
+                    if frame.body is None:
+                        self._torso_hold_reason = "no body-tracking frame"
+                    else:
+                        bad = [
+                            BodyJointIndex(i).name
+                            for i in [*self._torso_required, self._torso_joint]
+                            if not bool(frame.body.valid[i])
+                        ]
+                        self._torso_hold_reason = f"body joints invalid: {bad}"
+                elif src == "head" or self.config.wear_mode == "neck":
+                    self._torso_hold_reason = "no headset pose"
+                else:
+                    self._torso_hold_reason = "torso_source=none"
+        if driver is None:
+            clutch.disengage()
+            return
+        self._torso_hold_reason = "following"
+        pos = driver[:3, 3]
+        quat = Rotation.from_matrix(driver[:3, :3]).as_quat()
+        if not clutch.engaged:
+            clutch.engage(pos, quat, get_snap().torso, latch_orientation="measured")
+        else:
+            clutch.rebase(pos, quat)
+        # Chest delta since engage applied 1:1, then the absolute workspace box.
+        self._torso_target, clipped = self._clamp_torso_box(clutch.last_commanded)
+        if clipped:
+            self._torso_hold_reason = f"following, clamped[{','.join(clipped)}]"
+
+    def _clamp_torso_box(self, T: np.ndarray) -> tuple[np.ndarray, list[str]]:  # noqa: N803
+        cfg = self.config
+        return clamp_pose_box(
+            T,
+            cfg.torso_pos_min,
+            cfg.torso_pos_max,
+            np.radians(cfg.torso_rpy_min_deg),
+            np.radians(cfg.torso_rpy_max_deg),
+        )
+
+    def _update_head(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot]) -> None:
+        if not self.config.use_head or self._stopped or self._returning:
+            return
+        if self.config.wear_mode == "neck":
+            return  # the held (start / ready) gaze stays; torso compensation happens in _build_action
+        if frame.head is None:
+            return
+        snap = get_snap()
+        if not self._head.latched:
+            self._head.latch(frame.head.pose, snap.head_q, snap.torso)
+            logger.info("Head origin latched.")
+            return
+        self._head.update(frame.head.pose, snap.torso)
+
+    def _update_grippers(self, frame: XRFrame) -> None:
+        # Trigger 1 (squeezed) -> closed. Dataset convention: 1.0 = open. A free
+        # hand pointing at / holding a camera-panel handle keeps its last gripper
+        # value: its trigger is a UI click, not a gripper command.
+        ui = self._viz.ui_active() if self._viz is not None else {}
+        for side, ctrl in (("right", frame.right), ("left", frame.left)):
+            if ctrl is None:
+                continue
+            clutch = self._clutch.get(side)
+            free = clutch is None or not clutch.engaged
+            if ui.get(side) and free:
+                continue
+            self._gripper[side] = 1.0 - float(np.clip(ctrl.trigger, 0.0, 1.0))
+
+    def _update_base(self, frame: XRFrame) -> None:
+        cfg = self.config
+        if not cfg.use_mobile_base or self._stopped or self._returning:
+            self._base_vel = (0.0, 0.0, 0.0)
+            return
+        self._base_vel = thumbsticks_to_base_vel(
+            frame.right.thumbstick if frame.right is not None else None,
+            frame.left.thumbstick if frame.left is not None else None,
+            deadzone=cfg.thumbstick_deadzone,
+            max_linear=cfg.base_max_linear,
+            max_angular=cfg.base_max_angular,
+        )
+
+    def _log_status(self, frame: XRFrame) -> None:
+        """Periodic one-line status: what is tracked, what is clutched, why the torso holds."""
+        period = self.config.status_log_period_s
+        if period <= 0.0:
+            return
+        now = time.monotonic()
+        if now - self._last_status_log < period:
+            return
+        self._last_status_log = now
+
+        def ctrl(c: ControllerState | None) -> str:
+            if c is None:
+                return "-"
+            return (
+                f"sq={c.squeeze:.2f} tr={c.trigger:.2f} "
+                f"stick=({c.thumbstick[0]:+.2f},{c.thumbstick[1]:+.2f}) "
+                f"A={int(c.primary)} B={int(c.secondary)}"
+            )
+
+        def eng(side: str) -> str:
+            c = self._clutch.get(side)
+            if c is None:
+                return "n/a"
+            return self._abs_state[side].upper() if c.engaged else self._abs_state[side]
+
+        def hint(side: str) -> str:
+            h = self._hints.get(side)
+            if not self._posture:
+                return ""
+            return f" hint{side[0].upper()}=" + ("-" if h is None else str(np.rad2deg(h).round(0).astype(int).tolist()))
+
+        body = "-"
+        if frame.body is not None:
+            body = f"valid {int(frame.body.valid.sum())}/24"
+        elif self.config.torso_source == "body":
+            body = "none"
+        vx, vy, wz = self._base_vel
+        logger.info(
+            "xr status | right: %s [%s] | left: %s [%s] | head: %s | body: %s | torso: %s | "
+            "base=(%.2f,%.2f,%.2f)%s%s%s",
+            ctrl(frame.right),
+            eng("right"),
+            ctrl(frame.left),
+            eng("left"),
+            "ok" if frame.head is not None else "-",
+            body,
+            self._torso_hold_reason if self._clutch.get("torso") is not None else "disabled",
+            vx,
+            vy,
+            wz,
+            hint("right"),
+            hint("left"),
+            (" | STOPPED" if self._stopped else "")
+            + (f" | wear={self.config.wear_mode}" if self.config.wear_mode != "head" else "")
+            + (f" | {self._viz.status()}" if self._viz is not None else ""),
+        )
+
+    def _build_action(self) -> dict[str, Any]:
+        cfg = self.config
+        action: dict[str, Any] = {}
+        motion = self._return_motion
+        if motion is not None and motion.reset_emitted and not motion.finished:
+            # One-shot request; not an action feature, so never recorded.
+            action[RESET_CMD_KEY] = float(motion.duration)
+        if cfg.use_torso:
+            action.update(se3_to_ee_action(self._torso_target, "torso_ee"))
+        if cfg.use_right_arm:
+            action.update(se3_to_ee_action(self._clutch["right"].last_commanded, "right_ee"))
+        if cfg.use_left_arm:
+            action.update(se3_to_ee_action(self._clutch["left"].last_commanded, "left_ee"))
+        if cfg.use_gripper:
+            if cfg.use_right_arm:
+                action[f"right_gripper_0{POS_SUFFIX}"] = self._gripper["right"]
+            if cfg.use_left_arm:
+                action[f"left_gripper_0{POS_SUFFIX}"] = self._gripper["left"]
+        if cfg.use_mobile_base:
+            vx, vy, wz = self._base_vel
+            action["x.vel"], action["y.vel"], action["theta.vel"] = vx, vy, wz
+        if cfg.use_head:
+            # Re-solve the held / tracked gaze for the torso orientation of this tick.
+            snap = self._last_snapshot
+            head_q = self._head.target_for(None if snap is None else snap.torso)
+            for i, n in enumerate(HEAD_NAMES):
+                action[f"{n}{POS_SUFFIX}"] = float(head_q[i]) if head_q is not None else 0.0
+        if cfg.arm_posture_hint:
+            for side, h in self._hints.items():
+                if side not in self._posture:
+                    continue
+                if h is None and cfg.record_posture_hint:
+                    # Recorded features must always be present. A neutral value
+                    # is the arm's measured posture (the solver holds what it
+                    # has) — never zeros, which would drag the arm to q = 0.
+                    snap = self._last_snapshot
+                    if snap is not None:
+                        h = (snap.right_q if side == "right" else snap.left_q)[:4]
+                if h is not None:
+                    for i in range(4):
+                        action[f"{side}_arm_{i}{NULL_SUFFIX}"] = float(h[i])
+        return action
+
+
+def _mask_grabbing_hands(frame: XRFrame, grabbing: dict[str, str | None]) -> XRFrame:
+    """Neutralise squeeze / trigger / thumbstick of hands that hold a camera panel."""
+    if not any(grabbing.values()):
+        return frame
+    from dataclasses import replace as _replace
+
+    def mask(c: ControllerState | None) -> ControllerState | None:
+        if c is None:
+            return None
+        return _replace(c, squeeze=0.0, trigger=c.trigger, thumbstick=np.zeros(2))
+
+    right = mask(frame.right) if grabbing.get("right") else frame.right
+    left = mask(frame.left) if grabbing.get("left") else frame.left
+    return XRFrame(right=right, left=left, head=frame.head, body=frame.body)
+
+
+class _ReturnMotion:
+    """State of a Right-A return-to-start (follower joint-space motion)."""
+
+    SETTLE_S = 2.0  # drift re-sync stays suppressed this long after arrival
+
+    def __init__(self, *, duration: float) -> None:
+        self.duration = duration      # minimum time of the follower's motion (reset.cmd value)
+        self.reset_emitted = False
+        self.finished = False
+        self.t_done: float | None = None
+
+    def settled(self) -> bool:
+        return self.finished and self.t_done is not None and (
+            time.monotonic() - self.t_done > self.SETTLE_S
+        )
+
+
+def _wrap_angle(a: float) -> float:
+    return float((a + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+def _pose_drift(
+    target_T: np.ndarray, measured_T: np.ndarray, pos_thr: float, rot_thr: float  # noqa: N803
+) -> bool:
+    """True when measured and target differ by more than the thresholds."""
+    dpos = float(np.linalg.norm(measured_T[:3, 3] - target_T[:3, 3]))
+    dR = Rotation.from_matrix(measured_T[:3, :3]) * Rotation.from_matrix(target_T[:3, :3]).inv()
+    return dpos > pos_thr or float(dR.magnitude()) > rot_thr
+
+
+# ---------------------------------------------------------------------------
+# Headset connection help
+# ---------------------------------------------------------------------------
+
+
+def _primary_ipv4() -> str | None:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return None
+
+
+def candidate_ipv4s() -> list[tuple[str, str]]:
+    """``[(interface, ipv4), ...]`` the headset might reach this host at."""
+    primary = _primary_ipv4()
+    found: list[tuple[str, str]] = []
+    try:
+        out = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, timeout=2.0
+        ).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            iface, ip = parts[1], parts[3].split("/")[0]
+            if iface.startswith(_SKIP_IFACE_PREFIXES) or ip.startswith(("127.", "169.254.")):
+                continue
+            found.append((iface, ip))
+    except Exception:
+        pass
+    if not found and primary:
+        found.append(("default", primary))
+    found.sort(key=lambda t: t[1] != primary)
+    return found
+
+
+def print_xr_connect_help() -> None:
+    ips = candidate_ipv4s()
+    lines = [
+        "=" * 76,
+        "Connect your XR headset to this host over NVIDIA CloudXR:",
+        f"  1. In the headset browser, open:  {CLOUDXR_WEB_CLIENT_URL}",
+        "  2. Enter this host's IP address:",
+    ]
+    if ips:
+        lines += [f"        {ip:<15}  ({iface})" for iface, ip in ips]
+        if len(ips) > 1:
+            lines.append("     (use the address on the same network as your headset)")
+    else:
+        lines.append("        <could not determine — check `hostname -I` / `ip addr`>")
+    lines += [
+        f"  3. Accept the self-signed cert at https://<that-ip>:{CLOUDXR_WSS_PORT}/ , then Connect.",
+        "=" * 76,
+    ]
+    print("\n".join(lines), flush=True)
+
+
+# Backward-compatible alias (pre-rename).
+Rby1XRTeleop = Rby1XR

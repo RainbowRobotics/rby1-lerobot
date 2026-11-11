@@ -25,11 +25,18 @@ TORSO_NAMES: list[str] = [f"torso_{i}" for i in range(TORSO_DOF)]
 RIGHT_ARM_NAMES: list[str] = [f"right_arm_{i}" for i in range(ARM_DOF)]
 LEFT_ARM_NAMES: list[str] = [f"left_arm_{i}" for i in range(ARM_DOF)]
 GRIPPER_NAMES: list[str] = ["right_gripper_0", "left_gripper_0"]
+HEAD_NAMES: list[str] = ["head_0", "head_1"]  # pan (yaw), tilt (pitch)
 
 # LeRobot key convention: joint / gripper positions carry a ".pos" suffix,
 # matching `lerobot_robot_rby1.constants.POS_SUFFIX`. lerobot-rollout filters
 # the robot features by this suffix, so bare names would be dropped.
 POS_SUFFIX = ".pos"
+# Nullspace-hint keys emitted by the Isaac teleop device (`<joint>.null`, rad);
+# consumed by the follower's Cartesian solver, recorded only on request.
+NULL_SUFFIX = ".null"
+# One-shot joint-space "return to the ready pose" request to the follower
+# (value = minimum motion time, s); matches lerobot_robot_rby1.constants.
+RESET_CMD_KEY = "reset.cmd"
 
 # Mobile-base velocity action keys (body frame), matching the follower robot
 # and the LeRobot LeKiwi convention: linear x / y (m/s) and yaw rate (rad/s).

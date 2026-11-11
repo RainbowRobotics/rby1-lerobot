@@ -15,7 +15,7 @@ from lerobot.teleoperators.config import TeleoperatorConfig
 
 def test_plugins_are_registered() -> None:
     assert "rby1" in RobotConfig.get_known_choices()
-    assert {"rby1_leader_arm", "rby1_vr"} <= set(TeleoperatorConfig.get_known_choices())
+    assert {"rby1_leader_arm", "rby1_vr", "rby1_isaac"} <= set(TeleoperatorConfig.get_known_choices())
 
 
 @dataclass
