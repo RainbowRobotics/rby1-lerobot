@@ -14,7 +14,7 @@ def _joint_body(cfg: Rby1Config):
     action = {f"{n}{POS_SUFFIX}": 0.0 for n in RIGHT_ARM_NAMES + LEFT_ARM_NAMES}
     model = rby.Model_A()
     limits = np.ones(model.robot_dof)
-    body, _ = cb.build_body_command(rby, cfg, action, model, limits, limits, 1.0)
+    body, _, _ = cb.build_body_command(rby, cfg, action, model, -limits, limits, limits, limits, 1.0)
     return body
 
 

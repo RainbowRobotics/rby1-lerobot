@@ -3,15 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List
 
-import numpy as np
 from lerobot.teleoperators.config import TeleoperatorConfig
 
 from .constants import (
     ARM_DOF,
     SUPPORTED_LEADER_VERSIONS,
     TORSO_DOF,
-    TORSO_Q_MAX,
-    TORSO_Q_MIN,
     leader_init_pose_for_version,
     leader_torso_target_for_version,
 )
@@ -49,8 +46,21 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # Rby1.connect()'s power_on(".*") has not run yet. Power the 12V rail
     # here so the Dynamixel bus answers initialize().
     auto_power_on_12v: bool = True
+    # Address of the follower robot. Used for the 12V rail above and to read
+    # the robot's joint limits (below); the connections are closed again
+    # before connect() returns.
     robot_address: str = "192.168.30.1:50051"
     connect_timeout_sec: float = 3.0
+
+    # ── Robot joint limits ────────────────────────────────────────────
+    # connect() reads the joint position limits from the robot at
+    # `robot_address` (its URDF, so they match the model and version) and
+    # get_action() clips the arm targets to them. The recorded action is the
+    # teleoperator's output, so it must not exceed what the robot accepts.
+    # True: connect() fails when the limits cannot be read.
+    # False: a warning only, and the arm targets are output unclipped -- for
+    # using the leader arm without a robot.
+    require_robot_joint_limits: bool = True
 
     # ── Joint group selection ─────────────────────────────────────────
     # Must match the corresponding flags in Rby1Config so that
@@ -64,7 +74,8 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # holds the torso there and the dataset records it. None -> the torso of
     # the robot's ready pose for `version`. If the robot's torso is elsewhere
     # when teleoperation starts, it moves to this target during the robot's
-    # startup ramp (Rby1Config.joint_startup_min_time).
+    # startup ramp (Rby1Config.joint_startup_min_time). connect() rejects a
+    # target outside the robot's torso joint limits.
     torso_target_deg: List[float] | None = None
 
     # Enable gripper control via trigger buttons on the leader arm.
@@ -163,13 +174,6 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
         if self.torso_target_deg is None:
             self.torso_target_deg = leader_torso_target_for_version(version)
         self._check_len("torso_target_deg", self.torso_target_deg, TORSO_DOF)
-        lo, hi = np.rad2deg(TORSO_Q_MIN), np.rad2deg(TORSO_Q_MAX)
-        for i, value in enumerate(self.torso_target_deg):
-            if not lo[i] - 1e-6 <= value <= hi[i] + 1e-6:
-                raise ValueError(
-                    f"Rby1LeaderArmConfig.torso_target_deg[{i}] = {value} is outside the "
-                    f"torso joint limit [{lo[i]:.1f}, {hi[i]:.1f}] deg."
-                )
 
         self._check_len("right_init_q_deg", self.right_init_q_deg, ARM_DOF)
         self._check_len("left_init_q_deg", self.left_init_q_deg, ARM_DOF)

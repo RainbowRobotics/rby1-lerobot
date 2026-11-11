@@ -4,7 +4,7 @@ Implements the :class:`lerobot.robots.robot.Robot` abstract class so the RB-Y1
 can be used with the standard LeRobot tools (data collection, teleoperation,
 imitation-learning inference).
 
-Joint layout (Model M, 26-DOF)::
+Joint layout (Model A and Model M; Model M shown, 26-DOF)::
 
     wheel_fr/fl/rr/rl   mobility            (excluded from obs/action)
     torso_0 .. torso_5  torso, 6 DOF        (obs + action with use_torso)
@@ -76,7 +76,7 @@ _IDX_BASE, _IDX_TORSO_5, _IDX_RIGHT_ARM_6, _IDX_LEFT_ARM_6 = range(4)
 
 
 class Rby1(Robot):
-    """LeRobot Robot implementation for the Rainbow Robotics RB-Y1 (Model M).
+    """LeRobot Robot implementation for the Rainbow Robotics RB-Y1 (Model A and M).
 
     Observation features
     --------------------
@@ -127,6 +127,8 @@ class Rby1(Robot):
         self._model = None
         self._stream = None
         self._gripper: Rby1Gripper | None = None
+        self._q_lower: np.ndarray | None = None
+        self._q_upper: np.ndarray | None = None
         self._max_qdot: np.ndarray | None = None
         self._max_qddot: np.ndarray | None = None
         self._is_connected: bool = False
@@ -372,11 +374,13 @@ class Rby1(Robot):
                     f"(state={cm_state.state}); check the robot's fault log."
                 )
 
-            # 4. Cache the model (joint index arrays) and URDF velocity / acceleration
-            #    limits from the dynamics model.
+            # 4. Cache the model (joint index arrays) and the URDF position /
+            #    velocity / acceleration limits from the dynamics model.
             self._model = self._robot.model()
             dyn_model = self._robot.get_dynamics()
             dyn_state = dyn_model.make_state([], self._model.robot_joint_names)
+            self._q_lower = np.asarray(dyn_model.get_limit_q_lower(dyn_state), dtype=np.float64)
+            self._q_upper = np.asarray(dyn_model.get_limit_q_upper(dyn_state), dtype=np.float64)
             self._max_qdot = dyn_model.get_limit_qdot_upper(dyn_state)
             self._max_qddot = dyn_model.get_limit_qddot_upper(dyn_state)
             # The wrist (last arm joint) needs extra velocity headroom in impedance mode.
@@ -481,6 +485,8 @@ class Rby1(Robot):
 
         self._model = None
         self._stream = None
+        self._q_lower = None
+        self._q_upper = None
         self._max_qdot = None
         self._max_qddot = None
         self._is_connected = False
@@ -491,6 +497,75 @@ class Rby1(Robot):
         self._fk_state = None
         self._resolved_model = None
         self._resolved_version = None
+
+    def move_to_ready_pose(
+        self,
+        minimum_time: float = 5.0,
+        hold_time: float = 1.0,
+        body_position: np.ndarray | None = None,
+        head_position: np.ndarray | None = None,
+    ) -> None:
+        """Move the robot to a joint-position pose (the ready pose by default).
+
+        Called automatically at the end of :meth:`connect` when
+        ``config.move_to_ready_on_connect`` is True, so the robot is in a safe,
+        known configuration before inference begins.
+
+        Parameters
+        ----------
+        minimum_time : float
+            Minimum trajectory duration in seconds.
+        hold_time : float
+            Control hold time in seconds.
+        body_position, head_position : np.ndarray | None
+            Override targets; default to the constant ready pose / head pitch.
+        """
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        try:
+            import rby1_sdk as rby
+        except ImportError as e:
+            raise ImportError("rby1_sdk is required.") from e
+
+        logger.info("Moving to ready pose ...")
+        try:
+            ctrl_state = self._robot.get_control_manager_state().control_state
+            if ctrl_state != rby.ControlManagerState.ControlState.Idle:
+                self._robot.cancel_control()
+                time.sleep(1.0)
+
+            if not self._robot.wait_for_control_ready(1000):
+                raise RuntimeError("wait_for_control_ready timed out")
+
+            target_body = (
+                self._ready_body if body_position is None
+                else np.asarray(body_position, dtype=np.float64)
+            )
+            target_head = (
+                self._ready_head if head_position is None
+                else np.asarray(head_position, dtype=np.float64)
+            )
+
+            cbc = cb.build_ready_pose_command(
+                rby, target_body, target_head, minimum_time, hold_time
+            )
+            self._robot.send_command(rby.RobotCommandBuilder().set_command(cbc)).get()
+            logger.info("Ready pose reached.")
+
+            # Re-create the command stream so inference can start immediately.
+            # The next EE command must reset the impedance reference (the
+            # robot likely moved away from the previously commanded target).
+            self._stream = self._robot.create_command_stream(priority=1)
+            self._last_ee_targets = None
+            self._last_sent = None
+            # Re-arm the startup ramp: the next teleop/policy target can be far
+            # from the ready pose.
+            self._action_start_time = None
+        except Exception as exc:
+            # Callers (connect, scripts) must not carry on as if the robot were
+            # at the ready pose.
+            raise RuntimeError(f"RB-Y1 move_to_ready_pose failed: {exc}") from exc
 
     # ------------------------------------------------------------------ #
     #  Calibration / configuration                                         #
@@ -581,75 +656,6 @@ class Rby1(Robot):
         out = cfg.profile_out or rprofile.default_profile_path()
         written = rprofile.write_profile(out, current, force=cfg.profile_force)
         logger.info(f"RB-Y1 profile written to {written}.")
-
-    def move_to_ready_pose(
-        self,
-        minimum_time: float = 5.0,
-        hold_time: float = 1.0,
-        body_position: np.ndarray | None = None,
-        head_position: np.ndarray | None = None,
-    ) -> None:
-        """Move the robot to a joint-position pose (the ready pose by default).
-
-        Called automatically at the end of :meth:`connect` when
-        ``config.move_to_ready_on_connect`` is True, so the robot is in a safe,
-        known configuration before inference begins.
-
-        Parameters
-        ----------
-        minimum_time : float
-            Minimum trajectory duration in seconds.
-        hold_time : float
-            Control hold time in seconds.
-        body_position, head_position : np.ndarray | None
-            Override targets; default to the constant ready pose / head pitch.
-        """
-        if not self.is_connected:
-            raise DeviceNotConnectedError(f"{self} is not connected.")
-
-        try:
-            import rby1_sdk as rby
-        except ImportError as e:
-            raise ImportError("rby1_sdk is required.") from e
-
-        logger.info("Moving to ready pose ...")
-        try:
-            ctrl_state = self._robot.get_control_manager_state().control_state
-            if ctrl_state != rby.ControlManagerState.ControlState.Idle:
-                self._robot.cancel_control()
-                time.sleep(1.0)
-
-            if not self._robot.wait_for_control_ready(1000):
-                raise RuntimeError("wait_for_control_ready timed out")
-
-            target_body = (
-                self._ready_body if body_position is None
-                else np.asarray(body_position, dtype=np.float64)
-            )
-            target_head = (
-                self._ready_head if head_position is None
-                else np.asarray(head_position, dtype=np.float64)
-            )
-
-            cbc = cb.build_ready_pose_command(
-                rby, target_body, target_head, minimum_time, hold_time
-            )
-            self._robot.send_command(rby.RobotCommandBuilder().set_command(cbc)).get()
-            logger.info("Ready pose reached.")
-
-            # Re-create the command stream so inference can start immediately.
-            # The next EE command must reset the impedance reference (the
-            # robot likely moved away from the previously commanded target).
-            self._stream = self._robot.create_command_stream(priority=1)
-            self._last_ee_targets = None
-            self._last_sent = None
-            # Re-arm the startup ramp: the next teleop/policy target can be far
-            # from the ready pose.
-            self._action_start_time = None
-        except Exception as exc:
-            # Callers (connect, scripts) must not carry on as if the robot were
-            # at the ready pose.
-            raise RuntimeError(f"RB-Y1 move_to_ready_pose failed: {exc}") from exc
 
     # ------------------------------------------------------------------ #
     #  Observation                                                         #
@@ -802,7 +808,7 @@ class Rby1(Robot):
     def _send_joint_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
         """Execute a joint-position action (``action_mode="joint"``).
 
-        Returns the joint targets actually commanded (clipped to joint limits).
+        Returns the joint targets actually commanded (clipped to the robot's joint limits).
         """
         # Start the startup ramp on the first command (after connect() and the
         # ready-pose motion are complete).
@@ -829,11 +835,13 @@ class Rby1(Robot):
         # Compose the per-tick command: enabled groups (held limbs are omitted)
         # plus the optional mobile-base velocity. Both ride the same priority-1
         # stream so they are applied atomically.
-        body, has_body = cb.build_body_command(
+        body, has_body, sent = cb.build_body_command(
             rby,
             self._config,
             action,
             self._model,
+            self._q_lower,
+            self._q_upper,
             self._max_qdot,
             self._max_qddot,
             minimum_time,
@@ -848,7 +856,7 @@ class Rby1(Robot):
         self._stream.send_command(
             rby.RobotCommandBuilder().set_command(cbc)
         )
-        return cb.clipped_joint_action(self._config, action)
+        return sent
 
     def _send_ee_action(self, rby: Any, action: dict[str, Any]) -> None:
         """Execute an end-effector pose action (``action_mode="ee"``).

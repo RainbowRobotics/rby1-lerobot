@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 import pytest
-from lerobot_robot_rby1.constants import RIGHT_ARM_Q_MAX, TORSO_Q_MAX
+import rby1_sdk as rby
 
 
 def _current_action(robot) -> dict[str, float]:
@@ -23,7 +23,30 @@ def test_returns_clipped_arm_targets(connected_robot) -> None:
     action = _current_action(connected_robot)
     action["right_arm_0.pos"] = 99.0
     sent = connected_robot.send_action(action)
-    assert sent["right_arm_0.pos"] == float(RIGHT_ARM_Q_MAX[0])
+    assert sent["right_arm_0.pos"] == rby.JOINT_Q_LIMITS["right_arm_0"][1]
+
+
+def test_clips_to_the_limits_the_robot_reports(monkeypatch) -> None:
+    """The limits are read at connect, so another robot's (M v1.3 wrist) are followed."""
+    from lerobot_robot_rby1 import Rby1, Rby1Config
+
+    wrist = {"right_arm_5": (-0.872664626, 0.872664626), "right_arm_6": (-1.5707963268, 1.5707963268)}
+    for name, limits in wrist.items():
+        monkeypatch.setitem(rby.JOINT_Q_LIMITS, name, limits)
+    robot = Rby1(Rby1Config(address="stub.invalid:1", model="m", version="1.3", use_gripper=False,
+                            move_to_ready_on_connect=False))
+    robot.connect()
+    try:
+        action = _current_action(robot)
+        action["right_arm_5.pos"] = 1.5  # inside the v1.2 limit (110 deg), outside v1.3 (50 deg)
+        action["right_arm_6.pos"] = -2.0
+        sent = robot.send_action(action)
+        assert sent["right_arm_5.pos"] == wrist["right_arm_5"][1]
+        assert sent["right_arm_6.pos"] == wrist["right_arm_6"][0]
+        arm = _body(robot).get("set_right_arm_command")[0]
+        assert list(arm.get("set_position")[0])[5:] == [wrist["right_arm_5"][1], wrist["right_arm_6"][0]]
+    finally:
+        robot.disconnect()
 
 
 def test_missing_gripper_key_holds_position(connected_robot) -> None:
@@ -60,11 +83,13 @@ def test_joint_mode_commands_the_torso(torso_robot) -> None:
     assert list(torso_robot.action_features)[:6] == [f"torso_{i}.pos" for i in range(6)]
     action = _current_action(torso_robot)
     action["torso_3.pos"] = 0.3
-    action["torso_1.pos"] = 99.0  # clipped to the URDF limit
+    action["torso_1.pos"] = 99.0  # clipped to the robot's limit
+    action["torso_2.pos"] = math.radians(85.0)  # the URDF limit is 80 deg
     sent = torso_robot.send_action(action)
     assert set(sent) == set(torso_robot.action_features)
     assert sent["torso_3.pos"] == pytest.approx(0.3)
-    assert sent["torso_1.pos"] == float(TORSO_Q_MAX[1])
+    assert sent["torso_1.pos"] == rby.JOINT_Q_LIMITS["torso_1"][1]
+    assert sent["torso_2.pos"] == pytest.approx(math.radians(80.0))
 
     torso = _body(torso_robot).get("set_torso_command")[0]
     assert type(torso).__name__ == "JointPositionCommandBuilder"
@@ -87,7 +112,6 @@ def test_hold_resends_the_torso_target(torso_robot) -> None:
 
 def test_joint_impedance_uses_the_torso_gains() -> None:
     import numpy as np
-    import rby1_sdk as rby
     from lerobot_robot_rby1 import Rby1Config
     from lerobot_robot_rby1 import command_builders as cb
 
@@ -96,10 +120,11 @@ def test_joint_impedance_uses_the_torso_gains() -> None:
         joint_impedance_torso_stiffness=[300.0] * 6, joint_impedance_torso_torque_limit=[200.0] * 6,
     )
     model = rby.FakeRobot("stub.invalid:1", "a").model()
-    action = {key: 0.0 for key in cb.clipped_joint_action(cfg, _zeros(cfg))}
+    action = {key: 0.0 for key in _zeros(cfg) if "gripper" not in key}
     limits = np.ones(len(model.robot_joint_names))
-    body, has_command = cb.build_body_command(rby, cfg, action, model, limits, limits, 0.07)
+    body, has_command, sent = cb.build_body_command(rby, cfg, action, model, -limits, limits, limits, limits, 0.07)
     assert has_command
+    assert sent == action
     torso = body.get("set_torso_command")[0]
     assert type(torso).__name__ == "JointImpedanceControlCommandBuilder"
     assert torso.get("set_stiffness") == ([300.0] * 6,)
