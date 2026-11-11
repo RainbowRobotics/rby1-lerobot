@@ -2,7 +2,12 @@
 
 Encapsulates the cosine-interpolated init trajectory, gravity compensation,
 joint-limit barriers, viscous friction compensation, and button-driven free/hold mode
-switching that runs inside the rby1_sdk control callback.  State that used
+switching that runs inside the rby1_sdk control callback.  The joint target
+handed to the teleoperator is rate-limited after a button press, so it has
+no step when the arm is not where its hold target was.  On request
+(:meth:`LeaderArmControlLoop.request_return`, used at disconnect) the arm
+moves to its zero position (all joints 0, the arms hanging down).  State
+that used
 to be carried via one-element-list closures in ``rby1_leader_arm.connect()``
 is now plain instance attributes on this class.
 
@@ -20,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
+import threading
 import time
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -33,6 +39,9 @@ class _ArmTrajState:
     init_start_q: np.ndarray | None = None     # Initial joint state at t=0
     init_target_q: np.ndarray | None = None    # Target joint state at t=duration
     hold_q: np.ndarray | None = None           # Latest "hold" command
+    out_q: np.ndarray | None = None            # Target handed to the teleoperator
+    button: int = 0                            # Button value of the last tick
+    resync: bool = False                       # out_q is catching up with hold_q
 
 
 @dataclass
@@ -52,18 +61,33 @@ class LeaderArmControlLoop:
     barrier: float
     gravity_scale: float
     init_duration: float
+    resync_speed: float  # rad/s
+    return_speed: float = np.deg2rad(30.0)  # rad/s, peak joint speed of the return
 
     # Mutable runtime state
     init_t0: float | None = None
     right_state: _ArmTrajState = field(default_factory=_ArmTrajState)
     left_state: _ArmTrajState = field(default_factory=_ArmTrajState)
     init_done: bool = False
+    last_tick: float | None = None
+
+    # Move to the zero position (see request_return).
+    return_requested: threading.Event = field(default_factory=threading.Event)
+    return_started: threading.Event = field(default_factory=threading.Event)
+    return_done: threading.Event = field(default_factory=threading.Event)
+    return_t0: float | None = None
+    return_duration: float = 0.0
+    return_start_q: np.ndarray | None = None
 
     # ------------------------------------------------------------------ #
 
     def __call__(self, state: Any) -> Any:
         """Single tick of the leader-arm control loop."""
         ma_input = self.rby.upc.MasterArm.ControlInput()
+
+        if self.return_requested.is_set():
+            self._fill_return_command(ma_input, state)
+            return ma_input
 
         # 1. Lazily latch the init-trajectory starting point.
         if self.init_t0 is None:
@@ -110,6 +134,48 @@ class LeaderArmControlLoop:
             self.teleop._left_trigger = float(state.button_left.trigger)
 
     # ------------------------------------------------------------------ #
+    # Move to the zero position
+    # ------------------------------------------------------------------ #
+
+    def request_return(self) -> None:
+        """Move both arms from where they are to the zero position.
+
+        All joints go to 0, where the arms hang down, so they do not drop
+        when the control loop stops afterwards.  The joint-limit barriers
+        (``min_q`` / ``max_q``) only shape the free mode and do not apply.
+
+        From the next tick on the buttons are ignored and the target handed
+        to the teleoperator stays at its last value.  ``return_started`` is
+        set on that tick (``return_duration`` is known then) and
+        ``return_done`` when the zero position is the commanded target.
+        """
+        self.return_requested.set()
+
+    def _fill_return_command(self, ma_input: Any, state: Any) -> None:
+        target = np.zeros(14)
+        if self.return_t0 is None:
+            self.return_t0 = time.time()
+            self.return_start_q = np.array(state.q_joint[0:14], copy=True)
+            # The cosine profile peaks at pi/2 times its mean speed.
+            distance = float(np.max(np.abs(target - self.return_start_q)))
+            self.return_duration = 0.5 * np.pi * distance / self.return_speed
+            self.return_started.set()
+
+        elapsed = time.time() - self.return_t0
+        if elapsed < self.return_duration:
+            s = 0.5 * (1.0 - np.cos(np.pi * elapsed / self.return_duration))
+            q_cmd = self.return_start_q + s * (target - self.return_start_q)
+        else:
+            q_cmd = target
+            self.return_done.set()
+
+        ma_input.target_operating_mode.fill(
+            self.rby.DynamixelBus.CurrentBasedPositionControlMode
+        )
+        ma_input.target_position[0:14] = q_cmd
+        ma_input.target_torque[:] = self.torque_limit
+
+    # ------------------------------------------------------------------ #
     # Steady-state controller (after init)
     # ------------------------------------------------------------------ #
 
@@ -140,9 +206,34 @@ class LeaderArmControlLoop:
         self._fill_arm_command(ma_input, state, torque, side="right", slice_=slice(0, 7))
         self._fill_arm_command(ma_input, state, torque, side="left", slice_=slice(7, 14))
 
+        now = time.time()
+        dt = 0.0 if self.last_tick is None else now - self.last_tick
+        self.last_tick = now
+        self._update_output(self.right_state, dt)
+        self._update_output(self.left_state, dt)
+
         with self.teleop._lock:
-            self.teleop._right_q = self.right_state.hold_q.copy()
-            self.teleop._left_q = self.left_state.hold_q.copy()
+            self.teleop._right_q = self.right_state.out_q.copy()
+            self.teleop._left_q = self.left_state.out_q.copy()
+
+    def _update_output(self, arm_state: _ArmTrajState, dt: float) -> None:
+        """Move the teleoperator target ``out_q`` to the hold command.
+
+        Normally they are equal.  A button press can move ``hold_q`` far in
+        one tick: in hold mode the arm is only held with a limited torque, so
+        it may have been pushed away from the hold command.  From the press
+        on ``out_q`` approaches at ``resync_speed`` until it has caught up.
+        """
+        if arm_state.out_q is None or not arm_state.resync:
+            arm_state.out_q = arm_state.hold_q.copy()
+            return
+        delta = arm_state.hold_q - arm_state.out_q
+        step = self.resync_speed * dt
+        if np.max(np.abs(delta)) <= step:
+            arm_state.out_q = arm_state.hold_q.copy()
+            arm_state.resync = False
+        else:
+            arm_state.out_q = arm_state.out_q + np.clip(delta, -step, step)
 
     def _fill_arm_command(
         self,
@@ -154,6 +245,10 @@ class LeaderArmControlLoop:
     ) -> None:
         button = state.button_right.button if side == "right" else state.button_left.button
         arm_state = self.right_state if side == "right" else self.left_state
+
+        if button == 1 and arm_state.button != 1:
+            arm_state.resync = True
+        arm_state.button = button
 
         if button == 1:
             # Free mode: gravity compensation only.

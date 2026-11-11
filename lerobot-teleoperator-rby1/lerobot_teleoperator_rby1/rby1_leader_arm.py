@@ -18,6 +18,8 @@ the follower's :meth:`send_action`'s job, per LeRobot convention.
 
 Action keys
 -----------
+    torso_0.pos … torso_5.pos           (rad; only with use_torso, a fixed
+                                         target: the leader arm has no torso)
     right_arm_0.pos … right_arm_6.pos   (rad)
     left_arm_0.pos  … left_arm_6.pos    (rad)
     right_gripper_0.pos                 (1.0 = open, 0.0 = closed)
@@ -41,17 +43,16 @@ import numpy as np
 
 from lerobot.teleoperators.teleoperator import Teleoperator
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+from lerobot_robot_rby1.joint_limits import RobotJointLimits, read_joint_limits
+from lerobot_robot_rby1.model_probe import resolve_model_version
 
 from .config_rby1_leader_arm import Rby1LeaderArmConfig
 from .constants import (
     ARM_DOF,
     LEFT_ARM_NAMES,
-    LEFT_ARM_Q_MAX,
-    LEFT_ARM_Q_MIN,
     POS_SUFFIX,
     RIGHT_ARM_NAMES,
-    RIGHT_ARM_Q_MAX,
-    RIGHT_ARM_Q_MIN,
+    TORSO_NAMES,
 )
 from .leader_arm_controller import LeaderArmControlLoop
 
@@ -64,6 +65,10 @@ _HOME_SDK_URDF_PATH = "~/rby1-sdk/models/leader_arm/model.urdf"
 # Settle time after switching the 12V rail on, before the Dynamixel bus is
 # probed. Mirrors the capacitor-stabilisation sleep in Rby1.connect().
 _POWER_SETTLE_TIME = 0.1
+# Return to the zero position at disconnect: how long to wait for the control
+# loop to start the motion, and extra time on top of its planned duration.
+_RETURN_START_TIMEOUT = 1.0
+_RETURN_MARGIN = 2.0
 
 
 class Rby1LeaderArm(Teleoperator):
@@ -80,6 +85,9 @@ class Rby1LeaderArm(Teleoperator):
         # rby1_sdk objects (set during connect).
         self._leader_arm = None
         self._control_loop: LeaderArmControlLoop | None = None
+        # Joint limits read from the robot in connect(); None when they could
+        # not be read and require_robot_joint_limits is False.
+        self._limits: RobotJointLimits | None = None
 
         # Thread-safe shared state — written by the 100 Hz control loop,
         # read by get_action() on the main thread.
@@ -106,6 +114,8 @@ class Rby1LeaderArm(Teleoperator):
     def action_features(self) -> dict[str, type]:
         cfg = self._config
         names: list[str] = []
+        if cfg.use_torso:
+            names += TORSO_NAMES
         if cfg.use_right_arm:
             names += RIGHT_ARM_NAMES
         if cfg.use_left_arm:
@@ -137,6 +147,9 @@ class Rby1LeaderArm(Teleoperator):
         #    happen before the Dynamixel bus is opened below.
         if cfg.auto_power_on_12v:
             self._power_on_12v(rby, cfg)
+
+        # 0b. Joint limits of the robot the actions are meant for.
+        self._limits = self._read_robot_limits(cfg)
 
         model_path = self._resolve_urdf_path(cfg)
 
@@ -174,6 +187,8 @@ class Rby1LeaderArm(Teleoperator):
             barrier=cfg.joint_limit_barrier,
             gravity_scale=cfg.gravity_comp_scale,
             init_duration=cfg.init_duration,
+            resync_speed=np.deg2rad(cfg.resync_speed_deg_s),
+            return_speed=np.deg2rad(cfg.return_speed_deg_s),
         )
         self._leader_arm.start_control(self._control_loop)
 
@@ -199,14 +214,43 @@ class Rby1LeaderArm(Teleoperator):
         if not self._is_connected:
             return
         if self._leader_arm is not None:
+            if self._config.return_to_zero_on_disconnect and self._control_loop is not None:
+                self._return_to_zero(self._control_loop)
             try:
                 self._leader_arm.stop_control()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"Error stopping leader arm control: {exc}")
             self._leader_arm = None
         self._control_loop = None
+        self._limits = None
         self._is_connected = False
         logger.info(f"{self} disconnected.")
+
+    @staticmethod
+    def _return_to_zero(loop: LeaderArmControlLoop) -> None:
+        """Bring the leader arm to its init pose and wait until it is there.
+
+        Never raises: the caller stops the control loop afterwards in any
+        case. Ctrl+C during the motion skips the rest of it.
+        """
+        try:
+            loop.request_return()
+            if not loop.return_started.wait(timeout=_RETURN_START_TIMEOUT):
+                logger.warning(
+                    "The leader-arm control loop is not running; the arm does not "
+                    "return to its zero position."
+                )
+                return
+            logger.info(
+                f"Leader arm returning to its zero position ({loop.return_duration:.1f} s; "
+                "Ctrl+C stops it where it is) ..."
+            )
+            if not loop.return_done.wait(timeout=loop.return_duration + _RETURN_MARGIN):
+                logger.warning("The leader arm did not reach its init pose in time.")
+        except KeyboardInterrupt:
+            logger.warning("Leader-arm return to the zero position interrupted.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Leader-arm return to the zero position failed: {exc}")
 
     # ------------------------------------------------------------------ #
     # Calibration / Configuration
@@ -235,17 +279,24 @@ class Rby1LeaderArm(Teleoperator):
 
         action: dict[str, Any] = {}
 
+        if cfg.use_torso:
+            # No torso on the leader arm: a fixed target (see torso_target_deg).
+            for name, deg in zip(TORSO_NAMES, cfg.torso_target_deg):
+                action[f"{name}{POS_SUFFIX}"] = float(np.deg2rad(deg))
+
         if cfg.use_right_arm:
             right_q_out = right_q.copy()
             right_q_out[6] += np.deg2rad(cfg.right_wrist_offset_deg)
-            right_q_out = np.clip(right_q_out, RIGHT_ARM_Q_MIN, RIGHT_ARM_Q_MAX)
+            if self._limits is not None:
+                right_q_out = np.clip(right_q_out, *self._limits.right_arm)
             for i, name in enumerate(RIGHT_ARM_NAMES):
                 action[f"{name}{POS_SUFFIX}"] = float(right_q_out[i])
 
         if cfg.use_left_arm:
             left_q_out = left_q.copy()
             left_q_out[6] += np.deg2rad(cfg.left_wrist_offset_deg)
-            left_q_out = np.clip(left_q_out, LEFT_ARM_Q_MIN, LEFT_ARM_Q_MAX)
+            if self._limits is not None:
+                left_q_out = np.clip(left_q_out, *self._limits.left_arm)
             for i, name in enumerate(LEFT_ARM_NAMES):
                 action[f"{name}{POS_SUFFIX}"] = float(left_q_out[i])
 
@@ -285,6 +336,49 @@ class Rby1LeaderArm(Teleoperator):
         return rby
 
     @staticmethod
+    def _read_robot_limits(cfg: Rby1LeaderArmConfig) -> RobotJointLimits | None:
+        """Read the joint position limits from the robot at ``cfg.robot_address``.
+
+        The arm targets are clipped to them in :meth:`get_action`, and the
+        fixed torso target is checked against them here. Returns ``None``
+        (after a warning) when the robot cannot be read and
+        ``require_robot_joint_limits`` is False.
+        """
+        try:
+            limits = read_joint_limits(cfg.robot_address, cfg.connect_timeout_sec)
+        except Exception as exc:
+            if cfg.require_robot_joint_limits:
+                raise RuntimeError(
+                    f"Could not read the joint limits from the RB-Y1 at '{cfg.robot_address}': {exc} "
+                    "The leader arm clips its output to the robot's joint limits. Check "
+                    "--teleop.robot_address and that the robot is on, or pass "
+                    "--teleop.require_robot_joint_limits=false to use the leader arm without "
+                    "a robot (its output is then not clipped)."
+                ) from exc
+            logger.warning(
+                f"Could not read the joint limits from the RB-Y1 at '{cfg.robot_address}' ({exc}); "
+                "the leader-arm output is NOT clipped to the robot's joint limits."
+            )
+            return None
+
+        logger.info(f"Joint limits read from RB-Y1 model='{limits.model}' version='{limits.version}'.")
+        if limits.version and limits.version != cfg.version:
+            logger.warning(
+                f"The robot reports version '{limits.version}' but teleop.version is '{cfg.version}': "
+                "the leader-arm init pose is chosen by teleop.version and may not match the "
+                "robot's ready pose."
+            )
+        if cfg.use_torso:
+            lo, hi = (np.rad2deg(q) for q in limits.torso)
+            for i, value in enumerate(cfg.torso_target_deg):
+                if not lo[i] - 1e-6 <= value <= hi[i] + 1e-6:
+                    raise ValueError(
+                        f"Rby1LeaderArmConfig.torso_target_deg[{i}] = {value} is outside the robot's "
+                        f"torso_{i} joint limit [{lo[i]:.1f}, {hi[i]:.1f}] deg."
+                    )
+        return limits
+
+    @staticmethod
     def _power_on_12v(rby: Any, cfg: Rby1LeaderArmConfig) -> None:
         """Power the 12V rail that supplies the leader-arm Dynamixel servos.
 
@@ -296,8 +390,8 @@ class Rby1LeaderArm(Teleoperator):
         Uses a short-lived A-template handle — the gRPC backend is the same for
         every model (see ``lerobot_robot_rby1.model_probe``), and the follower
         robot keeps ownership of servos, control manager and command streams.
-        A connection failure is only a warning: when 12V is already on the
-        teleoperator works without ever reaching the robot.
+        A connection failure is only a warning here: 12V may already be on.
+        Reading the joint limits afterwards reports an unreachable robot.
         """
         timeout_ms = max(1, int(round(cfg.connect_timeout_sec * 1000.0)))
         unreachable = (
@@ -306,8 +400,11 @@ class Rby1LeaderArm(Teleoperator):
             "lives elsewhere."
         )
 
+        # The handle must be of the robot's own model: a Model A handle on a
+        # Model M robot fails in is_power_on() (joint state size mismatch).
         try:
-            robot = rby.create_robot_a(cfg.robot_address)
+            model, _ = resolve_model_version("auto", "auto", cfg.robot_address, cfg.connect_timeout_sec)
+            robot = rby.create_robot(cfg.robot_address, model)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"{unreachable} ({exc})")
             return

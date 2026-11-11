@@ -1,7 +1,7 @@
 name: Release
 
 # Push a vX.Y.Z tag on main to publish a GitHub Release. The tag must match the
-# version in all three pyproject.toml files; the release notes name the
+# version in both pyproject.toml files; the release notes name the
 # LeRobot release the plugins were tested against.
 
 on:
