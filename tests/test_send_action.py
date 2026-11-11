@@ -130,7 +130,7 @@ def test_joint_impedance_uses_the_torso_gains() -> None:
     assert torso.get("set_stiffness") == ([300.0] * 6,)
     assert torso.get("set_torque_limit") == ([200.0] * 6,)
     arm = body.get("set_left_arm_command")[0]
-    assert arm.get("set_stiffness") == ([150.0] * 7,)
+    assert arm.get("set_stiffness") == ([1075.0, 990.0, 580.0, 265.0, 190.0, 205.0, 300.0],)
 
 
 def _zeros(cfg) -> dict[str, float]:

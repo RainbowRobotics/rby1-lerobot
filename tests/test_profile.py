@@ -39,7 +39,7 @@ def test_profile_contents(recorded) -> None:
     assert len(data["core_parameters"]) == len(rby.CORE_PARAMETERS)
     # Recorded after configure(): the plugin's cutoff, not the robot's stored 15 Hz.
     assert data["core_parameters"]["joint_position_command.cutoff_frequency"]["value"] == 5.0
-    assert data["robot_config"]["ee_arm_stiffness"][0] == 80.0
+    assert data["robot_config"]["ee_arm_stiffness"][0] == 1075.0
 
 
 def test_cutoff_is_session_only_and_restored() -> None:
@@ -178,11 +178,15 @@ def test_v1_profile_compares_and_applies(tmp_path, caplog) -> None:
         robot={"model": "a", "version": "1.2"}, version="1.2",
     )
     diffs = [d for d in rprofile.diff_profiles(ref, cur) if d.severity != rprofile.INFO]
-    # Same settings: only the left-arm values that no longer exist and the
-    # fixed EE period of 0.3.0 are reported.
+    # Same settings: only the left-arm values that no longer exist, the fixed
+    # EE period of 0.3.0 and the impedance defaults changed in 0.3.1
+    # are reported.
     assert sorted(d.key for d in diffs) == [
-        "robot_config.ee_arm_damping_ratio", "robot_config.ee_auto_action_period",
+        "robot_config.ee_arm_damping_ratio", "robot_config.ee_arm_stiffness",
+        "robot_config.ee_arm_torque_limit", "robot_config.ee_auto_action_period",
         "robot_config.joint_impedance_arm_stiffness",
+        "robot_config.joint_impedance_arm_torque_limit",
+        "robot_config.joint_impedance_torso_torque_limit",
     ]
     assert all(d.severity == rprofile.WARN for d in diffs)
     # The old profile recorded hard-coded arm limits; the limits now come from

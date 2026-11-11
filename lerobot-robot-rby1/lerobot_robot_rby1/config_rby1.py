@@ -146,10 +146,25 @@ class Rby1Config(RobotConfig):
     # Joint stiffness (Nm/rad) and torque limit (Nm). The arm values apply to
     # both arms; the torso values are used when use_torso=True.
     # Higher stiffness -> stiffer, lower -> more compliant.
+    # The arm stiffness follows the inertia each joint moves, so it is larger
+    # towards the base: arm_0..3 give a natural frequency of about 3.5 Hz,
+    # arm_4..5 about 6 Hz and arm_6 about 5 Hz in the ready pose.
+    # The arm is stiff and its compliance comes from the torque limit: the
+    # limit bounds the impedance torque only (gravity compensation is added
+    # on top), so it is the most a joint pushes back when it is held away
+    # from its target. arm_4..6 need 8 Nm to follow the target at all (the
+    # wrist roll does not move with 4 Nm). The torso torque limits are the
+    # joint effort limits of the robot's URDF.
     joint_impedance_torso_stiffness: List[float] = field(default_factory=lambda: [400.0] * 6)
-    joint_impedance_torso_torque_limit: List[float] = field(default_factory=lambda: [500.0] * 6)
-    joint_impedance_arm_stiffness: List[float] = field(default_factory=lambda: [150.0] * 7)
-    joint_impedance_arm_torque_limit: List[float] = field(default_factory=lambda: [40.0] * 7)
+    joint_impedance_torso_torque_limit: List[float] = field(
+        default_factory=lambda: [270.0, 270.0, 270.0, 120.0, 120.0, 120.0]
+    )
+    joint_impedance_arm_stiffness: List[float] = field(
+        default_factory=lambda: [1075.0, 990.0, 580.0, 265.0, 190.0, 205.0, 300.0]
+    )
+    joint_impedance_arm_torque_limit: List[float] = field(
+        default_factory=lambda: [30.0, 30.0, 25.0, 18.0, 8.0, 8.0, 8.0]
+    )
 
     # Damping ratio zeta (> 0) applied to all joints. The RB-Y1 controller
     # computes D = zeta * (sqrt(M) sqrt(K) + sqrt(K) sqrt(M)) from the mass
@@ -204,11 +219,13 @@ class Rby1Config(RobotConfig):
     ee_torso_target_gains: Tuple[float, float, float, float] = TORSO_TARGET_GAINS
 
     # ── Arm solvers (the same gains drive both arms) ───────────────────
+    # Joint stiffness and torque limit: the same values as joint impedance
+    # (joint_impedance_arm_stiffness / _torque_limit above).
     ee_arm_stiffness: List[float] = field(
-        default_factory=lambda: [80.0, 80.0, 80.0, 60.0, 60.0, 60.0, 60.0]
+        default_factory=lambda: [1075.0, 990.0, 580.0, 265.0, 190.0, 205.0, 300.0]
     )
     ee_arm_torque_limit: List[float] = field(
-        default_factory=lambda: [40.0, 40.0, 40.0, 30.0, 30.0, 30.0, 30.0]
+        default_factory=lambda: [30.0, 30.0, 25.0, 18.0, 8.0, 8.0, 8.0]
     )
     ee_arm_damping_ratio: float = 1.0
     ee_arm_target_gains: Tuple[float, float, float, float] = ARM_TARGET_GAINS

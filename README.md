@@ -216,10 +216,10 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `joint_acceleration_limit_scale` | `30.0` | Multiplies the URDF acceleration limits |
 | `joint_position_cutoff_frequency` | `5.0` | Low-pass cutoff (Hz) of JointPosition commands, set on the robot for the session |
 | `use_joint_impedance` | `False` | Send JointImpedance instead of JointPosition commands |
-| `joint_impedance_arm_stiffness` | `[150]*7` | Arm stiffness (Nm/rad), used for both arms |
-| `joint_impedance_arm_torque_limit` | `[40]*7` | Arm torque limit (Nm) |
+| `joint_impedance_arm_stiffness` | `[1075, 990, 580, 265, 190, 205, 300]` | Arm stiffness (Nm/rad, `arm_0..6`), used for both arms. Larger towards the base, following the inertia each joint moves |
+| `joint_impedance_arm_torque_limit` | `[30, 30, 25, 18, 8, 8, 8]` | Arm torque limit (Nm) of the impedance torque (gravity compensation comes on top): the most a joint pushes back when held away from its target. The arm is stiff, its compliance comes from this limit |
 | `joint_impedance_torso_stiffness` | `[400]*6` | Torso stiffness (Nm/rad), with `use_torso` |
-| `joint_impedance_torso_torque_limit` | `[500]*6` | Torso torque limit (Nm) |
+| `joint_impedance_torso_torque_limit` | `[270, 270, 270, 120, 120, 120]` | Torso torque limit (Nm): the URDF effort limits |
 | `joint_impedance_damping_ratio` | `1.0` | Damping ratio ζ (1.0 = critical, < 1 overshoots) |
 | `joint_impedance_wrist_velocity_limit_scale` | `10.0` | Multiplies the velocity limit of the last joint of each arm |
 
@@ -232,7 +232,7 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `ee_min_time_factor` | `1.02` | `minimum_time` = action period × this factor |
 | `ee_hold_time` | `1.0` | The command keeps holding this long (s) if the stream stalls |
 | `ee_reset_position_threshold` / `ee_reset_rotation_threshold` | `0.1` m / `0.5` rad | A target jump beyond this re-references the solver to the robot's state |
-| `ee_arm_stiffness` / `ee_arm_torque_limit` / `ee_arm_damping_ratio` | `[80,80,80,60,60,60,60]` / `[40,40,40,30,30,30,30]` / `1.0` | Arm solver joint gains, used for both arms |
+| `ee_arm_stiffness` / `ee_arm_torque_limit` / `ee_arm_damping_ratio` | `[1075,990,580,265,190,205,300]` / `[30,30,25,18,8,8,8]` / `1.0` | Arm solver joint gains, used for both arms. Stiffness and torque limit are the joint impedance values |
 | `ee_arm_target_gains` | `(3.0, 2π, 150, 80π)` | Arm target limits: linear / angular velocity, linear / angular acceleration |
 | `ee_right_arm_joint_limits` / `ee_left_arm_joint_limits` | elbow `(-2.6, -0.5)` | Extra joint limits (rad) given to the arm solvers |
 | `ee_null_right_arm_deg` / `ee_null_left_arm_deg` | — | Nullspace joint target of each arm (deg) |
@@ -498,6 +498,16 @@ Breaking changes in 0.3.1 (compared with the withdrawn 0.3.0):
   Model M v1.3 wrist (`arm_5`, `arm_6`). The leader arm now needs to reach the robot at
   `--teleop.robot_address` on `connect()`; set `--teleop.require_robot_joint_limits=false`
   to use it without a robot.
+- **Arm impedance defaults changed**: the arm is now stiff and gets its compliance from
+  the torque limit. `joint_impedance_arm_stiffness` is `[1075, 990, 580, 265, 190, 205, 300]`
+  (was `[150]*7`; larger towards the base) and `joint_impedance_arm_torque_limit` is
+  `[30, 30, 25, 18, 8, 8, 8]` (was `[40]*7`), with `use_joint_impedance=True`. EE mode uses
+  the same values: `ee_arm_stiffness` was `[80,80,80,60,60,60,60]` and `ee_arm_torque_limit`
+  `[40,40,40,30,30,30,30]`. Pass the old values (e.g.
+  `--robot.joint_impedance_arm_stiffness='[150,150,150,150,150,150,150]'`) to keep the old
+  behaviour, e.g. for a policy trained on data recorded with it.
+  The joint impedance torso torque limits are now the URDF effort limits
+  `[270, 270, 270, 120, 120, 120]` (was `[500]*6`).
 - Robot profiles written by 0.3.0 are still read: field names are converted on load, and
   `profile_mode=apply` restores the fixed EE period they were recorded with.
 
