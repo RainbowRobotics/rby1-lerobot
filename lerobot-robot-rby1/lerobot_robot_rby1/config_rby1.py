@@ -17,7 +17,8 @@ Fields of a section that is not active are ignored.
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
-from lerobot.cameras import CameraConfig
+from lerobot.cameras import CameraConfig, Cv2Rotation  # noqa: F401  (used by the camera template)
+from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
 from lerobot.robots.config import RobotConfig
 
 from .constants import (  # noqa: F401  (ready poses are re-exported for callers)
@@ -41,6 +42,31 @@ from .constants import (  # noqa: F401  (ready poses are re-exported for callers
     JointLimits,
     ready_pose_for_version,
 )
+
+
+def _default_cameras() -> dict[str, CameraConfig]:
+    """Default camera layout: no cameras.
+
+    All entries below are commented out, so this returns an empty dict by
+    default. The front / right / left RealSense block is kept as a template —
+    uncomment it (with the correct serial numbers) or override
+    ``Rby1Config.cameras`` to add cameras.
+    """
+    return {
+        # Example RealSense D435 config for one robot. Override with actual serial numbers and desired settings.
+
+        # "front": RealSenseCameraConfig(
+        #     serial_number_or_name="427622271135", fps=30, width=640, height=480
+        # ),
+        # "right": RealSenseCameraConfig(
+        #     serial_number_or_name="230422270977", fps=30, width=480, height=640,
+        #     rotation=Cv2Rotation.ROTATE_90,
+        # ),
+        # "left": RealSenseCameraConfig(
+        #     serial_number_or_name="335122272086", fps=30, width=480, height=640,
+        #     rotation=Cv2Rotation.ROTATE_90,
+        # ),
+    }
 
 
 @RobotConfig.register_subclass("rby1")
@@ -105,9 +131,10 @@ class Rby1Config(RobotConfig):
     use_velocity: bool = False
     use_torque: bool = False
 
-    # Map of camera name -> CameraConfig. Defaults to no cameras; see the
-    # README for a RealSense example.
-    cameras: dict[str, CameraConfig] = field(default_factory=dict)
+    # Map of camera name -> CameraConfig. Defaults to no cameras (the
+    # RealSense layout in _default_cameras() is a commented-out template);
+    # pass an explicit dict to enable cameras.
+    cameras: dict[str, CameraConfig] = field(default_factory=_default_cameras)
 
     # ════════════════════════════════════════════════════════════════════
     # Joint mode (action_mode="joint") — JointPosition / JointImpedance
