@@ -178,21 +178,79 @@ lerobot-record \
 
 ### Robot (`Rby1Config`)
 
+Pass any field as `--robot.<field>=<value>`. The fields are grouped by the RB-Y1
+controller they feed; a group that is not active is ignored. All fields and their
+comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_rby1.py).
+
+**Connection**
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `address` | `"192.168.30.1:50051"` | gRPC address of the robot |
 | `model` | `"auto"` | Model variant: `"m"`, `"a"`, or `"auto"` to detect (`"ub"` is not supported) |
 | `version` | `"auto"` | Robot version: `"1.0"`–`"1.3"`, or `"auto"` to detect |
-| `use_right_arm` | `True` | Include right arm in observation / action |
-| `use_left_arm` | `True` | Include left arm in observation / action |
-| `use_torso` | `False` | Include torso joints |
+| `connect_timeout_sec` | `3.0` | Timeout of the model / version detection |
+| `move_to_ready_on_connect` | `True` | Move to the ready pose on `connect()` |
+
+**Features** — what the observation and the action contain
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `action_mode` | `"joint"` | `"joint"`: joint positions. `"ee"`: end-effector poses (e.g. from `rby1_vr`) |
+| `use_right_arm` | `True` | Include the right arm in observation / action |
+| `use_left_arm` | `True` | Include the left arm in observation / action |
+| `use_torso` | `False` | Include the torso in observation / action (commanded in both action modes) |
 | `use_gripper` | `True` | Enable RB-Y1 grippers |
 | `use_mobile_base` | `False` | Enable base control (Model M/A) |
 | `use_velocity` | `False` | Add `.vel` channels to observations |
 | `use_torque` | `False` | Add `.torque` channels to observations |
 | `cameras` | `{}` | Dict of camera name → `CameraConfig` |
-| `use_joint_impedance` | `False` | Joint-impedance vs. joint-position control |
-| `joint_impedance_damping_ratio` | `1.0` | Joint-impedance damping ratio ζ (1.0 = critical, < 1 overshoots) |
+
+**Joint mode** (`action_mode="joint"`) — JointPosition / JointImpedance commands
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `joint_min_time` | `0.07` | `minimum_time` (s) of each command. Also used for the base velocity command |
+| `joint_startup_min_time` | `5.0` | `minimum_time` (s) of the first command; ramps down to `joint_min_time` |
+| `joint_startup_ramp_duration` | `5.0` | Length (s) of that ramp; `0` disables it |
+| `joint_acceleration_limit_scale` | `30.0` | Multiplies the URDF acceleration limits |
+| `joint_position_cutoff_frequency` | `5.0` | Low-pass cutoff (Hz) of JointPosition commands, set on the robot for the session |
+| `use_joint_impedance` | `False` | Send JointImpedance instead of JointPosition commands |
+| `joint_impedance_arm_stiffness` | `[150]*7` | Arm stiffness (Nm/rad), used for both arms |
+| `joint_impedance_arm_torque_limit` | `[40]*7` | Arm torque limit (Nm) |
+| `joint_impedance_torso_stiffness` | `[400]*6` | Torso stiffness (Nm/rad), with `use_torso` |
+| `joint_impedance_torso_torque_limit` | `[500]*6` | Torso torque limit (Nm) |
+| `joint_impedance_damping_ratio` | `1.0` | Damping ratio ζ (1.0 = critical, < 1 overshoots) |
+| `joint_impedance_wrist_velocity_limit_scale` | `10.0` | Multiplies the velocity limit of the last joint of each arm |
+
+**EE mode** (`action_mode="ee"`) — CartesianImpedance commands, one solver each for the torso, right arm and left arm
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ee_auto_action_period` | `True` | Measure the interval between actions and use it as the action period |
+| `ee_action_period` | `1/15` | Action period (s): the starting value, or the fixed value with `ee_auto_action_period=False` |
+| `ee_min_time_factor` | `1.02` | `minimum_time` = action period × this factor |
+| `ee_hold_time` | `1.0` | The command keeps holding this long (s) if the stream stalls |
+| `ee_reset_position_threshold` / `ee_reset_rotation_threshold` | `0.1` m / `0.5` rad | A target jump beyond this re-references the solver to the robot's state |
+| `ee_arm_stiffness` / `ee_arm_torque_limit` / `ee_arm_damping_ratio` | `[80,80,80,60,60,60,60]` / `[40,40,40,30,30,30,30]` / `1.0` | Arm solver joint gains, used for both arms |
+| `ee_arm_target_gains` | `(3.0, 2π, 150, 80π)` | Arm target limits: linear / angular velocity, linear / angular acceleration |
+| `ee_right_arm_joint_limits` / `ee_left_arm_joint_limits` | elbow `(-2.6, -0.5)` | Extra joint limits (rad) given to the arm solvers |
+| `ee_null_right_arm_deg` / `ee_null_left_arm_deg` | — | Nullspace joint target of each arm (deg) |
+| `ee_nullspace_weight` / `ee_nullspace_stiffness` / `ee_nullspace_damping_ratio` | `[2,2,2,2,2,2,1]` / `0.2` / `1.0` | Nullspace gains |
+| `ee_torso_stiffness` / `ee_torso_torque_limit` / `ee_torso_damping_ratio` | `[1700]*6` / `[600]*6` / `1.0` | Torso solver joint gains |
+| `ee_torso_target_gains` | `(1.0, π/2, 20, 40π)` | Torso target limits (same order as the arm) |
+| `ee_torso_joint_limits` | — | Extra joint limits (rad) given to the torso solver |
+
+**Mobile base** (`use_mobile_base=True`) — SE2Velocity commands
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `mobile_base_hold_time` | `0.5` | The base keeps the last velocity this long (s) after the stream stops |
+| `mobile_base_max_linear_velocity` | `0.6` | Clamp of the x / y speed (m/s) |
+| `mobile_base_max_angular_velocity` | `1.4` | Clamp of the yaw rate (rad/s) |
+
+**Robot profile** — `profile_out`, `profile_in`, `profile_mode`, `profile_force`:
+see [Keeping robots consistent](#keeping-robots-consistent-robot-profile).
 
 ### Teleoperator (`Rby1LeaderArmConfig`)
 
@@ -201,9 +259,17 @@ lerobot-record \
 | `version` | `"1.2"` | Robot version of the paired follower (sets init pose) |
 | `use_right_arm` | `True` | Read right arm joints |
 | `use_left_arm` | `True` | Read left arm joints |
+| `use_torso` | `False` | Output a fixed torso target (set it together with `--robot.use_torso=true`) |
+| `torso_target_deg` | ready pose (`[0, 0, 0, 20, 0, 0]`) | The torso target (deg, `torso_0..5`) |
 | `use_gripper` | `True` | Read gripper state from trigger buttons |
 | `control_frequency` | `100.0` | Leader arm control loop frequency (Hz) |
 | `init_duration` | `5.0` | Time (s) to reach ready pose on `connect()` |
+
+The leader arm has no torso joints. With `use_torso=True` on both the robot and the
+leader arm, every action carries `torso_target_deg`, so the robot holds its torso there
+and the dataset records the torso action a policy needs. If the torso is somewhere else
+when teleoperation starts, the robot moves it to the target during the startup ramp
+(`joint_startup_min_time`, 5 s by default).
 
 ### Observation / Action Keys
 
@@ -237,7 +303,7 @@ lerobot-rollout \
 
 Limitations:
 
-- Requires **lerobot 0.7.0 or newer** (plugin 0.3.x). Plugin 0.2.x targets lerobot 0.6.1.
+- Requires **lerobot 0.7.0 or newer** (plugin 0.3.x and later). Plugin 0.2.x targets lerobot 0.6.1.
 - `action_mode="ee"` is **not supported**. Rollout keeps only `.pos` / `.vel` state and
   action features, and end-effector keys (`right_ee.x`, …) match neither — this is an
   upstream limitation that applies to LeRobot's own EE robots too.
@@ -351,20 +417,23 @@ earlier versions wrote 5 Hz to the robot's stored parameters.
 
 | Plugin version | LeRobot | Python | Notes |
 |----------------|---------|--------|-------|
-| 0.3.x | 0.7.0 | 3.12, 3.13 | Tested in CI. Remote inference via lerobot's `lerobot-policy-server` / `--inference.type=remote`. |
-| 0.3.x | `main` (next release) | 3.12 | Robot/teleop tested weekly in CI. |
+| 0.3.1 and later | 0.7.0 | 3.12, 3.13 | Tested in CI. Remote inference via lerobot's `lerobot-policy-server` / `--inference.type=remote`. Config fields grouped by controller, torso command in joint mode, measured EE action period, joint limits read from the robot. |
+| 0.3.1 and later | `main` (next release) | 3.12 | Robot/teleop tested weekly in CI. |
 | 0.2.x | 0.6.1 | 3.12, 3.13 | Legacy: last version with the gRPC `lerobot-async-rby1` package. |
 | 0.1.x | 0.4 – 0.6.0 | ≥ 3.10 | Bare joint keys (no `.pos` suffix), unmaintained. |
 
 ### Versioning and releases
 
-The plugins use their own [semantic version](https://semver.org/) (all three packages
+The plugins use their own [semantic version](https://semver.org/) (both packages
 share one version), and every [GitHub Release](https://github.com/RainbowRobotics/rby1-lerobot/releases)
 names the LeRobot release it was tested against, e.g. `v0.2.0 — LeRobot 0.6.1`.
 
 - **Minor** (`0.2.0 → 0.3.0`): support for a new LeRobot release, or a breaking change in
   the plugins (config fields, observation/action keys).
 - **Patch** (`0.2.0 → 0.2.1`): fixes that keep the same LeRobot requirement and keys.
+- Exception: 0.3.0 was withdrawn one day after it was published, and 0.3.1 is the first
+  release of the 0.3 series. That is why 0.3.1 contains breaking changes (listed below).
+  The 0.3.0 code is commit `13d68d4`.
 
 To install the plugins for a given release, check out its tag:
 
@@ -372,7 +441,7 @@ To install the plugins for a given release, check out its tag:
 git clone --branch v0.2.0 https://github.com/rainbowrobotics/rby1-lerobot.git
 ```
 
-Releasing (maintainers): bump `version` in the three `pyproject.toml` files (and the
+Releasing (maintainers): bump `version` in the two `pyproject.toml` files (and the
 teleoperator's `lerobot_robot_rby1>=` requirement), update the table above, merge to
 `main`, then push a `vX.Y.Z` tag on `main`. The release workflow checks that the tag
 matches the package versions, runs CI and publishes the GitHub Release.
@@ -388,6 +457,34 @@ Breaking change in 0.3.0: the `lerobot-async-rby1` package (`rby1-policy-server`
 lerobot 0.7.0 dropped the gRPC AsyncInference service it was built on. Use lerobot's remote
 inference instead (see [Remote inference](#remote-inference)). The old package is in the git
 history (`git show v0.2.0:lerobot-async-rby1/`).
+
+Breaking changes in 0.3.1 (compared with the withdrawn 0.3.0):
+
+- **`Rby1Config` fields renamed** so the name says which controller a field belongs to.
+  Update `--robot.<field>` arguments and config files:
+
+  | 0.3.0 | 0.3.1 |
+  |-------|-------|
+  | `startup_ramp_duration`, `startup_min_time`, `normal_min_time` | `joint_startup_ramp_duration`, `joint_startup_min_time`, `joint_min_time` |
+  | `acceleration_limit_scale` | `joint_acceleration_limit_scale` |
+  | `use_impedance`, `impedance_damping_ratio` | `use_joint_impedance`, `joint_impedance_damping_ratio` |
+  | `impedance_stiffness` (20 values: torso, right, left) | `joint_impedance_torso_stiffness` (6) + `joint_impedance_arm_stiffness` (7, both arms) |
+  | `impedance_torque_limit` (20 values) | `joint_impedance_torso_torque_limit` (6) + `joint_impedance_arm_torque_limit` (7) |
+  | `wrist_velocity_limit_scale` | `joint_impedance_wrist_velocity_limit_scale` |
+  | `ee_dt`, `min_time_factor` | `ee_action_period`, `ee_min_time_factor` |
+  | `torso_stiffness`, `torso_torque_limit`, `torso_damping_ratio`, `torso_joint_limits`, `torso_target_gains` | the same names with an `ee_` prefix |
+  | `right_arm_stiffness` + `left_arm_stiffness` (and `_torque_limit`, `_damping_ratio`) | `ee_arm_stiffness`, `ee_arm_torque_limit`, `ee_arm_damping_ratio` (one value for both arms) |
+  | `right_arm_joint_limits`, `left_arm_joint_limits`, `arm_target_gains` | `ee_right_arm_joint_limits`, `ee_left_arm_joint_limits`, `ee_arm_target_gains` |
+  | `null_right_arm_deg`, `null_left_arm_deg`, `nullspace_*` | the same names with an `ee_` prefix |
+
+- **Joint mode commands the torso** when `use_torso=True`: the action starts with
+  `torso_0..5.pos`. In 0.3.0 the torso was only observed, so datasets and policies recorded
+  in joint mode with `use_torso=True` have a different action layout; use plugin 0.3.0
+  (commit `13d68d4`) with them. The leader arm now accepts `use_torso=True` and outputs a fixed torso target.
+- **EE mode measures the action period** instead of assuming 15 Hz
+  (`ee_auto_action_period=False` restores the fixed period).
+- Robot profiles written by 0.3.0 are still read: field names are converted on load, and
+  `profile_mode=apply` restores the fixed EE period they were recorded with.
 
 LeRobot commands that do not apply to RB-Y1:
 
