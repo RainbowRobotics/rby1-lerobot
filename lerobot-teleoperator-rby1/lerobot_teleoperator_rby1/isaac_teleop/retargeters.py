@@ -1,6 +1,6 @@
 """Pure-numpy retargeting helpers for the RB-Y1 XR device.
 
-Everything here is free of ``isaacteleop`` and ``rby1_sdk`` so it can be unit
+Everything here is free of ``isaaccapture`` and ``rby1_sdk`` so it can be unit
 tested offline: headset orientation -> head joints, body tracking -> torso
 workspace clamping, thumbsticks -> base velocity, SE3 -> LeRobot EE action keys.
 """

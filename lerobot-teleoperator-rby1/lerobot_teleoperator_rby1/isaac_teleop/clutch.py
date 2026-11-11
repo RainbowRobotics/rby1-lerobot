@@ -2,7 +2,7 @@
 
 Adapted from the upstream LeRobot example
 ``examples/isaac_teleop_to_so101/isaac_teleop/clutch.py``. Pure numpy/scipy
-(no ``isaacteleop``), so it is unit-testable without the XR runtime.
+(no ``isaaccapture``), so it is unit-testable without the XR runtime.
 """
 
 from __future__ import annotations

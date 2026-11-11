@@ -1,4 +1,4 @@
-"""Robot camera panels in the headset via Isaac Teleop's Televiz (`isaacteleop.viz`).
+"""Robot camera panels in the headset via Isaac Capture's Televiz (`isaaccapture.viz`).
 
 One ``QuadLayer`` per camera, fed from the in-process
 :mod:`lerobot_robot_rby1.frame_bus` (published by ``Rby1.get_observation()``).
@@ -47,145 +47,39 @@ class PanelLayout:
 
 
 CUDA_UPLOAD_HINT = (
-    "Televiz needs the camera frames as CUDA arrays and no working upload backend was "
-    "found. On Jetson (JetPack 6.x = CUDA 12.6) the PyPI torch wheels are built for CUDA "
-    "12.8+ and NVIDIA's JetPack torch wheels exist only for Python 3.10, so install the "
-    "driver-API backend instead: `pip install \"cuda-bindings>=12.6,<13\"` (12.x driver API, "
-    "cp312 aarch64 wheels; only libcuda is needed), or `pip install cupy-cuda12x`."
+    "Televiz takes camera frames as CUDA arrays, uploaded here with CuPy. "
+    "`isaaccapture[cloudxr]` installs `cupy-cuda12x`; check that it imports and reaches the "
+    "GPU: python -c \"import cupy; print(cupy.zeros(1).device)\""
 )
 
-
-def _rgba_host(frame: np.ndarray) -> np.ndarray:
-    frame = np.ascontiguousarray(frame)
-    if frame.ndim == 3 and frame.shape[2] == 4:
-        return frame
-    rgba = np.empty((*frame.shape[:2], 4), np.uint8)
-    rgba[..., :3] = frame
-    rgba[..., 3] = 255
-    return rgba
-
-
-def _upload_torch(frame: np.ndarray, _cache: dict = {}) -> Any:
-    import torch
-
-    if not torch.cuda.is_available():
-        raise RuntimeError("torch.cuda.is_available() is False")
-    t = torch.from_numpy(np.ascontiguousarray(frame)).to("cuda", non_blocking=False)
-    if t.shape[-1] == 4:
-        return t.contiguous()
-    key = tuple(t.shape[:2])
-    alpha = _cache.get(key)
-    if alpha is None:
-        alpha = torch.full((*key, 1), 255, dtype=torch.uint8, device="cuda")
-        _cache[key] = alpha
-    return torch.cat([t, alpha], dim=-1).contiguous()
-
-
-def _upload_cupy(frame: np.ndarray) -> Any:
-    import cupy
-
-    return cupy.asarray(_rgba_host(frame))
-
-
-class DriverDeviceArray:
-    """A CUDA device buffer allocated through the driver API (``cuda-python``).
-
-    Exposes ``__cuda_array_interface__`` so Televiz (or CuPy / torch) can read
-    it. Only ``libcuda`` (the GPU driver) is needed — no CUDA toolkit runtime,
-    which is what makes it work in a Python 3.12 environment on JetPack 6.x.
-    """
-
-    _ctx: Any = None
-    _drv: Any = None
-
-    def __init__(self, shape: tuple[int, ...]) -> None:
-        drv = self._driver()
-        self.shape = tuple(int(x) for x in shape)
-        self.nbytes = int(np.prod(self.shape))
-        err, ptr = drv.cuMemAlloc(self.nbytes)
-        self._check(err, "cuMemAlloc")
-        self._ptr = ptr
-
-    @classmethod
-    def _driver(cls) -> Any:
-        if cls._drv is None:
-            try:
-                from cuda.bindings import driver as drv  # cuda-python >= 12.6
-            except ImportError:
-                from cuda import cuda as drv  # older cuda-python layout
-            cls._check_static(drv, drv.cuInit(0)[0], "cuInit")
-            err, dev = drv.cuDeviceGet(0)
-            cls._check_static(drv, err, "cuDeviceGet")
-            err, ctx = drv.cuDevicePrimaryCtxRetain(dev)
-            cls._check_static(drv, err, "cuDevicePrimaryCtxRetain")
-            cls._drv, cls._ctx = drv, ctx
-        # The primary context must be current on the calling thread (render thread).
-        cls._check_static(cls._drv, cls._drv.cuCtxSetCurrent(cls._ctx)[0], "cuCtxSetCurrent")
-        return cls._drv
-
-    @staticmethod
-    def _check_static(drv: Any, err: Any, what: str) -> None:
-        if err != drv.CUresult.CUDA_SUCCESS:
-            raise RuntimeError(f"{what} failed: {err}")
-
-    def _check(self, err: Any, what: str) -> None:
-        self._check_static(self._drv, err, what)
-
-    def upload(self, host: np.ndarray) -> "DriverDeviceArray":
-        drv = self._driver()
-        host = np.ascontiguousarray(host)
-        if host.nbytes != self.nbytes:
-            raise ValueError(f"frame has {host.nbytes} bytes, buffer {self.nbytes}")
-        self._check(drv.cuMemcpyHtoD(self._ptr, host.ctypes.data, self.nbytes)[0], "cuMemcpyHtoD")
-        return self
-
-    @property
-    def __cuda_array_interface__(self) -> dict:
-        return {"shape": self.shape, "typestr": "|u1", "data": (int(self._ptr), False), "version": 3, "strides": None}
-
-    def __del__(self) -> None:
-        try:
-            if self._drv is not None and getattr(self, "_ptr", None) is not None:
-                self._drv.cuMemFree(self._ptr)
-        except Exception:  # noqa: BLE001
-            pass
-
-
-_driver_buffers: dict[tuple[int, ...], DriverDeviceArray] = {}
-
-
-def _upload_cuda_driver(frame: np.ndarray) -> Any:
-    rgba = _rgba_host(frame)
-    buf = _driver_buffers.get(rgba.shape)
-    if buf is None:
-        buf = DriverDeviceArray(rgba.shape)
-        _driver_buffers[rgba.shape] = buf
-    return buf.upload(rgba)
-
-
-_uploader_impl: Callable[[np.ndarray], Any] | None = None
+# One reusable (H, W, 4) device buffer per resolution, alpha pre-filled.
+# ``layer.submit()`` copies before it returns, so reusing the buffer for the
+# next frame (or another panel of the same size) is safe. Uploads happen on
+# the render thread only.
+_cupy_buffers: dict[tuple[int, int], Any] = {}
 
 
 def rgb_to_rgba_cuda(frame: np.ndarray) -> Any:
-    """Upload an (H, W, 3) uint8 RGB host frame as a contiguous (H, W, 4) CUDA array.
+    """Upload an (H, W, 3|4) uint8 host frame as a contiguous (H, W, 4) CUDA array (CuPy).
 
-    Tries PyTorch first, then CuPy; the working backend is cached. Raises a
-    RuntimeError with install guidance when neither can reach the GPU.
+    Same method as the upstream ``examples/camera_viz``. Raises a RuntimeError
+    with install guidance when CuPy cannot reach the GPU.
     """
-    global _uploader_impl
-    if _uploader_impl is not None:
-        return _uploader_impl(frame)
-    errors = []
-    for name, fn in (("torch", _upload_torch), ("cuda-python", _upload_cuda_driver), ("cupy", _upload_cupy)):
-        try:
-            out = fn(frame)
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{name}: {e.__class__.__name__}: {str(e).splitlines()[0][:160]}")
-            continue
-        _uploader_impl = fn
-        logger.info("Televiz CUDA upload backend: %s", name)
-        return out
-    raise RuntimeError(CUDA_UPLOAD_HINT + " Tried: " + " | ".join(errors))
+    try:
+        import cupy as cp
+
+        frame = np.ascontiguousarray(frame)
+        h, w, channels = frame.shape
+        buf = _cupy_buffers.get((h, w))
+        if buf is None:
+            buf = cp.empty((h, w, 4), dtype=cp.uint8)
+            buf[..., 3] = 255
+            _cupy_buffers[(h, w)] = buf
+        buf[..., :channels] = cp.asarray(frame)
+        return buf
+    except Exception as e:  # noqa: BLE001
+        reason = f"{e.__class__.__name__}: {str(e).splitlines()[0][:200] if str(e) else ''}"
+        raise RuntimeError(f"{CUDA_UPLOAD_HINT} ({reason})") from e
 
 
 def check_cuda_upload(uploader: Callable[[np.ndarray], Any]) -> None:
@@ -434,7 +328,7 @@ class CameraPanels:
     # ------------------------------------------------------------------
     def _televiz(self) -> Any:
         if self._viz is None:
-            import isaacteleop.viz as televiz
+            import isaaccapture.viz as televiz
 
             self._viz = televiz
         return self._viz
@@ -718,7 +612,7 @@ class CameraPanels:
 
     def status(self) -> str:
         st = self.last_stats
-        fps = getattr(st, "fps", None) if st is not None else None
+        fps = getattr(st, "render_fps", None) if st is not None else None
         stale = getattr(st, "stale_layers", None) if st is not None else None
         text = f"viz: {len(self._layers)}/{len(self._layouts)} panels, renders={self.render_count}" + (
             f", fps={fps:.0f}" if isinstance(fps, (int, float)) else ""

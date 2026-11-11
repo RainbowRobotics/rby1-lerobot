@@ -4,10 +4,10 @@ The device pipeline (see :func:`build_pipeline`) exposes the OpenXR
 controllers, head and (optionally) body-tracking sources verbatim, each
 statically rebased into the robot base frame. :func:`frame_from_outputs`
 turns one ``TeleopSession.step()`` result into numpy-only dataclasses so the
-rest of the device (clutch, retargeters) never touches ``isaacteleop`` types
+rest of the device (clutch, retargeters) never touches ``isaaccapture`` types
 and is unit-testable without it.
 
-The index enums below mirror the ``isaacteleop`` tensor layouts (verified
+The index enums below mirror the ``isaaccapture`` tensor layouts (verified
 against 1.4.142); :func:`verify_index_layout` asserts they still match the
 installed package before a session is built.
 """
@@ -26,7 +26,7 @@ from scipy.spatial.transform import Rotation
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Tensor layouts (mirrors of isaacteleop.retargeting_engine.tensor_types.indices)
+# Tensor layouts (mirrors of isaaccapture.retargeting_engine.tensor_types.indices)
 # ---------------------------------------------------------------------------
 
 
@@ -248,8 +248,8 @@ def _parse_head(group: Any) -> HeadState | None:
         quat = np.asarray(group[HeadInputIndex.ORIENTATION], dtype=float).reshape(4)
     except (IndexError, KeyError, TypeError, ValueError):
         return None
-    # is_valid / is_tracked exist on newer isaacteleop only; older layouts
-    # (3-field HeadPose) have neither, so treat a present sample as valid.
+    # is_valid / is_tracked are missing on old 3-field HeadPose layouts; there
+    # a present sample counts as valid and tracked.
     try:
         if not bool(group[HeadInputIndex.IS_VALID]):
             return None
@@ -259,6 +259,12 @@ def _parse_head(group: Any) -> HeadState | None:
         tracked = bool(group[HeadInputIndex.IS_TRACKED])
     except (IndexError, KeyError, TypeError, ValueError):
         tracked = True
+    # isaaccapture >= 1.6 keeps reporting the last head pose with
+    # is_valid=True, is_tracked=False after the headset disconnects or goes to
+    # sleep. That pose is stale: report the head as absent so the callers'
+    # input-loss handling (hold / clutch release) applies.
+    if not tracked:
+        return None
     if not _pose_ok(pos, quat):
         return None
     return HeadState(pos, quat, tracked)
@@ -376,11 +382,11 @@ class ButtonEdge:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline construction (isaacteleop imported lazily)
+# Pipeline construction (isaaccapture imported lazily)
 # ---------------------------------------------------------------------------
 
 
-# Candidate names of each layout enum across isaacteleop releases.
+# Candidate names of each layout enum across isaaccapture releases.
 _REMOTE_ENUM_NAMES: dict[type[IntEnum], tuple[str, ...]] = {
     ControllerInputIndex: ("ControllerInputIndex",),
     HeadInputIndex: ("HeadInputIndex", "HeadPoseIndex"),
@@ -390,7 +396,7 @@ _REMOTE_ENUM_NAMES: dict[type[IntEnum], tuple[str, ...]] = {
 
 
 def verify_index_layout() -> dict[str, str]:
-    """Check the local index enums against the installed ``isaacteleop``.
+    """Check the local index enums against the installed ``isaaccapture``.
 
     Members present on both sides must agree (a mismatch raises, since it
     would silently corrupt every parsed pose). Enums or members missing from
@@ -398,14 +404,14 @@ def verify_index_layout() -> dict[str, str]:
     ``HeadInputIndex``/``IS_TRACKED`` — and the parsers tolerate them.
     Returns ``{local_enum_name: "verified" | "missing:<names>" | "absent"}``.
     """
-    from isaacteleop.retargeting_engine.tensor_types import indices as idx
+    from isaaccapture.retargeting_engine.tensor_types import indices as idx
 
     report: dict[str, str] = {}
     for local, names in _REMOTE_ENUM_NAMES.items():
         remote = next((getattr(idx, n) for n in names if hasattr(idx, n)), None)
         if remote is None:
             logger.warning(
-                "isaacteleop has none of %s; %s layout could not be verified.",
+                "isaaccapture has none of %s; %s layout could not be verified.",
                 names,
                 local.__name__,
             )
@@ -419,12 +425,12 @@ def verify_index_layout() -> dict[str, str]:
             remote_value = int(getattr(remote, member.name))
             if remote_value != int(member):
                 raise RuntimeError(
-                    f"isaacteleop layout mismatch: {local.__name__}.{member.name} is "
+                    f"isaaccapture layout mismatch: {local.__name__}.{member.name} is "
                     f"{remote_value} in the installed package, {int(member)} here."
                 )
         if missing:
             logger.warning(
-                "isaacteleop %s lacks %s (older layout); those fields are treated as absent.",
+                "isaaccapture %s lacks %s (older layout); those fields are treated as absent.",
                 remote.__name__,
                 missing,
             )
@@ -439,15 +445,15 @@ def build_pipeline(*, with_body: bool) -> tuple[Any, bool]:
 
     Returns ``(pipeline, body_rebased_in_graph)``. Controllers and head are
     rebased in-graph by the ``base_T_anchor`` external input; the body source
-    is rebased in-graph when the installed ``isaacteleop`` offers
+    is rebased in-graph when the installed ``isaaccapture`` offers
     ``FullBodySource.transformed`` and in Python otherwise.
     """
-    from isaacteleop.retargeting_engine.deviceio_source_nodes import (
+    from isaaccapture.retargeting_engine.deviceio_source_nodes import (
         ControllersSource,
         HeadSource,
     )
-    from isaacteleop.retargeting_engine.interface import OutputCombiner, ValueInput
-    from isaacteleop.retargeting_engine.tensor_types import TransformMatrix
+    from isaaccapture.retargeting_engine.interface import OutputCombiner, ValueInput
+    from isaaccapture.retargeting_engine.tensor_types import TransformMatrix
 
     verify_index_layout()
 
@@ -464,7 +470,7 @@ def build_pipeline(*, with_body: bool) -> tuple[Any, bool]:
 
     body_in_graph = False
     if with_body:
-        from isaacteleop.retargeting_engine.deviceio_source_nodes import FullBodySource
+        from isaaccapture.retargeting_engine.deviceio_source_nodes import FullBodySource
 
         body_source = FullBodySource(name="full_body")
         if hasattr(body_source, "transformed"):
@@ -478,8 +484,8 @@ def build_pipeline(*, with_body: bool) -> tuple[Any, bool]:
 
 def build_external_inputs(base_T_anchor: Any) -> dict[str, Any]:  # noqa: N803
     """Materialise the constant ``base_T_anchor`` external input (once, in connect)."""
-    from isaacteleop.retargeting_engine.interface import TensorGroup
-    from isaacteleop.retargeting_engine.tensor_types import TransformMatrix
+    from isaaccapture.retargeting_engine.interface import TensorGroup
+    from isaaccapture.retargeting_engine.tensor_types import TransformMatrix
 
     tg = TensorGroup(TransformMatrix())
     tg[0] = np.asarray(base_T_anchor, dtype=np.float32)

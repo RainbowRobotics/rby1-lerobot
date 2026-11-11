@@ -47,9 +47,17 @@ class IsaacTeleopConfig(TeleoperatorConfig):
     # Session name shown by the CloudXR runtime / OpenXR.
     app_name: str = "rby1_isaac"
 
-    # Launch the CloudXR runtime from this process. Set False (or export
-    # LEROBOT_CLOUDXR_SKIP_AUTOLAUNCH=1) when the runtime is already running.
+    # Attach to the CloudXR service, starting it when none is running. The
+    # service is detached: it keeps running after this process exits (stop it
+    # with `python -m isaaccapture.cloudxr.service stop`). Set False (or export
+    # LEROBOT_CLOUDXR_SKIP_AUTOLAUNCH=1) to skip the launcher entirely.
     auto_launch_cloudxr: bool = True
+    # Run the CloudXR runtime inside this process instead (stopped on
+    # disconnect; e.g. containers). Refused while a service is already running.
+    cloudxr_run_embedded: bool = False
+    # Opening the session blocks until a headset connects. > 0 bounds that wait
+    # (seconds, TimeoutError afterwards); 0 waits forever (Ctrl-C to abort).
+    xr_connect_timeout_s: float = 0.0
     # KEY=value profile passed to CloudXRLauncher(env_config=...). None uses the
     # packaged ``default.env`` (Quest3 profile).
     cloudxr_env_file: str | None = None
@@ -122,7 +130,11 @@ class Rby1XRConfig(IsaacTeleopConfig):
     viz_width_m: float = 1.0
     viz_lock_mode: str = "gimbal"         # "gimbal" (position + yaw [+ pitch]) | "head" | "world"
     viz_follow_pitch: bool = True         # gimbal: panels also follow the head pitch (never roll)
-    viz_openxr_composition: bool = False  # keep False on Jetson Orin (black quads otherwise)
+    # Native OpenXR quad layers. Keep False on Jetson Orin: there the native
+    # path shows a solid colour instead of the image (still so in isaaccapture
+    # 1.6.152, see the Televiz docs "Jetson Orin, XR"); False composites the
+    # panels into the projection layer instead.
+    viz_openxr_composition: bool = False
     viz_wait_headset_s: int = -1          # VizSession.create waits for the headset (-1 = forever)
     # Grab handle above each panel (like the CloudXR client's control panel):
     # point a FREE hand (squeeze released) at the bar and hold the trigger to

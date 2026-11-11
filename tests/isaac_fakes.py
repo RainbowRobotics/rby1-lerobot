@@ -1,4 +1,4 @@
-"""Fake isaacteleop objects for offline tests."""
+"""Fake isaaccapture objects for offline tests."""
 
 from __future__ import annotations
 

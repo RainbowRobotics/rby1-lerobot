@@ -12,7 +12,7 @@ Mirrors the layout of the upstream LeRobot example
 * :mod:`teleop_rby1_xr` — :class:`Rby1XR`, the RB-Y1 device (both
   controllers → arm EE poses, headset → head joints, body tracking → torso).
 
-``isaacteleop`` is optional: every module here imports without it; constructing
+``isaaccapture`` is optional: every module here imports without it; constructing
 a device fails fast with install instructions.
 """
 

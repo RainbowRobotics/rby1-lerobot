@@ -9,10 +9,16 @@ guard, and the no-op calibration tracking devices need. A concrete device
 implements :meth:`_build_pipeline` (its retargeting graph) and
 :meth:`get_action` (usually via :meth:`_step`).
 
-``isaacteleop`` is an optional dependency (``pip install -e
-"lerobot-teleoperator-rby1[isaac]"``); its imports are guarded behind an
-availability check so this module imports without it and constructing a
-device fails fast with install instructions.
+``isaaccapture`` (NVIDIA Isaac Capture, formerly Isaac Teleop) is an optional
+dependency (``pip install -e "lerobot-teleoperator-rby1[isaac]"``); its
+imports are guarded behind an availability check so this module imports
+without it and constructing a device fails fast with install instructions.
+
+CloudXR runtime ownership (isaaccapture >= 1.6): the runtime is a detached
+host service. ``CloudXRLauncher`` attaches to a running one or starts one, and
+the service keeps running after this process exits (stop it with ``python -m
+isaaccapture.cloudxr.service stop``). Only ``cloudxr_run_embedded=True`` makes
+this process own the runtime and stop it on disconnect.
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ import abc
 import importlib.util
 import logging
 import os
+import threading
 from collections.abc import Mapping
 from importlib.resources import files
 from pathlib import Path
@@ -30,18 +37,18 @@ from lerobot.teleoperators.teleoperator import Teleoperator
 
 from .config_isaac_teleop import IsaacTeleopConfig
 
-_isaacteleop_available = importlib.util.find_spec("isaacteleop") is not None
+_isaaccapture_available = importlib.util.find_spec("isaaccapture") is not None
 
-if TYPE_CHECKING or _isaacteleop_available:
-    from isaacteleop.cloudxr import CloudXRLauncher
-    from isaacteleop.retargeting_engine.interface import (
+if TYPE_CHECKING or _isaaccapture_available:
+    from isaaccapture.cloudxr import CloudXRLauncher
+    from isaaccapture.retargeting_engine.interface import (
         ExecutionEvents,
         ExecutionState,
         GraphExecutable,
         RetargeterIO,
     )
-    from isaacteleop.teleop_session_manager import TeleopSession, TeleopSessionConfig
-else:  # pragma: no cover - exercised only without isaacteleop
+    from isaaccapture.teleop_session_manager import TeleopSession, TeleopSessionConfig
+else:  # pragma: no cover - exercised only without isaaccapture
     CloudXRLauncher = None
     ExecutionEvents = None
     ExecutionState = None
@@ -52,11 +59,30 @@ else:  # pragma: no cover - exercised only without isaacteleop
 
 logger = logging.getLogger(__name__)
 
+CLOUDXR_SERVICE_CLI = "python -m isaaccapture.cloudxr.service"
+EULA_ACCEPT_COMMAND = f"{CLOUDXR_SERVICE_CLI} start --accept-eula"
+
 INSTALL_HINT = (
-    "The 'isaacteleop' package is required for Isaac Teleop devices but is not "
+    "The 'isaaccapture' package is required for Isaac teleop devices but is not "
     "installed. Install it with: pip install -e \"lerobot-teleoperator-rby1[isaac]\" "
-    "and accept the CloudXR EULA once with: python -m isaacteleop.cloudxr --accept-eula"
+    f"and accept the CloudXR EULA once with: {EULA_ACCEPT_COMMAND}"
 )
+
+if _isaaccapture_available:
+    # ``import isaaccapture`` installs its own console handler on the
+    # ``isaaccapture`` logger and still propagates to the root logger, so with
+    # lerobot's root handlers every line would be printed twice.
+    try:
+        from isaaccapture.logging_config import set_propagate_to_root
+
+        set_propagate_to_root(False)
+    except Exception:  # pragma: no cover - logging layout changed upstream
+        logger.debug("isaaccapture.logging_config.set_propagate_to_root unavailable", exc_info=True)
+
+
+def cloudxr_eula_marker(install_dir: str) -> Path:
+    """Marker file the CloudXR launcher writes once the EULA is accepted."""
+    return Path(install_dir).expanduser() / "run" / "eula_accepted"
 
 
 def default_cloudxr_env_file() -> str:
@@ -72,7 +98,7 @@ class IsaacTeleopTeleoperator(Teleoperator):
 
     ``session_factory`` / ``launcher_factory`` exist for tests: they replace the
     ``TeleopSession`` and ``CloudXRLauncher`` constructors so the device can be
-    driven without the XR runtime (and without ``isaacteleop`` installed).
+    driven without the XR runtime (and without ``isaaccapture`` installed).
     """
 
     config_class = IsaacTeleopConfig
@@ -84,7 +110,7 @@ class IsaacTeleopTeleoperator(Teleoperator):
         session_factory: Any | None = None,
         launcher_factory: Any | None = None,
     ):
-        if session_factory is None and not _isaacteleop_available:
+        if session_factory is None and not _isaaccapture_available:
             raise ImportError(INSTALL_HINT)
         super().__init__(config)
         self.config: IsaacTeleopConfig = config
@@ -128,13 +154,16 @@ class IsaacTeleopTeleoperator(Teleoperator):
         pass
 
     def connect(self, calibrate: bool = True) -> None:  # noqa: ARG002
-        """Auto-launch the CloudXR runtime (unless opted out) and open the session.
+        """Attach to (or start) the CloudXR runtime, unless opted out, and open the session.
 
-        The CloudXR launch blocks ~30 s and, on the first run, prompts on stdin
-        for the EULA (accept once via ``python -m isaacteleop.cloudxr
-        --accept-eula``). Opt out when CloudXR runs externally via
-        ``config.auto_launch_cloudxr=False`` or
+        Starting the runtime blocks ~30 s. The EULA must have been accepted
+        once (``python -m isaaccapture.cloudxr.service start --accept-eula``);
+        without it this raises instead of prompting on stdin. Opt out of the
+        launcher via ``config.auto_launch_cloudxr=False`` or
         ``LEROBOT_CLOUDXR_SKIP_AUTOLAUNCH=1`` (env var wins).
+
+        Opening the session blocks until a headset connects (isaaccapture
+        >= 1.6); ``config.xr_connect_timeout_s`` bounds that wait.
         """
         if self._session is not None:
             raise RuntimeError("Already connected. Call disconnect() first.")
@@ -157,7 +186,7 @@ class IsaacTeleopTeleoperator(Teleoperator):
                     oxr_handles = self._make_oxr_handles(handles)
                 self._viz.start_render_thread()
             self._session = self._make_session(pipeline, oxr_handles)
-            self._session.__enter__()
+            self._enter_session(self._session)
             if self._viz is not None:
                 self._viz.begin_rendering()
         except Exception:
@@ -174,17 +203,52 @@ class IsaacTeleopTeleoperator(Teleoperator):
             raise
         logger.info("Isaac Teleop session started: %s", self.config.app_name)
 
+    def _enter_session(self, session: Any) -> None:
+        """Enter the ``TeleopSession``; it blocks until a headset is connected.
+
+        With ``xr_connect_timeout_s > 0`` the entry runs on a worker thread so
+        the wait can be bounded; a timed-out entry cannot be cancelled, so the
+        (daemon) thread is left behind and the caller must give up on this
+        process' session.
+        """
+        timeout = float(getattr(self.config, "xr_connect_timeout_s", 0.0) or 0.0)
+        if timeout <= 0.0:
+            logger.info("Waiting for the headset to connect (no timeout; Ctrl-C to abort) …")
+            session.__enter__()
+            return
+
+        logger.info("Waiting up to %.0f s for the headset to connect …", timeout)
+        error: list[BaseException] = []
+        done = threading.Event()
+
+        def enter() -> None:
+            try:
+                session.__enter__()
+            except BaseException as e:  # noqa: BLE001 - re-raised on the caller thread
+                error.append(e)
+            finally:
+                done.set()
+
+        threading.Thread(target=enter, name="xr-session-enter", daemon=True).start()
+        if not done.wait(timeout):
+            raise TimeoutError(
+                f"No headset connected within {timeout:.0f} s (xr_connect_timeout_s). "
+                "Open the CloudXR web client in the headset and press Connect, then run again."
+            )
+        if error:
+            raise error[0]
+
     def _required_extensions(self, pipeline: Any) -> list[str]:
         if self._session_factory is not None:
             return []
-        from isaacteleop.teleop_session_manager import get_required_oxr_extensions_from_pipeline
+        from isaaccapture.teleop_session_manager import get_required_oxr_extensions_from_pipeline
 
         return list(get_required_oxr_extensions_from_pipeline(pipeline))
 
     @staticmethod
     def _make_oxr_handles(handles: Any) -> Any:
         try:
-            from isaacteleop.oxr import OpenXRSessionHandles
+            from isaaccapture.oxr import OpenXRSessionHandles
         except ImportError:  # test doubles
             return handles
         return OpenXRSessionHandles(*handles)
@@ -220,8 +284,8 @@ class IsaacTeleopTeleoperator(Teleoperator):
                 except Exception:
                     logger.exception("Failed to destroy the Televiz session")
                 self._viz = None
-            # Reap the CloudXR runtime even if session teardown raised; a no-op
-            # when we never launched CloudXR (opt-out / externally-owned runtime).
+            # Release the launcher even if session teardown raised. Only an
+            # embedded runtime is stopped; the detached service keeps running.
             self._stop_cloudxr_runtime()
 
     # ------------------------------------------------------------------
@@ -229,12 +293,16 @@ class IsaacTeleopTeleoperator(Teleoperator):
     # ------------------------------------------------------------------
 
     def _ensure_cloudxr_runtime(self) -> None:
-        """Auto-launch the CloudXR runtime once, unless opted out.
+        """Attach to the CloudXR runtime (starting it when none runs), unless opted out.
 
         Idempotent (no-op once the launcher is up). ``LEROBOT_CLOUDXR_SKIP_AUTOLAUNCH``
         is checked first and wins over ``config.auto_launch_cloudxr``. Constructing
         ``CloudXRLauncher`` mutates the process env (``XR_RUNTIME_JSON`` etc.) and
         blocks until the runtime is ready or raises ``RuntimeError``.
+
+        By default the runtime is the detached host service: it is started when
+        missing and is left running afterwards. ``config.cloudxr_run_embedded``
+        runs it inside this process instead (refused while a service is running).
         """
         if self._cloudxr_launcher is not None:
             return
@@ -255,12 +323,16 @@ class IsaacTeleopTeleoperator(Teleoperator):
 
         env_file = self.config.cloudxr_env_file or default_cloudxr_env_file()
         install_dir = str(Path(self.config.cloudxr_install_dir).expanduser())
+        embedded = bool(getattr(self.config, "cloudxr_run_embedded", False))
+        self._check_cloudxr_eula(install_dir)
         logger.info(
-            "Launching CloudXR runtime (first run may prompt for EULA and take ~30s; "
-            "install_dir=%s, env=%s, profile=%s)...",
+            "CloudXR runtime: %s (install_dir=%s, env=%s, profile=%s). Starting it takes ~30 s; "
+            "a running service keeps its own env/profile (to change them: `%s stop`, then run again).",
+            "embedded in this process" if embedded else "detached service (attach, or start when none runs)",
             install_dir,
             env_file,
             self.config.cloudxr_device_profile,
+            CLOUDXR_SERVICE_CLI,
         )
         factory = self._launcher_factory or CloudXRLauncher
         self._cloudxr_launcher = factory(
@@ -268,25 +340,46 @@ class IsaacTeleopTeleoperator(Teleoperator):
             env_config=env_file,
             device_profile=self.config.cloudxr_device_profile,
             accept_eula=False,
+            run_embedded=embedded,
+        )
+
+    @staticmethod
+    def _check_cloudxr_eula(install_dir: str) -> None:
+        """Fail with instructions instead of letting the launcher prompt on stdin."""
+        marker = cloudxr_eula_marker(install_dir)
+        if marker.is_file():
+            return
+        default_dir = install_dir == str(Path("~/.cloudxr").expanduser())
+        raise RuntimeError(
+            f"The NVIDIA CloudXR EULA has not been accepted on this host ({marker} is missing). "
+            f"Accept it once with: {EULA_ACCEPT_COMMAND}"
+            + ("" if default_dir else f" --cloudxr-install-dir {install_dir}")
+            + f"  (this also starts the CloudXR service; stop it with `{CLOUDXR_SERVICE_CLI} stop`)."
         )
 
     def _stop_cloudxr_runtime(self) -> None:
-        """Stop the auto-launched CloudXR runtime, if any.
+        """Release the launcher; stops the runtime only when it is embedded.
 
-        Clean stop nulls the handle. On ``RuntimeError`` the handle is RETAINED so
-        the launcher's ``atexit`` hook owns the retry.
+        ``CloudXRLauncher.stop()`` is a no-op when attached to the detached
+        service, which outlives this process by design.
         """
         if self._cloudxr_launcher is None:
             return
+        launcher = self._cloudxr_launcher
+        self._cloudxr_launcher = None
+        embedded = bool(getattr(self.config, "cloudxr_run_embedded", False))
         try:
-            self._cloudxr_launcher.stop()
+            launcher.stop()
         except RuntimeError:
-            logger.warning(
-                "CloudXR runtime could not be terminated; handle retained for atexit cleanup"
-            )
+            logger.warning("CloudXR runtime could not be stopped cleanly", exc_info=True)
+            return
+        if embedded:
+            logger.info("Embedded CloudXR runtime stopped")
         else:
-            self._cloudxr_launcher = None
-            logger.info("CloudXR runtime stopped")
+            logger.info(
+                "The CloudXR service keeps running for the next session. Stop it with: %s stop",
+                CLOUDXR_SERVICE_CLI,
+            )
 
     def send_feedback(self, feedback: dict[str, Any]) -> None:
         pass  # Haptic feedback not implemented.

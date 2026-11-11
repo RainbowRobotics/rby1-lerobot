@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""Phase-0 preflight for running Isaac Teleop in-process on the RB-Y1 UPC.
+"""Phase-0 preflight for running Isaac Capture teleop in-process on the RB-Y1 UPC.
 
-Why: the RB-Y1 UPC is a Jetson AGX Orin (JetPack 6.0). ``isaacteleop`` selects
-its experimental CloudXR runtime on Orin (T234) and works around a known
-issue where *creating a Python thread after the CloudXR service started*
-aborts the process (``_PyGILState_NoteThreadState``). ``lerobot-record``
-creates its keyboard-listener thread after ``teleop.connect()`` and the camera
-read threads lazily on the first ``get_observation()``, so we must know which
+Why: the RB-Y1 UPC is a Jetson AGX Orin (JetPack 6.0). With ``isaacteleop``
+1.4 the CloudXR runtime ran inside this process and, on Orin (T234),
+*creating a Python thread after the CloudXR service started* aborted the
+process (``_PyGILState_NoteThreadState``). ``lerobot-record`` creates its
+keyboard-listener thread after ``teleop.connect()`` and the camera read
+threads lazily on the first ``get_observation()``, so we must know which
 orderings survive on this host before choosing ``session_start``.
+
+``isaaccapture`` 1.6 runs the runtime as a detached host service by default,
+which may remove that failure; these stages tell. ``--cloudxr-run-embedded``
+tests the in-process runtime instead (stop a running service first).
+
+isaaccapture >= 1.6 opens a session only once a headset is connected, so
+**every stage waits for the headset**: keep the CloudXR web client connected
+while the stages run (each stage is a new process and a new session).
 
 Every risky stage runs in a **subprocess** (the failure mode is SIGABRT, exit
 code -6), and the parent prints a verdict table:
@@ -21,13 +29,15 @@ code -6), and the parent prints a verdict table:
 
 Usage (on the UPC, inside the lerobot env with the [isaac] extra installed):
 
-    python scripts/isaac_preflight_upc.py                  # all offline stages
+    python scripts/isaac_preflight_upc.py                  # all stages without robot / camera
     python scripts/isaac_preflight_upc.py --robot 192.168.30.1:50051
     python scripts/isaac_preflight_upc.py --camera-serial 4276xxxxx
     python scripts/isaac_preflight_upc.py --record-dryrun  # stage G (needs robot)
     python scripts/isaac_preflight_upc.py --wait-headset 120   # stage S_headset
 
-Accept the CloudXR EULA once beforehand: ``python -m isaacteleop.cloudxr --accept-eula``.
+Accept the CloudXR EULA once beforehand (this starts the detached service):
+``python -m isaaccapture.cloudxr.service start --accept-eula``. The service
+keeps running afterwards; stop it with ``python -m isaaccapture.cloudxr.service stop``.
 """
 
 from __future__ import annotations
@@ -52,13 +62,16 @@ STAGES = {
     "B_thread_after": "a threading.Thread created AFTER the session starts",
     "C_camera_after": "a lerobot camera (lazy read thread) started AFTER the session",
     "E_rby1_after": "rby1_sdk connect + get_state() AFTER the session",
-    "F_stop_then_thread": "thread creation after session exit + launcher.stop()",
+    "F_stop_then_thread": "thread creation after session exit + launcher.stop() (no-op for the detached service)",
     "G_record_dryrun": "real lerobot-record, 1 short episode (needs robot)",
     "S_headset": "wait for the headset; print controller / head / body samples",
     "V_viz": "Televiz XR session: 3 synthetic camera panels for --viz-seconds (needs the headset)",
 }
 CRITICAL = ("S_session", "A_threads_before", "E_rby1_after", "F_stop_then_thread", "G_record_dryrun")
 DEFERRABLE = ("B_thread_after", "C_camera_after")
+
+# Set from --cloudxr-run-embedded in each stage process.
+_RUN_EMBEDDED = False
 
 
 # ---------------------------------------------------------------------------
@@ -78,8 +91,8 @@ def _session_ctx(with_body: bool):
     session is destroyed) ends in Monado IPC errors and a segfault on Orin, which
     would mask the real failure of a stage.
     """
-    from isaacteleop.cloudxr import CloudXRLauncher
-    from isaacteleop.teleop_session_manager import TeleopSession, TeleopSessionConfig
+    from isaaccapture.cloudxr import CloudXRLauncher
+    from isaaccapture.teleop_session_manager import TeleopSession, TeleopSessionConfig
 
     from lerobot_teleoperator_rby1.isaac_teleop.base import default_cloudxr_env_file
     from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import build_pipeline, verify_index_layout
@@ -93,11 +106,14 @@ def _session_ctx(with_body: bool):
                 install_dir=str(Path.home() / ".cloudxr"),
                 env_config=default_cloudxr_env_file(),
                 accept_eula=False,
+                run_embedded=_RUN_EMBEDDED,
             )
         _log(f"index layout check: {verify_index_layout()}")
         pipeline, body_in_graph = build_pipeline(with_body=with_body)
         _log(f"pipeline built (body rebased in-graph: {body_in_graph})")
         session = TeleopSession(TeleopSessionConfig(app_name="rby1_isaac_preflight", pipeline=pipeline))
+        _print_connect_help()
+        _log("waiting for the headset to connect (the session opens only then) …")
         session.__enter__()
         _log("TeleopSession entered")
         yield session, _external_inputs(), body_in_graph
@@ -112,6 +128,15 @@ def _session_ctx(with_body: bool):
                 launcher.stop()
             except Exception as e:  # noqa: BLE001
                 _log(f"launcher stop failed: {e!r}")
+
+
+def _print_connect_help() -> None:
+    try:
+        from lerobot_teleoperator_rby1.isaac_teleop.teleop_rby1_xr import print_xr_connect_help
+
+        print_xr_connect_help()
+    except Exception as e:  # noqa: BLE001
+        _log(f"connection help unavailable: {e!r}")
 
 
 def _external_inputs():
@@ -389,8 +414,10 @@ def stage_V_viz(args) -> dict:
     layers, gimbal placement) with a synthetic frame source; no robot needed.
     Connect the headset when the instructions are printed. Check: three
     coloured panels visible (front centre, left / right), fps ~ display rate,
-    no 'stale' layers. On Jetson Orin keep openxr_composition=False and set the
-    WebXR client codec to H.264.
+    no 'stale' layers. On Jetson Orin keep openxr_composition=False (the native
+    quad path shows a solid colour there, also in isaaccapture 1.6.152) and set
+    the WebXR client codec to H.264. --viz-openxr-composition tests whether a
+    newer runtime has fixed the native path. Frames are uploaded with CuPy.
 
     With --viz-grab (default) a tracking TeleopSession (controllers) is attached
     to the Televiz session and the grab bars above the panels are live: point a
@@ -422,12 +449,15 @@ def stage_V_viz(args) -> dict:
 
     launcher = None
     if os.environ.get("LEROBOT_CLOUDXR_SKIP_AUTOLAUNCH", "") != "1":
-        from isaacteleop.cloudxr import CloudXRLauncher
+        from isaaccapture.cloudxr import CloudXRLauncher
 
         from lerobot_teleoperator_rby1.isaac_teleop.base import default_cloudxr_env_file
 
         _log("launching CloudXR runtime …")
-        launcher = CloudXRLauncher(install_dir=str(Path.home() / ".cloudxr"), env_config=default_cloudxr_env_file(), accept_eula=False)
+        launcher = CloudXRLauncher(
+            install_dir=str(Path.home() / ".cloudxr"), env_config=default_cloudxr_env_file(),
+            accept_eula=False, run_embedded=_RUN_EMBEDDED,
+        )
     panels = CameraPanels(
         [PanelLayout("front", 0.0), PanelLayout("left", -1.1), PanelLayout("right", 1.1)],
         source,
@@ -445,15 +475,15 @@ def stage_V_viz(args) -> dict:
         pipeline = None
         required: list = []
         if args.viz_grab:
-            from isaacteleop.teleop_session_manager import get_required_oxr_extensions_from_pipeline
+            from isaaccapture.teleop_session_manager import get_required_oxr_extensions_from_pipeline
 
             pipeline, _ = build_pipeline(with_body=False)
             required = list(get_required_oxr_extensions_from_pipeline(pipeline))
         _log("creating the Televiz XR session (waits for the headset) …")
         panels.create_session("rby1_isaac_preflight_viz", required, -1)
         if args.viz_grab:
-            from isaacteleop.oxr import OpenXRSessionHandles
-            from isaacteleop.teleop_session_manager import TeleopSession, TeleopSessionConfig
+            from isaaccapture.oxr import OpenXRSessionHandles
+            from isaaccapture.teleop_session_manager import TeleopSession, TeleopSessionConfig
 
             session = TeleopSession(
                 TeleopSessionConfig(
@@ -494,7 +524,7 @@ def stage_V_viz(args) -> dict:
             "renders": panels.render_count,
             "seconds": round(time.monotonic() - t0, 1),
             "lost": panels.lost,
-            "fps": getattr(st, "fps", None) if st is not None else None,
+            "fps": getattr(st, "render_fps", None) if st is not None else None,
             "stale_layers": list(getattr(st, "stale_layers", []) or []) if st is not None else None,
             "controllers_seen": seen_ctrl if session is not None else None,
             "layout": {l.name: (round(l.offset_x, 2), round(l.offset_y, 2), round(l.distance, 2)) for l in panels.layouts_snapshot()},
@@ -530,10 +560,11 @@ def environment_report() -> dict:
         "nv_tegra_release": (_read("/etc/nv_tegra_release") or "").splitlines()[:1],
         "cloudxr_install_dir": str(Path.home() / ".cloudxr"),
         "cloudxr_installed": (Path.home() / ".cloudxr").exists(),
-        "port_48322_free": _port_free(48322),
+        "cloudxr_eula_accepted": (Path.home() / ".cloudxr" / "run" / "eula_accepted").is_file(),
+        "port_48322_free": _port_free(48322),  # False while the CloudXR service is running
         "lerobot-record": shutil.which("lerobot-record"),
     }
-    for mod in ("isaacteleop", "lerobot", "rby1_sdk", "lerobot_teleoperator_rby1", "lerobot_robot_rby1"):
+    for mod in ("isaaccapture", "cupy", "lerobot", "rby1_sdk", "lerobot_teleoperator_rby1", "lerobot_robot_rby1"):
         try:
             m = importlib.import_module(mod)
             rep[mod] = getattr(m, "__version__", "ok")
@@ -642,7 +673,10 @@ def main() -> int:
     p.add_argument("--viz-height", type=int, default=480)
     p.add_argument("--viz-lock", default="gimbal", choices=("gimbal", "head", "world"))
     p.add_argument("--viz-openxr-composition", action="store_true", help="use the runtime compositor (NOT on Jetson Orin)")
+    p.add_argument("--cloudxr-run-embedded", action="store_true", help="run the CloudXR runtime inside each stage process instead of the detached service")
     args = p.parse_args()
+    global _RUN_EMBEDDED
+    _RUN_EMBEDDED = args.cloudxr_run_embedded
 
     if args.stage:
         result = globals()[f"stage_{args.stage}"](args)
@@ -670,6 +704,7 @@ def main() -> int:
         f"--viz-lock={args.viz_lock}",
         *([] if args.viz_grab else ["--no-viz-grab"]),
         *(["--viz-openxr-composition"] if args.viz_openxr_composition else []),
+        *(["--cloudxr-run-embedded"] if args.cloudxr_run_embedded else []),
     ]
     results: dict[str, tuple[str, object]] = {}
     for name in stages:

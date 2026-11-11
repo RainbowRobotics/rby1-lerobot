@@ -56,7 +56,7 @@ class FakeVizSession:
         return (1, 2, 3, 4)
 
     def get_frame_timing_stats(self):
-        return _Obj(fps=72.0, stale_layers=[])
+        return _Obj(render_fps=72.0, stale_layers=[])
 
     def destroy(self):
         # Destroyed on the render thread normally; the connect-time upload check
@@ -65,7 +65,7 @@ class FakeVizSession:
 
 
 class FakeTeleviz:
-    """Minimal stand-in for the `isaacteleop.viz` module."""
+    """Minimal stand-in for the `isaaccapture.viz` module."""
 
     class DisplayMode:
         kXr = 2
@@ -163,6 +163,7 @@ def test_camera_panels_thread_lifecycle_and_submits():
     np.testing.assert_allclose(pl.pose.position, [0.0, 1.6, -1.5], atol=1e-9)
     np.testing.assert_allclose(pl.size_meters, [1.0, 0.75], atol=1e-9)
     assert session.renders > 0
+    assert _wait(lambda: "fps=72" in panels.status())  # FrameTimingStats.render_fps
     assert panels.stop_rendering(timeout=2.0)
     assert not session.destroyed
     assert panels.destroy(timeout=2.0)
@@ -199,46 +200,53 @@ def test_cuda_upload_check_fails_fast(monkeypatch):
     assert panels.session is None and FakeTeleviz.VizSession.last.destroyed
 
 
-def test_driver_device_array_interface(monkeypatch):
-    """DriverDeviceArray against a fake `cuda.bindings.driver` (no GPU needed)."""
+def test_cupy_uploader_reuses_one_buffer_per_resolution(monkeypatch):
+    """`rgb_to_rgba_cuda` against a fake `cupy` backed by NumPy (no GPU needed)."""
     import sys
     import types
 
     from lerobot_teleoperator_rby1.isaac_teleop import viz_panels as vp
 
-    calls = []
+    allocations = []
 
-    class CUresult:
-        CUDA_SUCCESS = 0
+    def empty(shape, dtype):
+        allocations.append(shape)
+        return np.empty(shape, dtype)
 
-    drv = types.SimpleNamespace(
-        CUresult=CUresult,
-        cuInit=lambda f: (0,),
-        cuDeviceGet=lambda i: (0, "dev0"),
-        cuDevicePrimaryCtxRetain=lambda d: (0, "ctx"),
-        cuCtxSetCurrent=lambda c: (0,),
-        cuMemAlloc=lambda n: (calls.append(("alloc", n)) or (0, 0xDEAD0000)),
-        cuMemcpyHtoD=lambda dst, src, n: (calls.append(("copy", n)) or (0,)),
-        cuMemFree=lambda p: (0,),
-    )
-    pkg = types.ModuleType("cuda")
-    bindings = types.ModuleType("cuda.bindings")
-    bindings.driver = drv
-    pkg.bindings = bindings
-    monkeypatch.setitem(sys.modules, "cuda", pkg)
-    monkeypatch.setitem(sys.modules, "cuda.bindings", bindings)
-    monkeypatch.setitem(sys.modules, "cuda.bindings.driver", drv)
-    monkeypatch.setattr(vp.DriverDeviceArray, "_drv", None)
-    monkeypatch.setattr(vp.DriverDeviceArray, "_ctx", None)
-    monkeypatch.setattr(vp, "_driver_buffers", {})
+    fake_cupy = types.SimpleNamespace(empty=empty, asarray=np.asarray, uint8=np.uint8)
+    monkeypatch.setitem(sys.modules, "cupy", fake_cupy)
+    monkeypatch.setattr(vp, "_cupy_buffers", {})
 
-    frame = np.zeros((4, 6, 3), np.uint8)
-    out = vp._upload_cuda_driver(frame)
-    cai = out.__cuda_array_interface__
-    assert cai["shape"] == (4, 6, 4) and cai["typestr"] == "|u1" and cai["data"] == (0xDEAD0000, False)
-    assert calls == [("alloc", 96), ("copy", 96)]
-    vp._upload_cuda_driver(frame)  # buffer reused
-    assert calls[-1] == ("copy", 96) and len([c for c in calls if c[0] == "alloc"]) == 1
+    rgb = np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
+    out = vp.rgb_to_rgba_cuda(rgb)
+    assert out.shape == (2, 3, 4) and out.dtype == np.uint8
+    np.testing.assert_array_equal(out[..., :3], rgb)
+    assert (out[..., 3] == 255).all()
+
+    again = vp.rgb_to_rgba_cuda(rgb[::-1].copy())
+    assert again is out and allocations == [(2, 3, 4)]  # same size: buffer reused
+    np.testing.assert_array_equal(again[..., :3], rgb[::-1])
+
+    rgba = np.full((2, 3, 4), 7, np.uint8)  # handle images already carry alpha
+    np.testing.assert_array_equal(vp.rgb_to_rgba_cuda(rgba), rgba)
+
+    vp.rgb_to_rgba_cuda(np.zeros((4, 4, 3), np.uint8))
+    assert allocations == [(2, 3, 4), (4, 4, 4)]
+
+
+def test_cupy_uploader_error_names_the_fix(monkeypatch):
+    import sys
+    import types
+
+    from lerobot_teleoperator_rby1.isaac_teleop import viz_panels as vp
+
+    def empty(shape, dtype):
+        raise OSError("libcuda.so.1: cannot open shared object file")
+
+    monkeypatch.setitem(sys.modules, "cupy", types.SimpleNamespace(empty=empty, asarray=np.asarray, uint8=np.uint8))
+    monkeypatch.setattr(vp, "_cupy_buffers", {})
+    with pytest.raises(RuntimeError, match="(?s)CuPy.*libcuda"):
+        vp.rgb_to_rgba_cuda(np.zeros((2, 2, 3), np.uint8))
 
 
 def test_xr_panel_pose_gimbal_follows_pitch_but_not_roll():

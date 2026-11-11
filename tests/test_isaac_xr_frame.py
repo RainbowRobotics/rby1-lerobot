@@ -42,6 +42,8 @@ def test_invalid_or_partial_controller_is_dropped():
     assert frame_from_outputs({OUT_CONTROLLER_RIGHT: partial}, want_body=False).right is None
     assert frame_from_outputs({}, want_body=True).body is None
     assert frame_from_outputs({OUT_HEAD: fakes.head(valid=False)}, want_body=False).head is None
+    # isaaccapture 1.6 keeps the last pose (valid, not tracked) after the headset disconnects.
+    assert frame_from_outputs({OUT_HEAD: fakes.head(tracked=False)}, want_body=False).head is None
 
 
 def test_body_python_transform_matches_left_multiply():

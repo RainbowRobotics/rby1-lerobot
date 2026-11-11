@@ -96,8 +96,11 @@ from .xr_frame import (
 
 logger = logging.getLogger(__name__)
 
-CLOUDXR_WEB_CLIENT_URL = "https://nvidia.github.io/IsaacTeleop/client"
+# The CloudXR service serves the web client itself (isaaccapture >= 1.6,
+# host_client); the hosted page is the fallback when that is unreachable.
+CLOUDXR_WEB_CLIENT_URL = "https://nvidia.github.io/IsaacCapture/client/"
 CLOUDXR_WSS_PORT = 48322
+HEADSET_DEVICE_ID = "openxr/headset"
 _XR_CONNECT_REMINDER_S = 15.0
 _SKIP_IFACE_PREFIXES = ("lo", "docker", "br-", "veth", "virbr", "l4tbr")
 
@@ -318,10 +321,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
 
     def _open_session(self) -> None:
         """Launch CloudXR + TeleopSession, wait for the headset, latch the start pose."""
-        if self._viz is not None:
-            # VizSession.create() blocks until the headset connects: show the
-            # connection instructions before that.
-            print_xr_connect_help()
+        # Both VizSession.create() and TeleopSession entry block until the
+        # headset connects: show the connection instructions before that.
+        print_xr_connect_help()
         super().connect()
         try:
             self._external_inputs = build_external_inputs(self.config.base_T_anchor)
@@ -457,7 +459,6 @@ class Rby1XR(IsaacTeleopTeleoperator):
 
     def _wait_for_tracking(self) -> None:
         """Block until a controller is tracked (user-paced; Ctrl-C aborts)."""
-        print_xr_connect_help()
         logger.info("Waiting for the headset controllers to start streaming …")
         t0 = time.monotonic()
         last_reminder = t0
@@ -1103,7 +1104,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             eng("right"),
             ctrl(frame.left),
             eng("left"),
-            "ok" if frame.head is not None else "-",
+            self._headset_status(frame),
             body,
             self._torso_hold_reason if self._clutch.get("torso") is not None else "disabled",
             vx,
@@ -1115,6 +1116,26 @@ class Rby1XR(IsaacTeleopTeleoperator):
             + (f" | wear={self.config.wear_mode}" if self.config.wear_mode != "head" else "")
             + (f" | {self._viz.status()}" if self._viz is not None else ""),
         )
+
+    def _headset_status(self, frame: XRFrame) -> str:
+        """Headset link state for the status line.
+
+        ``TeleopSession.get_device_status`` reports ``unknown`` when the
+        session runs on external OpenXR handles (camera panels) and does not
+        exist on test doubles; head tracking is the fallback then.
+        """
+        tracked = "ok" if frame.head is not None else "-"
+        getter = getattr(self._session, "get_device_status", None)
+        if getter is None:
+            return tracked
+        try:
+            status = getter(HEADSET_DEVICE_ID)
+        except Exception:  # noqa: BLE001 - status is informational only
+            return tracked
+        state = getattr(getattr(status, "status", None), "value", None)
+        if state is None or state == "unknown":
+            return tracked
+        return tracked if state == "connected" else f"{tracked} ({state})"
 
     def _build_action(self) -> dict[str, Any]:
         cfg = self.config
@@ -1247,22 +1268,29 @@ def candidate_ipv4s() -> list[tuple[str, str]]:
     return found
 
 
+def hosted_client_url(host: str, port: int = CLOUDXR_WSS_PORT) -> str:
+    """Web client the CloudXR service hosts, pre-filled with the server address."""
+    return f"https://{host}:{port}/client/?serverIP={host}&port={port}"
+
+
 def print_xr_connect_help() -> None:
     ips = candidate_ipv4s()
     lines = [
         "=" * 76,
         "Connect your XR headset to this host over NVIDIA CloudXR:",
-        f"  1. In the headset browser, open:  {CLOUDXR_WEB_CLIENT_URL}",
-        "  2. Enter this host's IP address:",
+        "  1. In the headset browser, open the client served by this host",
+        "     (accept the self-signed certificate warning):",
     ]
     if ips:
-        lines += [f"        {ip:<15}  ({iface})" for iface, ip in ips]
+        lines += [f"        {hosted_client_url(ip)}   ({iface})" for iface, ip in ips]
         if len(ips) > 1:
             lines.append("     (use the address on the same network as your headset)")
     else:
-        lines.append("        <could not determine — check `hostname -I` / `ip addr`>")
+        lines.append(f"        {hosted_client_url('<host-ip>')}   (check `hostname -I` / `ip addr`)")
     lines += [
-        f"  3. Accept the self-signed cert at https://<that-ip>:{CLOUDXR_WSS_PORT}/ , then Connect.",
+        "  2. Press Connect. This program waits until the headset is connected.",
+        f"  Fallback client: {CLOUDXR_WEB_CLIENT_URL} — enter the host IP there and first accept",
+        f"  the certificate at https://<host-ip>:{CLOUDXR_WSS_PORT}/ .",
         "=" * 76,
     ]
     print("\n".join(lines), flush=True)
