@@ -98,14 +98,19 @@ def build_ee_command(
     null_right: np.ndarray,
     null_left: np.ndarray,
     action_period: float | None = None,
+    weight_right: np.ndarray | None = None,
+    weight_left: np.ndarray | None = None,
 ) -> Any:
     """Cartesian impedance command with separate torso / right-arm / left-arm solvers.
 
     ``action_period`` is the interval (s) at which targets arrive; the solvers
     get ``minimum_time = action_period * ee_min_time_factor``. ``None`` uses
-    ``cfg.ee_action_period``.
+    ``cfg.ee_action_period``. ``weight_right`` / ``weight_left`` replace
+    ``cfg.ee_nullspace_weight`` for one arm (arm posture hints).
     """
     dt = cfg.ee_action_period if action_period is None else action_period
+    w_right = np.asarray(cfg.ee_nullspace_weight if weight_right is None else weight_right, dtype=float)
+    w_left = np.asarray(cfg.ee_nullspace_weight if weight_left is None else weight_left, dtype=float)
     body = rby.BodyComponentBasedCommandBuilder()
 
     if cfg.use_torso:
@@ -136,7 +141,7 @@ def build_ee_command(
             .set_joint_torque_limit(cfg.ee_arm_torque_limit)
             .set_nullspace_joint_target(
                 null_right,
-                np.asarray(cfg.ee_nullspace_weight),
+                w_right,
                 cfg.ee_nullspace_stiffness,
                 cfg.ee_nullspace_damping_ratio,
             )
@@ -161,7 +166,7 @@ def build_ee_command(
             .set_joint_torque_limit(cfg.ee_arm_torque_limit)
             .set_nullspace_joint_target(
                 null_left,
-                np.asarray(cfg.ee_nullspace_weight),
+                w_left,
                 cfg.ee_nullspace_stiffness,
                 cfg.ee_nullspace_damping_ratio,
             )
@@ -292,6 +297,33 @@ def build_body_command(
         sent.update({f"{n}{POS_SUFFIX}": float(v) for n, v in zip(names, position)})
 
     return body, has_command, sent
+
+
+def build_head_command(
+    rby: Any,
+    position: np.ndarray,
+    q_min: np.ndarray,
+    q_max: np.ndarray,
+    velocity_limit: np.ndarray,
+    acceleration_limit: np.ndarray,
+    minimum_time: float,
+    hold_time: float = _CONTROL_HOLD_TIME,
+) -> tuple[Any, np.ndarray]:
+    """Head (pan, tilt) joint-position command, clipped to ``q_min`` / ``q_max``.
+
+    Returns the command builder and the clipped target.
+    """
+    head_q = np.clip(np.asarray(position, dtype=np.float64), q_min, q_max)
+    command = build_limb_command(
+        rby,
+        position=head_q,
+        velocity_limit=velocity_limit,
+        acceleration_limit=acceleration_limit,
+        minimum_time=minimum_time,
+        use_impedance=False,
+        hold_time=hold_time,
+    )
+    return command, head_q
 
 
 def build_mobility_command(

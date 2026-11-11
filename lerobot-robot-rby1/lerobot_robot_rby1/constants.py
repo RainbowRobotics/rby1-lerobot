@@ -26,6 +26,7 @@ JointLimits = dict[str, tuple[float, float]]
 TORSO_DOF = 6
 ARM_DOF = 7
 TOTAL_BODY_DOF = TORSO_DOF + 2 * ARM_DOF  # 20
+HEAD_DOF = 2
 
 # ---------------------------------------------------------------------------
 # Joint names — must match the teleoperator output and the dataset keys.
@@ -35,6 +36,8 @@ TORSO_NAMES: list[str] = [f"torso_{i}" for i in range(TORSO_DOF)]
 RIGHT_ARM_NAMES: list[str] = [f"right_arm_{i}" for i in range(ARM_DOF)]
 LEFT_ARM_NAMES: list[str] = [f"left_arm_{i}" for i in range(ARM_DOF)]
 GRIPPER_NAMES: list[str] = ["right_gripper_0", "left_gripper_0"]
+# Head pan / tilt, commanded and observed when ``use_head`` is set.
+HEAD_NAMES: list[str] = [f"head_{i}" for i in range(HEAD_DOF)]
 
 # LeRobot key convention: joint / gripper positions carry a ".pos" suffix
 # (see lerobot.robots.lekiwi). lerobot-rollout filters the robot features by
@@ -54,6 +57,18 @@ EE_SUFFIXES: list[str] = ["x", "y", "z", "wx", "wy", "wz"]
 TORSO_EE_NAMES: list[str] = [f"torso_ee.{s}" for s in EE_SUFFIXES]
 RIGHT_EE_NAMES: list[str] = [f"right_ee.{s}" for s in EE_SUFFIXES]
 LEFT_EE_NAMES: list[str] = [f"left_ee.{s}" for s in EE_SUFFIXES]
+
+# Arm posture hint keys (``action_mode="ee"``): ``<side>_arm_<i>.null`` for
+# i < POSTURE_HINT_JOINTS (arm_0..arm_3: shoulder and elbow), in radians. A
+# teleoperator that tracks the operator's elbow sends them to steer the arm
+# nullspace; they are recorded only with ``record_posture_hint``.
+NULL_SUFFIX = ".null"
+POSTURE_HINT_JOINTS = 4
+
+# One-shot request for a joint-space return to the ready pose. A value > 0 is
+# the minimum motion time in seconds. Never part of the action features, so
+# it is never recorded.
+RESET_CMD_KEY = "reset.cmd"
 
 # Body joints in command order: torso (6) | right arm (7) | left arm (7).
 ALL_JOINT_NAMES: list[str] = TORSO_NAMES + RIGHT_ARM_NAMES + LEFT_ARM_NAMES

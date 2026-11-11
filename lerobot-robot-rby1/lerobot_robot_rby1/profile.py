@@ -103,6 +103,8 @@ FEATURE_FIELDS = frozenset(
         "use_velocity",
         "use_torque",
         "action_mode",
+        "use_head",
+        "record_posture_hint",
     }
 )
 CAMERA_ERROR_KEYS = frozenset({"width", "height", "rotation"})
@@ -115,6 +117,9 @@ RECORDED_ONLY_FIELDS = frozenset(
         "address",
         "connect_timeout_sec",
         "move_to_ready_on_connect",
+        "forward_robot_logs",
+        "forward_robot_logs_info",
+        "robot_log_stream_rate",
         "model",
         "version",
         "profile_out",
@@ -526,6 +531,19 @@ UPGRADE_NOTES_KEY = "upgrade_notes"
 UPGRADE_ERRORS_KEY = "upgrade_errors"
 
 
+# Fields added after a profile was written, with the value that reproduces the
+# behaviour of the plugin that wrote it (the feature did not exist).
+_ADDED_FIELDS: dict[str, Any] = {
+    "forward_robot_logs": False,
+    "forward_robot_logs_info": False,
+    "robot_log_stream_rate": 10.0,
+    "use_head": False,
+    "record_posture_hint": False,
+    "ee_ready_torso_deg": None,
+    "ee_posture_hint_weight": 4.0,
+}
+
+
 def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
     """Rewrite a format-1 profile's ``robot_config`` with the current field names."""
     old = data.get("robot_config") or {}
@@ -566,7 +584,11 @@ def upgrade_profile(data: dict[str, Any], source: Any = "profile") -> dict[str, 
     version = int(data.get("format_version", 0))
     if version > FORMAT_VERSION:
         raise ValueError(f"{source} uses profile format {version}; this plugin reads {FORMAT_VERSION}.")
-    return _upgrade_v1(data) if version < 2 else data
+    data = _upgrade_v1(data) if version < 2 else data
+    cfg = data.get("robot_config")
+    if cfg and any(name not in cfg for name in _ADDED_FIELDS):
+        data = {**data, "robot_config": {**_ADDED_FIELDS, **cfg}}
+    return data
 
 
 def load_profile(path: str | os.PathLike) -> dict[str, Any]:

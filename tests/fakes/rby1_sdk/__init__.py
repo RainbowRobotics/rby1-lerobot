@@ -476,6 +476,18 @@ class FakeRobot:
         _rec("set_tool_flange_output_voltage", side, voltage)
         return True
 
+    # logs ---------------------------------------------------------------
+    def start_log_stream(self, cb, rate):
+        _rec("start_log_stream", rate)
+        self.log_stream_cb = cb
+
+    def stop_log_stream(self):
+        _rec("stop_log_stream")
+        self.log_stream_cb = None
+
+    def get_fault_log_list(self):
+        return []
+
     # commands / state -------------------------------------------------
     def create_command_stream(self, priority=1):
         return _CommandStream(self, priority)

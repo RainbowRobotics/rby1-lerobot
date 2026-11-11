@@ -10,7 +10,7 @@ Joint layout (Model A and Model M; Model M shown, 26-DOF)::
     torso_0 .. torso_5  torso, 6 DOF        (obs + action with use_torso)
     right_arm_0 .. _6   right arm, 7 DOF    (obs + action)
     left_arm_0 .. _6    left arm, 7 DOF     (obs + action)
-    head_0, head_1      head                (excluded from obs/action)
+    head_0, head_1      head                (obs + action with use_head)
     + two Dynamixel gripper motors (right=0, left=1) on /dev/rby1_gripper
 
 The two arm grippers are exposed as normalised scalars; see
@@ -44,6 +44,7 @@ from lerobot.robots.robot import Robot
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 from . import command_builders as cb
+from . import frame_bus
 from . import model_probe
 from . import profile as rprofile
 from .action_period import ActionPeriodEstimator
@@ -57,11 +58,16 @@ from .config_rby1 import (
 )
 from .constants import (
     BASE_VEL_NAMES,
+    HEAD_NAMES,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
+    NULL_SUFFIX,
     POS_SUFFIX,
+    POSTURE_HINT_JOINTS,
+    RESET_CMD_KEY,
     RIGHT_ARM_NAMES,
     RIGHT_EE_NAMES,
+    TORSO_DOF,
     TORSO_EE_NAMES,
     TORSO_NAMES,
 )
@@ -86,7 +92,9 @@ class Rby1(Robot):
       ``lerobot-rollout`` filters the policy state on.
     * Gripper positions (normalised, 1.0 = open) for each enabled arm:
       ``right_gripper_0.pos`` / ``left_gripper_0.pos``.
-    * Optional ``<joint>.vel`` and ``<joint>.torque`` channels for the 20 body
+    * Head joints ``head_0.pos`` (pan) / ``head_1.pos`` (tilt) when
+      ``use_head`` is set (also part of the action, in either mode).
+    * Optional ``<joint>.vel`` and ``<joint>.torque`` channels for the enabled
       joints when ``use_velocity`` / ``use_torque`` are set.
     * One ``(H, W, 3)`` image per configured camera.
 
@@ -96,7 +104,13 @@ class Rby1(Robot):
     torso when ``use_torso`` is set, then the arms -- plus the enabled grippers.
     In EE mode (``action_mode="ee"``), end-effector poses
     (``<group>_ee.x/y/z/wx/wy/wz``) for each enabled group — including the
-    torso when ``use_torso`` is set — plus the enabled grippers.
+    torso when ``use_torso`` is set — plus the enabled grippers. With
+    ``use_head`` both modes add ``head_0.pos`` / ``head_1.pos``; with
+    ``record_posture_hint`` EE mode adds the ``<side>_arm_0..3.null`` hints.
+
+    Two action keys are accepted without being action features: the posture
+    hints (when not recorded) and ``reset.cmd`` (a value > 0 moves the robot
+    to the ready pose in joint space, taking at least that many seconds).
 
     Example
     -------
@@ -146,6 +160,9 @@ class Rby1(Robot):
         self._last_sent: dict[str, float] | None = None
         self._null_right: np.ndarray = np.deg2rad(config.ee_null_right_arm_deg)
         self._null_left: np.ndarray = np.deg2rad(config.ee_null_left_arm_deg)
+        # Posture hint keys the last action carried; hold() re-sends them.
+        self._held_hints: dict[str, float] = {}
+        self._robot_log_streaming: bool = False
         # Profile: reference loaded from profile_in, and functions that undo
         # session-only core parameter changes on disconnect.
         self._reference_profile: dict[str, Any] | None = None
@@ -195,15 +212,45 @@ class Rby1(Robot):
                 names += RIGHT_EE_NAMES
             if self._config.use_left_arm:
                 names += LEFT_EE_NAMES
-            return {name: float for name in names}
-        # Joint mode: same order as the observation (torso, right arm, left arm).
-        if self._config.use_torso:
-            names += TORSO_NAMES
+            features = {name: float for name in names}
+        else:
+            # Joint mode: same order as the observation (torso, right arm, left arm).
+            if self._config.use_torso:
+                names += TORSO_NAMES
+            if self._config.use_right_arm:
+                names += RIGHT_ARM_NAMES
+            if self._config.use_left_arm:
+                names += LEFT_ARM_NAMES
+            features = {f"{name}{POS_SUFFIX}": float for name in names}
+        # The head is a joint position in both modes.
+        features.update(self._head_ft)
+        features.update(self._hint_ft)
+        return features
+
+    @property
+    def _head_ft(self) -> dict[str, type]:
+        if not self._config.use_head:
+            return {}
+        return {f"{name}{POS_SUFFIX}": float for name in HEAD_NAMES}
+
+    @property
+    def _hint_ft(self) -> dict[str, type]:
+        """Arm posture hint action keys (EE mode with ``record_posture_hint``)."""
+        if self._config.action_mode != "ee" or not self._config.record_posture_hint:
+            return {}
+        return {key: float for side in self._hint_sides() for key in self._hint_keys(side)}
+
+    def _hint_sides(self) -> list[str]:
+        sides = []
         if self._config.use_right_arm:
-            names += RIGHT_ARM_NAMES
+            sides.append("right")
         if self._config.use_left_arm:
-            names += LEFT_ARM_NAMES
-        return {f"{name}{POS_SUFFIX}": float for name in names}
+            sides.append("left")
+        return sides
+
+    @staticmethod
+    def _hint_keys(side: str) -> list[str]:
+        return [f"{side}_arm_{i}{NULL_SUFFIX}" for i in range(POSTURE_HINT_JOINTS)]
 
     @property
     def _obs_joint_names(self) -> list[str]:
@@ -218,6 +265,8 @@ class Rby1(Robot):
             names += RIGHT_ARM_NAMES
         if self._config.use_left_arm:
             names += LEFT_ARM_NAMES
+        if self._config.use_head:
+            names += HEAD_NAMES
         return names
 
     @property
@@ -321,6 +370,11 @@ class Rby1(Robot):
             self._ready_left,
             self._ready_head,
         ) = ready_pose_for_version(self._resolved_version)
+        if self._config.action_mode == "ee" and self._config.ee_ready_torso_deg is not None:
+            torso = np.deg2rad(np.asarray(self._config.ee_ready_torso_deg, dtype=np.float64))
+            self._ready_body = np.concatenate([torso, self._ready_right, self._ready_left])
+            logger.info(f"EE mode: torso ready pose set to {np.rad2deg(torso).round(1).tolist()} deg.")
+        self._warn_ready_torso_outside_ee_limits()
         if self._resolved_model not in ("a", "m"):
             raise RuntimeError(
                 f"RB-Y1 model '{self._resolved_model}' is not supported (only Model A and M)."
@@ -359,7 +413,10 @@ class Rby1(Robot):
                 rby.ControlManagerState.State.MajorFault,
                 rby.ControlManagerState.State.MinorFault,
             ):
-                logger.warning(f"Clearing RB-Y1 control manager fault (state={cm_state.state}) ...")
+                logger.warning(
+                    f"Clearing RB-Y1 control manager fault (state={cm_state.state}) ... "
+                    f"recent faults: {self._fault_log_summary()}"
+                )
                 if not self._robot.reset_fault_control_manager():
                     logger.warning("reset_fault_control_manager() returned False.")
             # EE mode runs the Cartesian impedance solver at teleop speeds and
@@ -371,8 +428,13 @@ class Rby1(Robot):
             if cm_state.state != rby.ControlManagerState.State.Enabled:
                 raise RuntimeError(
                     "RB-Y1 control manager is not Enabled after enable_control_manager() "
-                    f"(state={cm_state.state}); check the robot's fault log."
+                    f"(state={cm_state.state}). Recent faults: {self._fault_log_summary()}"
                 )
+
+            # 3b. Forward the robot's own log stream (control manager / solver
+            #     messages) so the reason for a fault or an ended command shows
+            #     up in this terminal.
+            self._start_robot_log_stream()
 
             # 4. Cache the model (joint index arrays) and the URDF position /
             #    velocity / acceleration limits from the dynamics model.
@@ -468,6 +530,7 @@ class Rby1(Robot):
         self._restore_fns = []
 
         if self._robot is not None:
+            attempt("stop robot log stream", self._stop_robot_log_stream)
             # Cancel the command stream before disabling the control manager;
             # disabling with a live stream leaves the manager in a fault state
             # that the next session then has to clear.
@@ -493,6 +556,7 @@ class Rby1(Robot):
         self._action_start_time = None
         self._last_ee_targets = None
         self._last_sent = None
+        self._held_hints = {}
         self._dyn_robot = None
         self._fk_state = None
         self._resolved_model = None
@@ -688,9 +752,12 @@ class Rby1(Robot):
             if self._config.use_left_arm:
                 obs[f"left_gripper_0{POS_SUFFIX}"] = 1.0 - float(gripper_pos[1])
 
-        # Cameras.
+        # Cameras. Each frame is also published on the in-process frame bus,
+        # which the rby1_isaac teleoperator reads for the headset camera panels.
         for cam_key, cam in self.cameras.items():
-            obs[cam_key] = cam.async_read()
+            frame = cam.async_read()
+            obs[cam_key] = frame
+            frame_bus.bus.publish(cam_key, frame)
 
         return obs
 
@@ -714,6 +781,10 @@ class Rby1(Robot):
             left = values[model.left_arm_idx]
             for i, name in enumerate(LEFT_ARM_NAMES):
                 obs[f"{name}{suffix}"] = float(left[i])
+        if self._config.use_head:
+            head = values[model.head_idx]
+            for i, name in enumerate(HEAD_NAMES):
+                obs[f"{name}{suffix}"] = float(head[i])
 
     def _read_ee_observation(self, obs: dict[str, Any], state: Any) -> None:
         """Add the end-effector pose of each enabled group to ``obs``.
@@ -755,24 +826,45 @@ class Rby1(Robot):
         except ImportError as e:
             raise ImportError("rby1_sdk is required.") from e
 
-        try:
-            sent = self._dispatch_action(rby, action)
-        except RuntimeError as e:
-            if "expired" not in str(e).lower():
-                raise
-            # The stream expires when the command it carries has ended on the
-            # robot, e.g. the base velocity command finished after its short
-            # hold time during a stall in the action stream. Retry once on a
-            # fresh stream; a second failure is fatal.
-            logger.warning(f"Command stream expired ({e}); re-creating it and retrying once.")
-            self._stream = self._robot.create_command_stream(priority=1)
-            self._last_ee_targets = None  # force a reference reset on the retry
-            sent = self._dispatch_action(rby, action)
+        self._held_hints = {}
+        reset_s = action.get(RESET_CMD_KEY)
+        if reset_s is not None and float(reset_s) > 0.0:
+            sent = self._reset_to_ready(float(reset_s))
+        else:
+            try:
+                sent = self._dispatch_action(rby, action)
+            except RuntimeError as e:
+                if "expired" not in str(e).lower():
+                    raise
+                # The stream expires when the command it carries has ended on
+                # the robot, e.g. the base velocity command finished after its
+                # short hold time during a stall in the action stream, or the
+                # Cartesian solver gave up. Retry once on a fresh stream; a
+                # second failure is fatal. A control manager that is no longer
+                # Enabled (fault) rejects every new stream, so stop with the
+                # reason instead of retrying.
+                cm_state = self._report_expired_stream(e)
+                if cm_state is not None and cm_state != rby.ControlManagerState.State.Enabled:
+                    raise RuntimeError(
+                        f"RB-Y1 ended the streamed command (control manager state={cm_state}). "
+                        f"Recent faults: {self._fault_log_summary()}"
+                    ) from e
+                logger.warning("Re-creating the command stream and retrying once.")
+                self._stream = self._robot.create_command_stream(priority=1)
+                self._last_ee_targets = None  # force a reference reset on the retry
+                sent = self._dispatch_action(rby, action)
         sent.update(self._send_gripper_action(action))
         if self._config.use_mobile_base:
-            linear, angular = self._base_velocity_from_action(action)
+            if reset_s is not None and float(reset_s) > 0.0:
+                linear, angular = np.zeros(2), 0.0  # the reset motion does not command the base
+            else:
+                linear, angular = self._base_velocity_from_action(action)
             sent.update({"x.vel": float(linear[0]), "y.vel": float(linear[1]), "theta.vel": angular})
-        self._last_sent = dict(sent)
+        # hold() re-sends the posture hints the action really carried: not the
+        # default nullspace values reported for a missing hint, and also hints
+        # that are not recorded.
+        self._last_sent = {k: v for k, v in sent.items() if not k.endswith(NULL_SUFFIX)}
+        self._last_sent.update(self._held_hints)
         return sent
 
     def hold(self) -> None:
@@ -801,9 +893,28 @@ class Rby1(Robot):
 
     def _dispatch_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
         if self._config.action_mode == "ee":
-            self._send_ee_action(rby, action)
-            return {key: action[key] for key in self._motors_ft}
+            return self._send_ee_action(rby, action)
         return self._send_joint_action(rby, action)
+
+    def _reset_to_ready(self, seconds: float) -> dict[str, float]:
+        """Joint-space return to the ready pose, requested with ``reset.cmd``.
+
+        A blocking joint-position motion of the body and the head, followed by
+        a fresh command stream (the next EE command re-references the solver
+        at the reached pose). Returns the pose reached, keyed like the action.
+        """
+        logger.info(f"Reset requested by the teleoperator: joint-space ready-pose motion ({seconds:.1f} s).")
+        self.move_to_ready_pose(minimum_time=max(seconds, 0.5))
+        state = self._robot.get_state()
+        reached: dict[str, Any] = {}
+        self._read_group(reached, state.position, self._model, POS_SUFFIX)
+        self._read_ee_observation(reached, state)
+        sent = {key: float(reached[key]) for key in self._motors_ft if key in reached}
+        for side, default in (("right", self._null_right), ("left", self._null_left)):
+            for i, key in enumerate(self._hint_keys(side)):
+                if key in self._hint_ft:
+                    sent[key] = float(default[i])
+        return sent
 
     def _send_joint_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
         """Execute a joint-position action (``action_mode="joint"``).
@@ -849,6 +960,7 @@ class Rby1(Robot):
         cbc = rby.ComponentBasedCommandBuilder()
         if has_body:
             cbc.set_body_command(body)
+        sent.update(self._add_head_command(rby, cbc, action, minimum_time))
         if self._config.use_mobile_base:
             # The base does not follow the arm startup ramp: a stop must take
             # effect at once, not after up to joint_startup_min_time.
@@ -858,14 +970,15 @@ class Rby1(Robot):
         )
         return sent
 
-    def _send_ee_action(self, rby: Any, action: dict[str, Any]) -> None:
+    def _send_ee_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
         """Execute an end-effector pose action (``action_mode="ee"``).
 
         Decodes the ``<group>_ee.*`` keys into SE3 targets and sends a
         Cartesian impedance command. When a target jumps further than the
         configured thresholds from the previous one (or this is the first
         command after connect / a ready-pose motion), ``set_reset_reference``
-        re-references the solver to the robot's actual state.
+        re-references the solver to the robot's actual state. Returns the
+        targets applied, keyed like the action features.
         """
         cfg = self._config
         targets = cb.CartesianTargets(
@@ -890,11 +1003,25 @@ class Rby1(Robot):
                 f"EE reference reset (torso={reset.torso}, "
                 f"right={reset.right_arm}, left={reset.left_arm})."
             )
+            self._warn_joint_limit_violations()
 
+        sent: dict[str, float] = {}
+        for key in (*TORSO_EE_NAMES, *RIGHT_EE_NAMES, *LEFT_EE_NAMES):
+            if key in self._motors_ft:
+                sent[key] = action[key]
+        null_right, w_right = self._nullspace_with_hint(action, "right", self._null_right)
+        null_left, w_left = self._nullspace_with_hint(action, "left", self._null_left)
         body = cb.build_ee_command(
-            rby, cfg, targets, reset, self._null_right, self._null_left, period
+            rby, cfg, targets, reset, null_right, null_left, period, w_right, w_left
         )
         cbc = rby.ComponentBasedCommandBuilder().set_body_command(body)
+        sent.update(
+            self._add_head_command(rby, cbc, action, period * cfg.ee_min_time_factor, cfg.ee_hold_time)
+        )
+        for side, null in (("right", null_right), ("left", null_left)):
+            for i, key in enumerate(self._hint_keys(side)):
+                if key in self._hint_ft:
+                    sent[key] = float(null[i])
         if cfg.use_mobile_base:
             cbc.set_mobility_command(
                 self._mobility_command(rby, action, cfg.joint_min_time)
@@ -903,6 +1030,175 @@ class Rby1(Robot):
             rby.RobotCommandBuilder().set_command(cbc)
         )
         self._last_ee_targets = targets
+        return sent
+
+    def _nullspace_with_hint(
+        self, action: dict[str, Any], side: str, default: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        """Nullspace target / weight of one arm, overridden by ``<side>_arm_<i>.null`` keys.
+
+        Returns ``(default, None)`` (the config weights) when the arm is
+        disabled or the action carries no complete hint. Otherwise the hinted
+        joints replace the default target and get ``ee_posture_hint_weight``,
+        while the other joints keep ``ee_nullspace_weight``.
+        """
+        keys = self._hint_keys(side)
+        if side not in self._hint_sides() or not all(k in action for k in keys):
+            return default, None
+        target = np.asarray(default, dtype=np.float64).copy()
+        weight = np.asarray(self._config.ee_nullspace_weight, dtype=np.float64).copy()
+        for i, key in enumerate(keys):
+            target[i] = float(action[key])
+            weight[i] = self._config.ee_posture_hint_weight
+            self._held_hints[key] = float(action[key])
+        return target, weight
+
+    def _add_head_command(
+        self,
+        rby: Any,
+        cbc: Any,
+        action: dict[str, Any],
+        minimum_time: float,
+        hold_time: float | None = None,
+    ) -> dict[str, float]:
+        """Attach a head joint-position command to ``cbc`` when the action has one.
+
+        Returns the head targets applied (clipped to the robot's joint limits).
+        When the action has no head keys the head command is omitted, the head
+        holds its position, and the previous targets (or the measured
+        position) are returned.
+        """
+        if not self._config.use_head:
+            return {}
+        keys = [f"{name}{POS_SUFFIX}" for name in HEAD_NAMES]
+        head_idx = self._model.head_idx
+        if not all(k in action for k in keys):
+            if self._last_sent is not None and all(k in self._last_sent for k in keys):
+                return {k: self._last_sent[k] for k in keys}
+            measured = np.asarray(self._robot.get_state().position, dtype=np.float64)[head_idx]
+            return {k: float(v) for k, v in zip(keys, measured)}
+        kwargs = {} if hold_time is None else {"hold_time": hold_time}
+        command, head_q = cb.build_head_command(
+            rby,
+            [float(action[k]) for k in keys],
+            self._q_lower[head_idx],
+            self._q_upper[head_idx],
+            velocity_limit=self._max_qdot[head_idx],
+            acceleration_limit=(
+                self._max_qddot[head_idx] * self._config.joint_acceleration_limit_scale
+            ),
+            minimum_time=minimum_time,
+            **kwargs,
+        )
+        cbc.set_head_command(command)
+        return {k: float(v) for k, v in zip(keys, head_q)}
+
+    def _ee_solver_joint_limits(self) -> list[tuple[str, dict[str, tuple[float, float]]]]:
+        cfg = self._config
+        return [
+            ("ee_torso", cfg.ee_torso_joint_limits if cfg.use_torso else {}),
+            ("ee_right_arm", cfg.ee_right_arm_joint_limits if cfg.use_right_arm else {}),
+            ("ee_left_arm", cfg.ee_left_arm_joint_limits if cfg.use_left_arm else {}),
+        ]
+
+    def _warn_joint_limit_violations(self) -> None:
+        """Warn when the measured joints lie outside the EE solver joint limits.
+
+        ``add_joint_limit`` is a hard constraint of the Cartesian solver; a
+        start configuration outside it makes the solve infeasible (the
+        component then holds or is pulled into the bound), which shows up as
+        "the torso/arm does not follow". Checked on every reference reset.
+        """
+        try:
+            q = np.asarray(self._robot.get_state().position, dtype=np.float64)
+        except Exception:  # noqa: BLE001
+            return
+        names = TORSO_NAMES + RIGHT_ARM_NAMES + LEFT_ARM_NAMES
+        idx = [*self._model.torso_idx, *self._model.right_arm_idx, *self._model.left_arm_idx]
+        q_by_name = {n: float(q[i]) for n, i in zip(names, idx)}
+        for solver, limits in self._ee_solver_joint_limits():
+            for joint, (lo, hi) in limits.items():
+                val = q_by_name.get(joint)
+                if val is not None and not (lo <= val <= hi):
+                    logger.warning(
+                        f"[EE] {joint}={val:.3f} rad is outside the solver joint limit "
+                        f"[{lo:.3f}, {hi:.3f}] at the reference reset; the solver may refuse "
+                        f"to move this group. Adjust the ready pose or `{solver}_joint_limits`."
+                    )
+
+    def _warn_ready_torso_outside_ee_limits(self) -> None:
+        """Warn at connect when the ready torso violates ``ee_torso_joint_limits``."""
+        cfg = self._config
+        if cfg.action_mode != "ee" or not cfg.use_torso:
+            return
+        torso = self._ready_body[:TORSO_DOF]
+        outside = [
+            f"{joint}={float(torso[TORSO_NAMES.index(joint)]):.2f} rad not in [{lo:.2f}, {hi:.2f}]"
+            for joint, (lo, hi) in cfg.ee_torso_joint_limits.items()
+            if joint in TORSO_NAMES and not lo <= float(torso[TORSO_NAMES.index(joint)]) <= hi
+        ]
+        if outside:
+            logger.warning(
+                "EE mode with use_torso: the ready torso pose is outside ee_torso_joint_limits "
+                f"({'; '.join(outside)}), so the torso solver starts from an infeasible "
+                "configuration and may not follow. Use a ready torso inside the limits, e.g. "
+                "--robot.ee_ready_torso_deg='[0,45,-90,45,0,0]'."
+            )
+
+    # ------------------------------------------------------------------ #
+    #  Robot-side diagnostics                                              #
+    # ------------------------------------------------------------------ #
+
+    def _start_robot_log_stream(self) -> None:
+        if not self._config.forward_robot_logs or self._robot_log_streaming:
+            return
+
+        def _on_logs(logs: Any) -> None:
+            try:
+                for entry in logs:
+                    level = str(getattr(entry, "level", "")).split(".")[-1].lower()
+                    msg = getattr(entry, "message", None)
+                    if msg is None:
+                        msg = str(entry)
+                    if level in ("error", "critical"):
+                        logger.error(f"[robot] {msg}")
+                    elif level in ("warn", "warning"):
+                        logger.warning(f"[robot] {msg}")
+                    elif self._config.forward_robot_logs_info:
+                        logger.info(f"[robot] {msg}")
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            self._robot.start_log_stream(_on_logs, self._config.robot_log_stream_rate)
+            self._robot_log_streaming = True
+            logger.info("Robot log stream forwarded to this logger (warnings and errors).")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not start the robot log stream: {e}")
+
+    def _stop_robot_log_stream(self) -> None:
+        streaming, self._robot_log_streaming = self._robot_log_streaming, False
+        if streaming and self._robot is not None:
+            self._robot.stop_log_stream()
+
+    def _fault_log_summary(self, limit: int = 3) -> str:
+        try:
+            items = list(self._robot.get_fault_log_list())[-limit:]
+        except Exception as e:  # noqa: BLE001
+            return f"<unavailable: {e.__class__.__name__}>"
+        return "; ".join(str(x) for x in items) if items else "<none>"
+
+    def _report_expired_stream(self, err: Exception) -> Any:
+        """Log why the robot ended the streamed command; return the control manager state (or None)."""
+        state = None
+        try:
+            st = self._robot.get_control_manager_state()
+            state = st.state
+            cm = f"state={st.state} control_state={getattr(st, 'control_state', '?')}"
+        except Exception as e:  # noqa: BLE001
+            cm = f"<unavailable: {e.__class__.__name__}>"
+        logger.warning(f"Command stream expired ({err}). Control manager: {cm}.")
+        return state
 
     def _detect_ee_reset(self, targets: cb.CartesianTargets) -> cb.ResetFlags:
         """Flag components whose target jumped since the last command."""

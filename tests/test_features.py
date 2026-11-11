@@ -25,6 +25,8 @@ CONFIGS: dict[str, dict] = {
     "right_arm_only": {"use_left_arm": False},
     "no_gripper": {"use_gripper": False},
     "ee": {"action_mode": "ee", "use_torso": True},
+    "head": {"use_head": True},
+    "ee_head_hint": {"action_mode": "ee", "use_torso": True, "use_head": True, "record_posture_hint": True},
 }
 
 

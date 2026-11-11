@@ -98,6 +98,14 @@ class Rby1Config(RobotConfig):
     # when the robot is already in a safe position).
     move_to_ready_on_connect: bool = True
 
+    # Forward the robot's own log stream (control manager / solver messages)
+    # to this process' logger, so the reason for a fault or an ended command
+    # shows up in the terminal. Warnings and errors only, unless
+    # forward_robot_logs_info is set. robot_log_stream_rate is in Hz.
+    forward_robot_logs: bool = True
+    forward_robot_logs_info: bool = False
+    robot_log_stream_rate: float = 10.0
+
     # ════════════════════════════════════════════════════════════════════
     # Features — what the observation and the action contain
     # ════════════════════════════════════════════════════════════════════
@@ -118,6 +126,17 @@ class Rby1Config(RobotConfig):
     use_torso: bool = False
     use_right_arm: bool = True
     use_left_arm: bool = True
+
+    # Include the head (head_0 = pan, head_1 = tilt, radians) in the
+    # observation and the action. The head is a joint position command in both
+    # action modes. When False the head is not commanded and holds its position.
+    use_head: bool = False
+
+    # EE mode only: add the arm posture hint keys (<side>_arm_0..3.null, rad)
+    # to the action features so they are recorded. A teleoperator may send the
+    # hints either way (see ee_posture_hint_weight); a policy trained on such
+    # a dataset then outputs them too.
+    record_posture_hint: bool = False
 
     # Enable physical Dynamixel gripper (set False for simulation / gripper-less setups)
     use_gripper: bool = True
@@ -234,6 +253,14 @@ class Rby1Config(RobotConfig):
     ee_reset_position_threshold: float = 0.1   # metres
     ee_reset_rotation_threshold: float = 0.5   # radians
 
+    # Torso ready pose (degrees, torso_0..5) used in EE mode instead of the
+    # default ready torso. The default (torso_2 = 0) lies outside
+    # ee_torso_joint_limits (torso_2 <= -0.2 rad), so with use_torso=True the
+    # torso solver starts from an infeasible configuration; a crouched pose
+    # such as [0, 45, -90, 45, 0, 0] keeps the torso inside the limits.
+    # None keeps the default ready torso.
+    ee_ready_torso_deg: List[float] | None = None
+
     # ── Torso solver ───────────────────────────────────────────────────
     ee_torso_stiffness: List[float] = field(default_factory=lambda: [1700.0] * 6)
     ee_torso_torque_limit: List[float] = field(default_factory=lambda: [600.0] * 6)
@@ -275,6 +302,10 @@ class Rby1Config(RobotConfig):
     )
     ee_nullspace_stiffness: float = 0.2
     ee_nullspace_damping_ratio: float = 1.0
+    # Nullspace weight of the joints an arm posture hint (<side>_arm_0..3.null
+    # action keys) sets, used in place of ee_nullspace_weight for those joints
+    # while a hint is present.
+    ee_posture_hint_weight: float = 4.0
 
     # ════════════════════════════════════════════════════════════════════
     # Mobile base (use_mobile_base=True) — SE2Velocity
@@ -337,7 +368,8 @@ class Rby1Config(RobotConfig):
             "ee_arm_damping_ratio", "ee_nullspace_damping_ratio",
             "joint_position_cutoff_frequency", "ee_action_period", "ee_hold_time",
             "mobile_base_hold_time", "mobile_base_max_linear_velocity",
-            "mobile_base_max_angular_velocity",
+            "mobile_base_max_angular_velocity", "ee_posture_hint_weight",
+            "robot_log_stream_rate",
         ):
             if not getattr(self, name) > 0:
                 raise ValueError(f"Rby1Config.{name} must be > 0, got {getattr(self, name)}.")
@@ -353,7 +385,10 @@ class Rby1Config(RobotConfig):
             ("ee_null_right_arm_deg", ARM_DOF),
             ("ee_null_left_arm_deg", ARM_DOF),
             ("ee_nullspace_weight", ARM_DOF),
+            ("ee_ready_torso_deg", TORSO_DOF),
         ):
+            if getattr(self, name) is None:
+                continue
             if len(getattr(self, name)) != expected:
                 raise ValueError(
                     f"Rby1Config.{name} must have length {expected}, got {len(getattr(self, name))}."
