@@ -153,6 +153,15 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
     # to reach the ready pose before returning from connect().
     startup_wait_time: float = 5.0
 
+    # ── Shutdown ──────────────────────────────────────────────────────
+    # On disconnect() the leader arm first moves to its zero position (all
+    # joints 0 deg: the arms hang down), with a peak joint speed of
+    # `return_speed_deg_s`, and the control loop stops after that. The robot
+    # does not follow this motion: no action is read during it. False stops
+    # the control loop where the arm is.
+    return_to_zero_on_disconnect: bool = True
+    return_speed_deg_s: float = 30.0
+
     # Record this teleoperator's config in the robot profile file (use the
     # same path as --robot.profile_out, e.g. <dataset_root>/meta/rby1_profile.json).
     # It is stored under "teleop" for reproducibility and never compared.
@@ -195,6 +204,8 @@ class Rby1LeaderArmConfig(TeleoperatorConfig):
             raise ValueError("init_duration must be >= 0")
         if self.resync_speed_deg_s <= 0:
             raise ValueError("resync_speed_deg_s must be > 0")
+        if self.return_speed_deg_s <= 0:
+            raise ValueError("return_speed_deg_s must be > 0")
         if self.connect_timeout_sec <= 0:
             raise ValueError("connect_timeout_sec must be > 0")
 

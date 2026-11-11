@@ -142,3 +142,81 @@ def test_button_press_does_not_step_the_output() -> None:
     q[3] = 1.3  # caught up: the output follows the arm directly
     assert tick(1)[3] == 1.3
     assert tick(0)[3] == 1.3 and not loop.right_state.resync
+
+
+def test_return_moves_the_arm_to_the_zero_position_without_a_step() -> None:
+    """After request_return the arm goes from where it is to the zero position,
+    the buttons are ignored and the teleoperator output stays where it was."""
+    import time
+    from types import SimpleNamespace
+    from threading import Lock
+    from lerobot_teleoperator_rby1.leader_arm_controller import LeaderArmControlLoop
+
+    teleop = SimpleNamespace(_lock=Lock(), _right_q=None, _left_q=None, _init_done=False,
+                             _right_trigger=0.0, _left_trigger=0.0)
+    speed = 2.0  # rad/s
+    init = np.full(7, 0.2)
+    loop = LeaderArmControlLoop(
+        teleop=teleop, rby=rby, right_init_q=init, left_init_q=init,
+        min_q=np.full(14, -3.0), max_q=np.full(14, 3.0), torque_limit=np.ones(14),
+        viscous_gain=np.zeros(14), barrier=0.0, gravity_scale=1.0, init_duration=0.0,
+        resync_speed=1.0, return_speed=speed,
+    )
+    q = np.full(14, 0.2)
+    q[3] = 0.8  # right arm, moved with the button pressed
+
+    def tick(button: int):
+        state = rby.upc.LeaderArm.State(q)
+        state.button_right.button = button
+        return loop(state)
+
+    tick(1)
+    tick(1)
+    assert teleop._right_q[3] == 0.8
+    loop.request_return()
+    targets, times = [], []
+    while not loop.return_done.is_set():
+        assert len(targets) < 1000
+        cmd = tick(1)  # still pressed: ignored
+        assert (cmd.target_operating_mode == rby.DynamixelBus.CurrentBasedPositionControlMode).all()
+        targets.append(cmd.target_position.copy())
+        times.append(time.time())
+        q[:] = cmd.target_position  # the arm follows its target
+        time.sleep(0.005)
+    targets = np.array(targets)
+    assert abs(targets[0][3] - 0.8) < 0.01  # starts where the arm is
+    np.testing.assert_allclose(targets[-1], 0.0)
+    assert np.all(np.diff(targets[:, 3]) <= 1e-12)  # monotonic
+    rate = np.abs(np.diff(targets[:, 3]) / np.diff(times))
+    assert rate.max() < 1.3 * speed  # peak speed (timing jitter allowed)
+    assert 0.6 < loop.return_duration < 0.65  # pi/2 * 0.8 rad / 2 rad/s
+    assert teleop._right_q[3] == 0.8  # output frozen: the robot does not follow
+
+
+def test_disconnect_returns_to_the_zero_position_then_stops(caplog) -> None:
+    leader = Rby1LeaderArm(Rby1LeaderArmConfig(**FAST, return_speed_deg_s=300.0))
+    leader.connect()
+    arm, loop = leader._leader_arm, leader._control_loop
+    assert np.abs(arm._q).max() > 0.5  # at the init pose
+    with caplog.at_level(logging.INFO):
+        leader.disconnect()
+    assert loop.return_done.is_set() and "returning to its zero position" in caplog.text
+    np.testing.assert_allclose(arm._q, 0.0, atol=1e-9)
+    assert arm._stop.is_set() and not leader.is_connected
+
+
+def test_disconnect_without_return_stops_where_the_arm_is() -> None:
+    leader = Rby1LeaderArm(Rby1LeaderArmConfig(**FAST, return_to_zero_on_disconnect=False))
+    leader.connect()
+    arm, loop = leader._leader_arm, leader._control_loop
+    leader.disconnect()
+    assert arm._stop.is_set() and not loop.return_requested.is_set()
+
+
+def test_disconnect_stops_when_the_control_loop_is_dead(caplog) -> None:
+    leader = Rby1LeaderArm(Rby1LeaderArmConfig(**FAST))
+    leader.connect()
+    leader._leader_arm.stop_control()
+    with caplog.at_level(logging.WARNING):
+        leader.disconnect()
+    assert "control loop is not running" in caplog.text and not leader.is_connected

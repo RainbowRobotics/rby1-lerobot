@@ -65,6 +65,10 @@ _HOME_SDK_URDF_PATH = "~/rby1-sdk/models/leader_arm/model.urdf"
 # Settle time after switching the 12V rail on, before the Dynamixel bus is
 # probed. Mirrors the capacitor-stabilisation sleep in Rby1.connect().
 _POWER_SETTLE_TIME = 0.1
+# Return to the zero position at disconnect: how long to wait for the control
+# loop to start the motion, and extra time on top of its planned duration.
+_RETURN_START_TIMEOUT = 1.0
+_RETURN_MARGIN = 2.0
 
 
 class Rby1LeaderArm(Teleoperator):
@@ -184,6 +188,7 @@ class Rby1LeaderArm(Teleoperator):
             gravity_scale=cfg.gravity_comp_scale,
             init_duration=cfg.init_duration,
             resync_speed=np.deg2rad(cfg.resync_speed_deg_s),
+            return_speed=np.deg2rad(cfg.return_speed_deg_s),
         )
         self._leader_arm.start_control(self._control_loop)
 
@@ -209,6 +214,8 @@ class Rby1LeaderArm(Teleoperator):
         if not self._is_connected:
             return
         if self._leader_arm is not None:
+            if self._config.return_to_zero_on_disconnect and self._control_loop is not None:
+                self._return_to_zero(self._control_loop)
             try:
                 self._leader_arm.stop_control()
             except Exception as exc:  # noqa: BLE001
@@ -218,6 +225,32 @@ class Rby1LeaderArm(Teleoperator):
         self._limits = None
         self._is_connected = False
         logger.info(f"{self} disconnected.")
+
+    @staticmethod
+    def _return_to_zero(loop: LeaderArmControlLoop) -> None:
+        """Bring the leader arm to its init pose and wait until it is there.
+
+        Never raises: the caller stops the control loop afterwards in any
+        case. Ctrl+C during the motion skips the rest of it.
+        """
+        try:
+            loop.request_return()
+            if not loop.return_started.wait(timeout=_RETURN_START_TIMEOUT):
+                logger.warning(
+                    "The leader-arm control loop is not running; the arm does not "
+                    "return to its zero position."
+                )
+                return
+            logger.info(
+                f"Leader arm returning to its zero position ({loop.return_duration:.1f} s; "
+                "Ctrl+C stops it where it is) ..."
+            )
+            if not loop.return_done.wait(timeout=loop.return_duration + _RETURN_MARGIN):
+                logger.warning("The leader arm did not reach its init pose in time.")
+        except KeyboardInterrupt:
+            logger.warning("Leader-arm return to the zero position interrupted.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Leader-arm return to the zero position failed: {exc}")
 
     # ------------------------------------------------------------------ #
     # Calibration / Configuration
