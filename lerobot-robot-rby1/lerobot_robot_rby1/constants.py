@@ -58,6 +58,15 @@ LEFT_EE_NAMES: list[str] = [f"left_ee.{s}" for s in EE_SUFFIXES]
 # Body joints in command order: torso (6) | right arm (7) | left arm (7).
 ALL_JOINT_NAMES: list[str] = TORSO_NAMES + RIGHT_ARM_NAMES + LEFT_ARM_NAMES
 
+# Whole-body action keys (``action_mode="wholebody"``), on top of the three
+# EE poses: per-tick arm nullspace joint targets (radians) — the teleoperator's
+# IK solution, which sets the elbow (swivel) — and the head joint positions.
+NULL_SUFFIX = ".null"
+RIGHT_NULL_NAMES: list[str] = [f"{n}{NULL_SUFFIX}" for n in RIGHT_ARM_NAMES]
+LEFT_NULL_NAMES: list[str] = [f"{n}{NULL_SUFFIX}" for n in LEFT_ARM_NAMES]
+HEAD_DOF = 2
+HEAD_NAMES: list[str] = [f"head_{i}" for i in range(HEAD_DOF)]
+
 # ---------------------------------------------------------------------------
 # EE action mode defaults (Cartesian impedance).
 # ---------------------------------------------------------------------------
@@ -82,6 +91,23 @@ DEFAULT_LEFT_ARM_JOINT_LIMITS: JointLimits  = {"left_arm_3":  (-2.6, -0.5)}
 _PI = math.pi
 TORSO_TARGET_GAINS = (1.0, _PI * 0.5, 20.0, _PI * 40.0)
 ARM_TARGET_GAINS   = (3.0, _PI * 2.0, 150.0, _PI * 80.0)
+
+# ---------------------------------------------------------------------------
+# Whole-body action mode defaults (one Cartesian impedance solver for torso +
+# both arms). Values from the semi-humanoid CES teleoperation (rby1_ces_elbow).
+# ---------------------------------------------------------------------------
+
+WB_STIFFNESS = [400.0] * TORSO_DOF + [60.0] * ARM_DOF + [60.0] * ARM_DOF
+WB_TORQUE_LIMIT = [500.0] * TORSO_DOF + [30.0] * ARM_DOF + [30.0] * ARM_DOF
+WB_TORSO_TARGET_GAINS = (1.0, _PI * 0.5, 10.0, _PI * 20.0)
+WB_ARM_TARGET_GAINS = (2.0, _PI * 2.0, 20.0, _PI * 80.0)
+# torso_2 stops short of the straight-knee singularity (vendor example value).
+WB_JOINT_LIMITS: JointLimits = {
+    "torso_1": (math.radians(-30.0), math.radians(90.0)),
+    "torso_2": (math.radians(-150.0), -0.2),
+}
+# Arm nullspace weight: shoulder (swivel) and elbow strong, wrist weak.
+WB_NULLSPACE_WEIGHT = [2.0, 2.0, 2.0, 2.0, 0.5, 0.5, 0.5]
 
 # ---------------------------------------------------------------------------
 # Dynamixel gripper bus (two motors on /dev/rby1_gripper).

@@ -8,6 +8,7 @@ Section               Controller (rby1-sdk command)          Active when
 Joint mode            JointPosition / JointImpedance         ``action_mode="joint"``
 Joint impedance       JointImpedance                         ``use_joint_impedance=True``
 EE mode               CartesianImpedance (per group solver)  ``action_mode="ee"``
+Whole-body mode       CartesianImpedance (one body solver)   ``action_mode="wholebody"``
 Mobile base           SE2Velocity                            ``use_mobile_base=True``
 ====================  =====================================  ==========================
 
@@ -39,6 +40,14 @@ from .constants import (  # noqa: F401  (ready poses are re-exported for callers
     READY_TORSO,
     TORSO_DOF,
     TORSO_TARGET_GAINS,
+    TOTAL_BODY_DOF,
+    WB_ARM_TARGET_GAINS,
+    WB_JOINT_LIMITS,
+    WB_NULLSPACE_WEIGHT,
+    WB_STIFFNESS,
+    WB_TORQUE_LIMIT,
+    WB_TORSO_TARGET_GAINS,
+    HEAD_DOF,
     JointLimits,
     ready_pose_for_version,
 )
@@ -98,6 +107,13 @@ class Rby1Config(RobotConfig):
     # when the robot is already in a safe position).
     move_to_ready_on_connect: bool = True
 
+    # Override the version's ready pose (degrees): 20 body joints [torso 6 |
+    # right arm 7 | left arm 7] and 2 head joints. None keeps the default.
+    # The whole-body VR teleoperator is tuned for its own ready pose, e.g.
+    #   torso [0, 45, -80, 45, 0, 0], arms [0, ∓15, 0, -120, 0, 30, 0], head [0, 30].
+    ready_body_deg: List[float] | None = None
+    ready_head_deg: List[float] | None = None
+
     # ════════════════════════════════════════════════════════════════════
     # Features — what the observation and the action contain
     # ════════════════════════════════════════════════════════════════════
@@ -109,7 +125,17 @@ class Rby1Config(RobotConfig):
     #          a rotation vector in radians), executed via the onboard
     #          Cartesian impedance solver. Produced e.g. by the rby1_vr
     #          teleoperator.
+    # "wholebody": the three EE poses plus per-tick arm nullspace joint
+    #          targets (<arm>_<i>.null, radians) and, with use_head, the head
+    #          joints (head_0/1.pos), executed by ONE Cartesian impedance
+    #          solver over torso + both arms. Requires use_torso,
+    #          use_right_arm and use_left_arm. Produced by the
+    #          rby1_vr_wholebody teleoperator.
     action_mode: str = "joint"
+
+    # Whole-body mode only: include the head joints (head_0.pos, head_1.pos)
+    # in the observation and the action.
+    use_head: bool = False
 
     # Joint groups included in the observation and the action. A disabled
     # group is not commanded and holds its position. With use_torso=True the
@@ -277,6 +303,28 @@ class Rby1Config(RobotConfig):
     ee_nullspace_damping_ratio: float = 1.0
 
     # ════════════════════════════════════════════════════════════════════
+    # Whole-body mode (action_mode="wholebody") — CartesianImpedance over
+    # torso + both arms in one solver. minimum_time, the action period and
+    # the reference-reset thresholds are shared with EE mode (ee_* above).
+    # ════════════════════════════════════════════════════════════════════
+
+    # Joint stiffness / torque limit for the 20 body joints [torso | right | left].
+    wb_stiffness: List[float] = field(default_factory=lambda: list(WB_STIFFNESS))
+    wb_torque_limit: List[float] = field(default_factory=lambda: list(WB_TORQUE_LIMIT))
+    # None leaves the controller default.
+    wb_damping_ratio: float | None = None
+    wb_joint_limits: JointLimits = field(default_factory=lambda: dict(WB_JOINT_LIMITS))
+    wb_torso_target_gains: Tuple[float, float, float, float] = WB_TORSO_TARGET_GAINS
+    wb_arm_target_gains: Tuple[float, float, float, float] = WB_ARM_TARGET_GAINS
+    # Weight of the per-arm nullspace joint targets from the action (the torso
+    # gets weight 0). Stiffness / damping are the SDK's k_p / k_d.
+    wb_nullspace_weight: List[float] = field(default_factory=lambda: list(WB_NULLSPACE_WEIGHT))
+    wb_nullspace_stiffness: float = 0.2
+    wb_nullspace_damping: float = 0.2
+    # Body and head commands keep holding for this long (s) if the stream stalls.
+    wb_hold_time: float = 0.5
+
+    # ════════════════════════════════════════════════════════════════════
     # Mobile base (use_mobile_base=True) — SE2Velocity
     # ════════════════════════════════════════════════════════════════════
 
@@ -288,6 +336,9 @@ class Rby1Config(RobotConfig):
     # speed, rad/s for yaw). The defaults are the rby1_vr joystick maximum.
     mobile_base_max_linear_velocity: float = 0.6
     mobile_base_max_angular_velocity: float = 1.4
+    # Optional SE2 acceleration limits (m/s^2, rad/s^2); None = controller default.
+    mobile_base_linear_acceleration_limit: float | None = None
+    mobile_base_angular_acceleration_limit: float | None = None
 
     # ════════════════════════════════════════════════════════════════════
     # Robot profile (dataset <-> inference consistency)
@@ -313,10 +364,29 @@ class Rby1Config(RobotConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.action_mode not in ("joint", "ee"):
+        if self.action_mode not in ("joint", "ee", "wholebody"):
             raise ValueError(
-                f'Rby1Config.action_mode must be "joint" or "ee", got "{self.action_mode}".'
+                'Rby1Config.action_mode must be "joint", "ee" or "wholebody", '
+                f'got "{self.action_mode}".'
             )
+        if self.action_mode == "wholebody" and not (
+            self.use_torso and self.use_right_arm and self.use_left_arm
+        ):
+            raise ValueError(
+                'Rby1Config.action_mode="wholebody" commands torso and both arms together: '
+                "set use_torso=True, use_right_arm=True and use_left_arm=True."
+            )
+        if self.use_head and self.action_mode != "wholebody":
+            raise ValueError('Rby1Config.use_head is only supported with action_mode="wholebody".')
+        for name in ("mobile_base_linear_acceleration_limit", "mobile_base_angular_acceleration_limit",
+                     "wb_damping_ratio"):
+            value = getattr(self, name)
+            if value is not None and not value > 0:
+                raise ValueError(f"Rby1Config.{name} must be > 0 or None, got {value}.")
+        for name, expected in (("ready_body_deg", TOTAL_BODY_DOF), ("ready_head_deg", HEAD_DOF)):
+            value = getattr(self, name)
+            if value is not None and len(value) != expected:
+                raise ValueError(f"Rby1Config.{name} must have length {expected}, got {len(value)}.")
         if self.profile_mode not in ("check", "apply", "off"):
             raise ValueError(
                 f'Rby1Config.profile_mode must be "check", "apply" or "off", got "{self.profile_mode}".'
@@ -337,7 +407,8 @@ class Rby1Config(RobotConfig):
             "ee_arm_damping_ratio", "ee_nullspace_damping_ratio",
             "joint_position_cutoff_frequency", "ee_action_period", "ee_hold_time",
             "mobile_base_hold_time", "mobile_base_max_linear_velocity",
-            "mobile_base_max_angular_velocity",
+            "mobile_base_max_angular_velocity", "wb_hold_time", "wb_nullspace_stiffness",
+            "wb_nullspace_damping",
         ):
             if not getattr(self, name) > 0:
                 raise ValueError(f"Rby1Config.{name} must be > 0, got {getattr(self, name)}.")
@@ -353,6 +424,9 @@ class Rby1Config(RobotConfig):
             ("ee_null_right_arm_deg", ARM_DOF),
             ("ee_null_left_arm_deg", ARM_DOF),
             ("ee_nullspace_weight", ARM_DOF),
+            ("wb_stiffness", TOTAL_BODY_DOF),
+            ("wb_torque_limit", TOTAL_BODY_DOF),
+            ("wb_nullspace_weight", ARM_DOF),
         ):
             if len(getattr(self, name)) != expected:
                 raise ValueError(

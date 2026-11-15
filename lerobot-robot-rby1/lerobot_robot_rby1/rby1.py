@@ -28,6 +28,12 @@ the enabled arms, executed as joint position / impedance commands.
 vector in radians — the LeRobot EE convention) executed via the onboard
 Cartesian impedance solver.  This is the mode produced by the
 ``rby1_vr`` teleoperator.
+
+``action_mode="wholebody"``: the three EE poses plus per-tick arm nullspace
+joint targets (``<arm>_<i>.null``) and, with ``use_head``, the head joints
+(``head_0/1.pos``), executed by a single Cartesian impedance solver over the
+torso and both arms. This is the mode produced by the ``rby1_vr_wholebody``
+teleoperator (Meta Quest body + hand tracking).
 """
 
 from __future__ import annotations
@@ -57,14 +63,20 @@ from .config_rby1 import (
 )
 from .constants import (
     BASE_VEL_NAMES,
+    HEAD_NAMES,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
+    LEFT_NULL_NAMES,
     POS_SUFFIX,
     RIGHT_ARM_NAMES,
     RIGHT_EE_NAMES,
+    RIGHT_NULL_NAMES,
     TORSO_EE_NAMES,
     TORSO_NAMES,
 )
+
+# Action modes driven by the Cartesian impedance solver (EE observations, FK).
+_CARTESIAN_MODES = ("ee", "wholebody")
 from .gripper import Rby1Gripper
 
 logger = logging.getLogger(__name__)
@@ -186,6 +198,12 @@ class Rby1(Robot):
     @property
     def _motors_ft(self) -> dict[str, type]:
         names: list[str] = []
+        if self._config.action_mode == "wholebody":
+            # Torso + both arms are always on in this mode (config check).
+            names = TORSO_EE_NAMES + RIGHT_EE_NAMES + LEFT_EE_NAMES + RIGHT_NULL_NAMES + LEFT_NULL_NAMES
+            if self._config.use_head:
+                names += [f"{n}{POS_SUFFIX}" for n in HEAD_NAMES]
+            return {name: float for name in names}
         if self._config.action_mode == "ee":
             # EE poses for each enabled group (incl. the torso, which is
             # commanded by the Cartesian solver in this mode).
@@ -222,7 +240,10 @@ class Rby1(Robot):
 
     @property
     def _obs_ft(self) -> dict[str, type]:
-        return {f"{name}{POS_SUFFIX}": float for name in self._obs_joint_names}
+        names = list(self._obs_joint_names)
+        if self._config.use_head:
+            names += HEAD_NAMES
+        return {f"{name}{POS_SUFFIX}": float for name in names}
 
     @property
     def _gripper_ft(self) -> dict[str, type]:
@@ -245,7 +266,7 @@ class Rby1(Robot):
     def _ee_obs_ft(self) -> dict[str, type]:
         # In EE mode the observation additionally exposes the end-effector
         # pose of each enabled group (computed via forward kinematics).
-        if self._config.action_mode != "ee":
+        if self._config.action_mode not in _CARTESIAN_MODES:
             return {}
         names: list[str] = []
         if self._config.use_torso:
@@ -321,6 +342,12 @@ class Rby1(Robot):
             self._ready_left,
             self._ready_head,
         ) = ready_pose_for_version(self._resolved_version)
+        if self._config.ready_body_deg is not None:
+            self._ready_body = np.deg2rad(np.asarray(self._config.ready_body_deg, dtype=np.float64))
+            self._ready_right = self._ready_body[6:13].copy()
+            self._ready_left = self._ready_body[13:20].copy()
+        if self._config.ready_head_deg is not None:
+            self._ready_head = np.deg2rad(np.asarray(self._config.ready_head_deg, dtype=np.float64))
         if self._resolved_model not in ("a", "m"):
             raise RuntimeError(
                 f"RB-Y1 model '{self._resolved_model}' is not supported (only Model A and M)."
@@ -365,7 +392,7 @@ class Rby1(Robot):
             # EE mode runs the Cartesian impedance solver at teleop speeds and
             # needs the unlimited mode (as the VR teleoperator previously used).
             self._robot.enable_control_manager(
-                unlimited_mode_enabled=(self._config.action_mode == "ee")
+                unlimited_mode_enabled=(self._config.action_mode in _CARTESIAN_MODES)
             )
             cm_state = self._robot.get_control_manager_state()
             if cm_state.state != rby.ControlManagerState.State.Enabled:
@@ -397,7 +424,7 @@ class Rby1(Robot):
 
             # 4b. In EE mode, prepare a forward-kinematics state so the observation
             #     can report the end-effector pose of each group.
-            if self._config.action_mode == "ee":
+            if self._config.action_mode in _CARTESIAN_MODES:
                 self._dyn_robot = dyn_model
                 self._fk_state = dyn_model.make_state(
                     _FK_LINKS, self._model.robot_joint_names
@@ -671,6 +698,10 @@ class Rby1(Robot):
 
         # Joint positions (and optional velocities / torques) per enabled group.
         self._read_group(obs, state.position, model, POS_SUFFIX)
+        if self._config.use_head:
+            head = np.asarray(state.position)[model.head_idx]
+            for i, name in enumerate(HEAD_NAMES):
+                obs[f"{name}{POS_SUFFIX}"] = float(head[i])
         if self._config.use_velocity:
             self._read_group(obs, state.velocity, model, ".vel")
         if self._config.use_torque:
@@ -722,7 +753,7 @@ class Rby1(Robot):
         and encodes each pose as ``<group>_ee.{x,y,z,wx,wy,wz}`` (the same
         rotvec convention as the EE action).
         """
-        if self._config.action_mode != "ee" or self._fk_state is None:
+        if self._config.action_mode not in _CARTESIAN_MODES or self._fk_state is None:
             return
         self._fk_state.set_q(np.asarray(state.position, dtype=np.float64).copy())
         self._dyn_robot.compute_forward_kinematics(self._fk_state)
@@ -792,6 +823,12 @@ class Rby1(Robot):
             # under the same keys as the actions.
             obs = self.get_observation()
             target = {k: float(obs[k]) for k in self.action_features if k in obs}
+            if self._config.action_mode == "wholebody":
+                # Nullspace targets = the measured arm joints (hold the elbow).
+                for null_key, joint in zip(
+                    RIGHT_NULL_NAMES + LEFT_NULL_NAMES, RIGHT_ARM_NAMES + LEFT_ARM_NAMES
+                ):
+                    target[null_key] = float(obs[f"{joint}{POS_SUFFIX}"])
         else:
             target = dict(self._last_sent)
         for key in BASE_VEL_NAMES:
@@ -800,6 +837,8 @@ class Rby1(Robot):
         self.send_action(target)
 
     def _dispatch_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
+        if self._config.action_mode == "wholebody":
+            return self._send_wholebody_action(rby, action)
         if self._config.action_mode == "ee":
             self._send_ee_action(rby, action)
             return {key: action[key] for key in self._motors_ft}
@@ -904,6 +943,57 @@ class Rby1(Robot):
         )
         self._last_ee_targets = targets
 
+    def _send_wholebody_action(self, rby: Any, action: dict[str, Any]) -> dict[str, float]:
+        """Execute a whole-body action (``action_mode="wholebody"``).
+
+        Torso and both arm poses go to ONE Cartesian impedance solver, with the
+        action's arm joint targets as its nullspace target (the teleoperator's
+        IK solution, which places the elbow). The head joints, when enabled,
+        get a joint-position command clipped to the joint limits. Returns the
+        commanded values keyed like ``action_features`` (head after clipping).
+        """
+        cfg = self._config
+        targets = cb.CartesianTargets(
+            torso=cb.pose_from_action(action, "torso_ee"),
+            right_arm=cb.pose_from_action(action, "right_ee"),
+            left_arm=cb.pose_from_action(action, "left_ee"),
+        )
+        null_body = np.concatenate([
+            self._ready_body[: len(TORSO_NAMES)],  # weight 0 — value unused
+            [float(action[k]) for k in RIGHT_NULL_NAMES],
+            [float(action[k]) for k in LEFT_NULL_NAMES],
+        ])
+        if self._last_ee_targets is None:
+            self._ee_period.reset()
+        period = self._ee_period.update(self._clock())
+        if not cfg.ee_auto_action_period:
+            period = cfg.ee_action_period
+        reset = self._detect_ee_reset(targets)
+        if reset.any:
+            logger.info(
+                f"Whole-body reference reset (torso={reset.torso}, "
+                f"right={reset.right_arm}, left={reset.left_arm})."
+            )
+
+        sent = {key: float(action[key]) for key in self._motors_ft}
+        body = cb.build_wholebody_command(rby, cfg, targets, reset.any, null_body, period)
+        cbc = rby.ComponentBasedCommandBuilder().set_body_command(body)
+        if cfg.use_head:
+            idx = self._model.head_idx
+            head = np.clip(
+                [float(action[f"{n}{POS_SUFFIX}"]) for n in HEAD_NAMES],
+                self._q_lower[idx], self._q_upper[idx],
+            )
+            sent.update({f"{n}{POS_SUFFIX}": float(v) for n, v in zip(HEAD_NAMES, head)})
+            cbc.set_head_command(
+                cb.build_head_command(rby, head, period * cfg.ee_min_time_factor, cfg.wb_hold_time)
+            )
+        if cfg.use_mobile_base:
+            cbc.set_mobility_command(self._mobility_command(rby, action, cfg.joint_min_time))
+        self._stream.send_command(rby.RobotCommandBuilder().set_command(cbc))
+        self._last_ee_targets = targets
+        return sent
+
     def _detect_ee_reset(self, targets: cb.CartesianTargets) -> cb.ResetFlags:
         """Flag components whose target jumped since the last command."""
         cfg = self._config
@@ -979,8 +1069,11 @@ class Rby1(Robot):
 
     def _mobility_command(self, rby: Any, action: dict[str, Any], minimum_time: float) -> Any:
         linear, angular = self._base_velocity_from_action(action)
+        cfg = self._config
         return cb.build_mobility_command(
-            rby, linear, angular, minimum_time, hold_time=self._config.mobile_base_hold_time
+            rby, linear, angular, minimum_time, hold_time=cfg.mobile_base_hold_time,
+            linear_acceleration_limit=cfg.mobile_base_linear_acceleration_limit,
+            angular_acceleration_limit=cfg.mobile_base_angular_acceleration_limit,
         )
 
 

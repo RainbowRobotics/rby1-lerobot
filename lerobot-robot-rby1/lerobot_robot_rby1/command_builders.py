@@ -180,6 +180,61 @@ def build_ee_command(
     return body
 
 
+def build_wholebody_command(
+    rby: Any,
+    cfg: Any,
+    targets: CartesianTargets,
+    reset_reference: bool,
+    null_body: np.ndarray,
+    action_period: float | None = None,
+) -> Any:
+    """One Cartesian impedance command over torso + both arms (``action_mode="wholebody"``).
+
+    The torso (``link_torso_5``) and both ``link_<side>_arm_6`` poses are
+    targets of the same solver, so the torso and the arms are resolved
+    together. ``null_body`` is the 20-DOF nullspace joint target
+    [torso | right arm | left arm]; the torso part gets weight 0 and the arm
+    parts ``cfg.wb_nullspace_weight``.
+    """
+    dt = cfg.ee_action_period if action_period is None else action_period
+    builder = (
+        rby.CartesianImpedanceControlCommandBuilder()
+        .set_command_header(_ee_command_header(rby, cfg.wb_hold_time))
+        .set_minimum_time(dt * cfg.ee_min_time_factor)
+        .set_joint_stiffness(list(cfg.wb_stiffness))
+        .set_joint_torque_limit(list(cfg.wb_torque_limit))
+        .set_stop_position_tracking_error(0)
+        .set_stop_orientation_tracking_error(0)
+        .set_stop_joint_position_tracking_error(0)
+        .set_reset_reference(reset_reference)
+    )
+    if cfg.wb_damping_ratio is not None:
+        builder.set_joint_damping_ratio(cfg.wb_damping_ratio)
+    _apply_joint_limits(builder, cfg.wb_joint_limits)
+    builder.add_target("base", "link_torso_5", targets.torso, *cfg.wb_torso_target_gains)
+    builder.add_target("base", "link_right_arm_6", targets.right_arm, *cfg.wb_arm_target_gains)
+    builder.add_target("base", "link_left_arm_6", targets.left_arm, *cfg.wb_arm_target_gains)
+    arm_w = np.asarray(cfg.wb_nullspace_weight, dtype=np.float64)
+    weight = np.concatenate([np.zeros(len(TORSO_NAMES)), arm_w, arm_w])
+    builder.set_nullspace_joint_target(
+        np.asarray(null_body, dtype=np.float64),
+        weight,
+        cfg.wb_nullspace_stiffness,
+        cfg.wb_nullspace_damping,
+    )
+    return builder
+
+
+def build_head_command(rby: Any, position: np.ndarray, minimum_time: float, hold_time: float) -> Any:
+    """Joint-position command for the two head joints."""
+    return (
+        rby.JointPositionCommandBuilder()
+        .set_command_header(rby.CommandHeaderBuilder().set_control_hold_time(hold_time))
+        .set_position(np.asarray(position, dtype=np.float64))
+        .set_minimum_time(minimum_time)
+    )
+
+
 def build_limb_command(
     rby: Any,
     *,
@@ -300,13 +355,15 @@ def build_mobility_command(
     angular: float,
     minimum_time: float,
     hold_time: float = _CONTROL_HOLD_TIME,
+    linear_acceleration_limit: float | None = None,
+    angular_acceleration_limit: float | None = None,
 ) -> Any:
     """Build an SE2 base-velocity command for the omnidirectional platform.
 
     ``linear`` is a 2-vector (x, y) in m/s (robot frame); ``angular`` is the
-    yaw rate in rad/s.
+    yaw rate in rad/s. The acceleration limits are applied when both are given.
     """
-    return (
+    builder = (
         rby.SE2VelocityCommandBuilder()
         .set_command_header(
             rby.CommandHeaderBuilder().set_control_hold_time(hold_time)
@@ -314,6 +371,12 @@ def build_mobility_command(
         .set_velocity(linear, angular)
         .set_minimum_time(minimum_time)
     )
+    if linear_acceleration_limit is not None and angular_acceleration_limit is not None:
+        builder.set_acceleration_limit(
+            np.array([linear_acceleration_limit, linear_acceleration_limit], dtype=np.float64),
+            float(angular_acceleration_limit),
+        )
+    return builder
 
 
 def build_ready_pose_command(

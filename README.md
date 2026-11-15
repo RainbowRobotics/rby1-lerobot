@@ -173,6 +173,54 @@ lerobot-record \
 
 ```
 
+## Whole-body VR Teleoperation (Meta Quest body + hand tracking)
+
+`--teleop.type=rby1_vr_wholebody` drives the torso, both arms, the head, the
+grippers and the mobile base from the operator's body — no controllers. The Quest
+runs the Meta_with_hands app (inside-out body tracking + hand tracking, TCP NDJSON
+on port 5555); the follower runs `action_mode="wholebody"`, where torso and arms are
+resolved by **one** Cartesian impedance solver whose arm nullspace targets come from
+the teleoperator's analytic IK (that is what places the elbow).
+
+| Operator | Robot |
+|----------|-------|
+| Palm position / hand orientation | `link_<side>_arm_6` pose (elbow flexion mapped 1:1 to the robot elbow, `hand_map="elbow"`) |
+| Elbow direction | Arm nullspace joint targets (`<side>_arm_<i>.null`) |
+| Upper-body tilt / twist | `link_torso_5` orientation (clamped) |
+| Walking / turning (pelvis) | Base velocity, closed loop on the base odometry |
+| Gaze (HMD) | `head_0` / `head_1` |
+| Thumb–index pinch | Gripper close |
+
+The bundled arm model is RB-Y1 **M v1.3**; `connect()` compares it with the robot's
+FK and fails on a mismatch (`--teleop.ignore_model_check=true` to override).
+
+```bash
+lerobot-teleoperate \
+  --robot.type=rby1 \
+  --robot.address=192.168.30.1:50051 \
+  --robot.action_mode=wholebody \
+  --robot.use_torso=true --robot.use_head=true --robot.use_mobile_base=true \
+  --robot.mobile_base_max_linear_velocity=0.8 --robot.mobile_base_max_angular_velocity=1.5 \
+  --robot.mobile_base_linear_acceleration_limit=2.0 --robot.mobile_base_angular_acceleration_limit=4.0 \
+  --robot.ready_body_deg='[0,45,-80,45,0,0, 0,-15,0,-120,0,30,0, 0,15,0,-120,0,30,0]' \
+  --robot.ready_head_deg='[0,30]' \
+  --teleop.type=rby1_vr_wholebody \
+  --teleop.robot_address=192.168.30.1:50051 \
+  --teleop.headset_ip=<quest-ip> \
+  --fps=50
+```
+
+1. The robot moves to the ready pose above (the pose the retargeting is tuned for).
+2. Stand in a similar posture and press **Enter** in that terminal: this instant is
+   Δ = 0 between you and the robot. **Space** holds (base stops, arms and torso keep
+   their target); **Enter** re-latches and resumes.
+
+`use_head`, `use_gripper` and `use_mobile_base` must match between `--robot.*` and
+`--teleop.*` (the teleoperator defaults all three to `true`). The same flags work
+with `lerobot-record`. Tuning fields (filters, slew, base gains, pinch thresholds)
+are listed with their defaults in
+[`config_rby1_vr_wholebody.py`](lerobot-teleoperator-rby1/lerobot_teleoperator_rby1/config_rby1_vr_wholebody.py).
+
 
 ## Configuration Options
 
@@ -191,12 +239,14 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `version` | `"auto"` | Robot version: `"1.0"`–`"1.3"`, or `"auto"` to detect |
 | `connect_timeout_sec` | `3.0` | Timeout of the model / version detection |
 | `move_to_ready_on_connect` | `True` | Move to the ready pose on `connect()` |
+| `ready_body_deg` / `ready_head_deg` | `None` | Override the ready pose (deg): 20 body joints `[torso \| right arm \| left arm]` / 2 head joints |
 
 **Features** — what the observation and the action contain
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `action_mode` | `"joint"` | `"joint"`: joint positions. `"ee"`: end-effector poses (e.g. from `rby1_vr`) |
+| `action_mode` | `"joint"` | `"joint"`: joint positions. `"ee"`: end-effector poses (e.g. from `rby1_vr`). `"wholebody"`: EE poses + arm nullspace targets + head, one solver (from `rby1_vr_wholebody`; needs `use_torso`, both arms) |
+| `use_head` | `False` | `action_mode="wholebody"` only: head joints in observation / action |
 | `use_right_arm` | `True` | Include the right arm in observation / action |
 | `use_left_arm` | `True` | Include the left arm in observation / action |
 | `use_torso` | `False` | Include the torso in observation / action (commanded in both action modes) |
@@ -241,6 +291,17 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `ee_torso_target_gains` | `(1.0, π/2, 20, 40π)` | Torso target limits (same order as the arm) |
 | `ee_torso_joint_limits` | — | Extra joint limits (rad) given to the torso solver |
 
+**Whole-body mode** (`action_mode="wholebody"`) — one CartesianImpedance command over torso + both arms. The action period, `ee_min_time_factor` and the `ee_reset_*` thresholds are shared with EE mode
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `wb_stiffness` / `wb_torque_limit` | `[400]*6+[60]*14` / `[500]*6+[30]*14` | Joint gains of the 20 body joints `[torso \| right \| left]` |
+| `wb_damping_ratio` | `None` | Joint damping ratio; `None` keeps the controller default |
+| `wb_torso_target_gains` / `wb_arm_target_gains` | `(1.0, π/2, 10, 20π)` / `(2.0, 2π, 20, 80π)` | Target limits: linear / angular velocity, linear / angular acceleration |
+| `wb_joint_limits` | `torso_1` `[-30°, 90°]`, `torso_2` `[-150°, -0.2 rad]` | Extra joint limits (rad) given to the solver |
+| `wb_nullspace_weight` / `wb_nullspace_stiffness` / `wb_nullspace_damping` | `[2,2,2,2,0.5,0.5,0.5]` / `0.2` / `0.2` | Weight of the per-arm nullspace targets from the action (torso weight 0) |
+| `wb_hold_time` | `0.5` | Body and head commands keep holding this long (s) if the stream stalls |
+
 **Mobile base** (`use_mobile_base=True`) — SE2Velocity commands
 
 | Parameter | Default | Description |
@@ -248,6 +309,7 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `mobile_base_hold_time` | `0.5` | The base keeps the last velocity this long (s) after the stream stops |
 | `mobile_base_max_linear_velocity` | `0.6` | Clamp of the x / y speed (m/s) |
 | `mobile_base_max_angular_velocity` | `1.4` | Clamp of the yaw rate (rad/s) |
+| `mobile_base_linear_acceleration_limit` / `mobile_base_angular_acceleration_limit` | `None` | SE2 acceleration limits (m/s², rad/s²), applied when both are set |
 
 **Robot profile** — `profile_out`, `profile_in`, `profile_mode`, `profile_force`:
 see [Keeping robots consistent](#keeping-robots-consistent-robot-profile).
@@ -295,7 +357,9 @@ Keys follow the LeRobot naming convention:
 | Mobile base velocity | `x.vel`, `y.vel`, `theta.vel` | action only |
 | Joint velocity (`use_velocity`) | `<joint>.vel` | `right_arm_0.vel` |
 | Joint torque (`use_torque`) | `<joint>.torque` | `right_arm_0.torque` |
-| End-effector pose (`action_mode="ee"`) | `<group>_ee.{x,y,z,wx,wy,wz}` | `right_ee.x` |
+| End-effector pose (`action_mode="ee"` / `"wholebody"`) | `<group>_ee.{x,y,z,wx,wy,wz}` | `right_ee.x` |
+| Arm nullspace target (`"wholebody"`) | `<arm joint>.null` | `right_arm_3.null` (action only) |
+| Head position (`use_head`) | `head_<i>.pos` | `head_1.pos` |
 
 > [!WARNING]
 > Datasets recorded before the `.pos` suffix was introduced use bare keys
@@ -317,7 +381,7 @@ lerobot-rollout \
 Limitations:
 
 - Requires **lerobot 0.7.0 or newer** (plugin 0.3.x and later). Plugin 0.2.x targets lerobot 0.6.1.
-- `action_mode="ee"` is **not supported**. Rollout keeps only `.pos` / `.vel` state and
+- `action_mode="ee"` and `"wholebody"` are **not supported**. Rollout keeps only `.pos` / `.vel` state and
   action features, and end-effector keys (`right_ee.x`, …) match neither — this is an
   upstream limitation that applies to LeRobot's own EE robots too.
 - `use_torque=True` datasets do not round-trip: rollout drops the `.torque` channels, so
@@ -525,7 +589,7 @@ LeRobot commands that do not apply to RB-Y1:
 | Path | Description |
 |------|-------------|
 | [`lerobot-robot-rby1/`](lerobot-robot-rby1) | RB-Y1 follower robot plugin (`--robot.type=rby1`) |
-| [`lerobot-teleoperator-rby1/`](lerobot-teleoperator-rby1) | RB-Y1 teleoperator plugins (`--teleop.type=rby1_leader_arm`, `--teleop.type=rby1_vr`) |
+| [`lerobot-teleoperator-rby1/`](lerobot-teleoperator-rby1) | RB-Y1 teleoperator plugins (`--teleop.type=rby1_leader_arm`, `--teleop.type=rby1_vr`, `--teleop.type=rby1_vr_wholebody`) |
 | [`tests/`](tests) | Hardware-free tests using a fake `rby1_sdk` |
 
 ## Resources

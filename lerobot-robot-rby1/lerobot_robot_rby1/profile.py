@@ -102,6 +102,7 @@ FEATURE_FIELDS = frozenset(
         "use_mobile_base",
         "use_velocity",
         "use_torque",
+        "use_head",
         "action_mode",
     }
 )
@@ -561,12 +562,44 @@ def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# Rby1Config fields added after a profile format was written. Their defaults
+# keep the earlier behaviour, so a profile without them is filled with the
+# defaults instead of reporting a difference.
+_ADDED_FIELDS = (
+    "use_head",
+    "ready_body_deg",
+    "ready_head_deg",
+    "wb_stiffness",
+    "wb_torque_limit",
+    "wb_damping_ratio",
+    "wb_joint_limits",
+    "wb_torso_target_gains",
+    "wb_arm_target_gains",
+    "wb_nullspace_weight",
+    "wb_nullspace_stiffness",
+    "wb_nullspace_damping",
+    "wb_hold_time",
+    "mobile_base_linear_acceleration_limit",
+    "mobile_base_angular_acceleration_limit",
+)
+
+
+def _fill_added_fields(data: dict[str, Any]) -> dict[str, Any]:
+    cfg = data.get("robot_config")
+    if not cfg or all(name in cfg for name in _ADDED_FIELDS):
+        return data
+    from .config_rby1 import Rby1Config  # lazy: config imports constants only
+
+    defaults = to_jsonable(Rby1Config())
+    return {**data, "robot_config": {**{n: defaults[n] for n in _ADDED_FIELDS}, **cfg}}
+
+
 def upgrade_profile(data: dict[str, Any], source: Any = "profile") -> dict[str, Any]:
     """Bring a profile dict to the current format (older formats are converted)."""
     version = int(data.get("format_version", 0))
     if version > FORMAT_VERSION:
         raise ValueError(f"{source} uses profile format {version}; this plugin reads {FORMAT_VERSION}.")
-    return _upgrade_v1(data) if version < 2 else data
+    return _fill_added_fields(_upgrade_v1(data) if version < 2 else data)
 
 
 def load_profile(path: str | os.PathLike) -> dict[str, Any]:

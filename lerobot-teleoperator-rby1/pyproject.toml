@@ -40,3 +40,6 @@ Issues = "https://github.com/RainbowRobotics/rby1-lerobot/issues"
 where = ["."]
 include = ["lerobot_teleoperator_rby1*"]
 exclude = ["*.egg-info"]
+
+[tool.setuptools.package-data]
+lerobot_teleoperator_rby1 = ["models/*.urdf"]
