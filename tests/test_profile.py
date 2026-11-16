@@ -39,7 +39,7 @@ def test_profile_contents(recorded) -> None:
     assert len(data["core_parameters"]) == len(rby.CORE_PARAMETERS)
     # Recorded after configure(): the plugin's cutoff, not the robot's stored 15 Hz.
     assert data["core_parameters"]["joint_position_command.cutoff_frequency"]["value"] == 5.0
-    assert data["robot_config"]["ee_arm_stiffness"][0] == 358.0
+    assert data["robot_config"]["ee_arm_stiffness"][0] == 80.0
 
 
 def test_cutoff_is_session_only_and_restored() -> None:
@@ -110,7 +110,7 @@ def test_one_profile_per_dataset(recorded) -> None:
     robot.disconnect()
     extras = [p for p in recorded.parent.glob("rby1_profile.*.json")]
     assert len(extras) == 1
-    assert json.loads(recorded.read_text())["robot_config"]["ee_arm_damping_ratio"] == 1.0
+    assert json.loads(recorded.read_text())["robot_config"]["ee_arm_damping_ratio"] == 0.7
 
 
 def test_teleop_section_is_kept(tmp_path) -> None:
@@ -179,12 +179,13 @@ def test_v1_profile_compares_and_applies(tmp_path, caplog) -> None:
     )
     diffs = [d for d in rprofile.diff_profiles(ref, cur) if d.severity != rprofile.INFO]
     # Same settings: only the left-arm values that no longer exist, the fixed
-    # EE period of 0.3.0, the impedance defaults changed in 0.3.1 and the
-    # EE-mode arm ready pose (arm_1 -/+65 -> -/+10 deg) are reported.
+    # EE period of 0.3.0, the joint impedance defaults changed in 0.3.1, the
+    # EE-mode damping ratios (1.0 -> 0.7) and the EE-mode arm ready pose
+    # (arm_1 -/+65 -> -/+10 deg) are reported.
     assert sorted(d.key for d in diffs) == [
         "plugin_constants.ready_pose.body",
-        "robot_config.ee_arm_damping_ratio", "robot_config.ee_arm_stiffness",
-        "robot_config.ee_arm_torque_limit", "robot_config.ee_auto_action_period",
+        "robot_config.ee_arm_damping_ratio", "robot_config.ee_auto_action_period",
+        "robot_config.ee_nullspace_damping_ratio", "robot_config.ee_torso_damping_ratio",
         "robot_config.joint_impedance_arm_stiffness",
         "robot_config.joint_impedance_arm_torque_limit",
         "robot_config.joint_impedance_torso_torque_limit",

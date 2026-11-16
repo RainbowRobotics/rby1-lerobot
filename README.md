@@ -149,10 +149,7 @@ Replace `XXXXXXXXX` with your RealSense serial number. You can add `right` and
 > [!WARNING]
 > This device was developed on an earlier branch and has been moved to the current
 > robot plugin and to `isaaccapture` 1.6 with offline tests only. It has **not been
-> run on a robot or a headset in this form**. The arm stiffness in EE mode
-> (`ee_arm_stiffness` `[358, 330, 193, …]`) is one third of the joint impedance values
-> but still 2 to 4 times the 80 Nm/rad the device was tuned with on `arm_0..2`, so start
-> with small, slow motions.
+> run on a robot or a headset in this form**. Start with small, slow motions.
 
 `--teleop.type=rby1_isaac` drives the RB-Y1 from an XR headset through
 [NVIDIA Isaac Capture](https://github.com/NVIDIA/IsaacCapture) (the package formerly
@@ -442,15 +439,15 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `ee_min_time_factor` | `1.02` | `minimum_time` = action period × this factor |
 | `ee_hold_time` | `1.0` | The command keeps holding this long (s) if the stream stalls |
 | `ee_reset_position_threshold` / `ee_reset_rotation_threshold` | `0.1` m / `0.5` rad | A target jump beyond this re-references the solver to the robot's state |
-| `ee_arm_stiffness` / `ee_arm_torque_limit` / `ee_arm_damping_ratio` | `[358,330,193,88,63,68,100]` / `[30,30,25,18,8,8,8]` / `1.0` | Arm solver joint gains, used for both arms. Stiffness is one third of the joint impedance values; the torque limit is the same |
+| `ee_arm_stiffness` / `ee_arm_torque_limit` / `ee_arm_damping_ratio` | `[80,80,80,60,60,60,60]` / `[40,40,40,30,30,30,30]` / `0.7` | Arm solver joint gains, used for both arms: soft arms for teleoperation in Cartesian space (joint mode has its own, stiffer gains) |
 | `ee_arm_target_gains` | `(3.0, 2π, 150, 80π)` | Arm target limits: linear / angular velocity, linear / angular acceleration |
 | `ee_right_arm_joint_limits` / `ee_left_arm_joint_limits` | elbow `(-2.6, -0.5)` | Extra joint limits (rad) given to the arm solvers |
 | `ee_null_right_arm_deg` / `ee_null_left_arm_deg` | — | Nullspace joint target of each arm (deg) |
-| `ee_nullspace_weight` / `ee_nullspace_stiffness` / `ee_nullspace_damping_ratio` | `[2,2,2,2,2,2,1]` / `0.2` / `1.0` | Nullspace gains |
+| `ee_nullspace_weight` / `ee_nullspace_stiffness` / `ee_nullspace_damping_ratio` | `[2,2,2,2,2,2,1]` / `0.2` / `0.7` | Nullspace gains |
 | `ee_posture_hint_weight` | `4.0` | Nullspace weight of arm joints that carry a posture hint in the action |
 | arm ready pose (not a parameter) | `arm_1` = −10° / +10° | In EE mode the ready pose keeps the upper arms close to the body (right / left `arm_1`); joint mode uses −65° / +65°. The other arm joints are the same in both modes |
 | `ee_ready_torso_deg` | `None` | Torso ready pose (deg, `torso_0..5`) used in EE mode instead of the default. The default (`torso_2` = 0) is outside `ee_torso_joint_limits`; use e.g. `[0, 45, -90, 45, 0, 0]` with `use_torso=True` |
-| `ee_torso_stiffness` / `ee_torso_torque_limit` / `ee_torso_damping_ratio` | `[1700]*6` / `[600]*6` / `1.0` | Torso solver joint gains |
+| `ee_torso_stiffness` / `ee_torso_torque_limit` / `ee_torso_damping_ratio` | `[1700]*6` / `[600]*6` / `0.7` | Torso solver joint gains |
 | `ee_torso_target_gains` | `(1.0, π/2, 20, 40π)` | Torso target limits (same order as the arm) |
 | `ee_torso_joint_limits` | — | Extra joint limits (rad) given to the torso solver |
 
@@ -770,10 +767,10 @@ Breaking changes in 0.3.1 (compared with the withdrawn 0.3.0):
 - **Arm impedance defaults changed**: the arm is now stiff and gets its compliance from
   the torque limit. `joint_impedance_arm_stiffness` is `[1075, 990, 580, 265, 190, 205, 300]`
   (was `[150]*7`; larger towards the base) and `joint_impedance_arm_torque_limit` is
-  `[30, 30, 25, 18, 8, 8, 8]` (was `[40]*7`), with `use_joint_impedance=True`. EE mode uses
-  the same torque limit and one third of the stiffness: `ee_arm_stiffness` is
-  `[358, 330, 193, 88, 63, 68, 100]` (was `[80,80,80,60,60,60,60]`) and `ee_arm_torque_limit`
-  was `[40,40,40,30,30,30,30]`. Pass the old values (e.g.
+  `[30, 30, 25, 18, 8, 8, 8]` (was `[40]*7`), with `use_joint_impedance=True`. EE mode keeps
+  soft arms: `ee_arm_stiffness` `[80,80,80,60,60,60,60]`, `ee_arm_torque_limit`
+  `[40,40,40,30,30,30,30]`, and a damping ratio of `0.7` for the arms, the torso and the
+  nullspace. Pass the old values (e.g.
   `--robot.joint_impedance_arm_stiffness='[150,150,150,150,150,150,150]'`) to keep the old
   behaviour, e.g. for a policy trained on data recorded with it.
   The joint impedance torso torque limits are now the URDF effort limits

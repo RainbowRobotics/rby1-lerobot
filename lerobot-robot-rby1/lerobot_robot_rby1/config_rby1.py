@@ -264,7 +264,7 @@ class Rby1Config(RobotConfig):
     # ── Torso solver ───────────────────────────────────────────────────
     ee_torso_stiffness: List[float] = field(default_factory=lambda: [1700.0] * 6)
     ee_torso_torque_limit: List[float] = field(default_factory=lambda: [600.0] * 6)
-    ee_torso_damping_ratio: float = 1.0
+    ee_torso_damping_ratio: float = 0.7
     ee_torso_joint_limits: JointLimits = field(
         default_factory=lambda: dict(DEFAULT_TORSO_JOINT_LIMITS)
     )
@@ -273,16 +273,16 @@ class Rby1Config(RobotConfig):
     ee_torso_target_gains: Tuple[float, float, float, float] = TORSO_TARGET_GAINS
 
     # ── Arm solvers (the same gains drive both arms) ───────────────────
-    # Joint stiffness: one third of the joint impedance values
-    # (joint_impedance_arm_stiffness above), softer for XR teleoperation.
-    # Torque limit: the same values as joint impedance.
+    # Soft arms for teleoperation in Cartesian space (the values the XR
+    # devices were tuned with); joint mode has its own, stiffer gains
+    # (joint_impedance_* above).
     ee_arm_stiffness: List[float] = field(
-        default_factory=lambda: [358.0, 330.0, 193.0, 88.0, 63.0, 68.0, 100.0]
+        default_factory=lambda: [80.0, 80.0, 80.0, 60.0, 60.0, 60.0, 60.0]
     )
     ee_arm_torque_limit: List[float] = field(
-        default_factory=lambda: [30.0, 30.0, 25.0, 18.0, 8.0, 8.0, 8.0]
+        default_factory=lambda: [40.0, 40.0, 40.0, 30.0, 30.0, 30.0, 30.0]
     )
-    ee_arm_damping_ratio: float = 1.0
+    ee_arm_damping_ratio: float = 0.7
     ee_arm_target_gains: Tuple[float, float, float, float] = ARM_TARGET_GAINS
     ee_right_arm_joint_limits: JointLimits = field(
         default_factory=lambda: dict(DEFAULT_RIGHT_ARM_JOINT_LIMITS)
@@ -302,7 +302,7 @@ class Rby1Config(RobotConfig):
         default_factory=lambda: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 1.0]
     )
     ee_nullspace_stiffness: float = 0.2
-    ee_nullspace_damping_ratio: float = 1.0
+    ee_nullspace_damping_ratio: float = 0.7
     # Nullspace weight of the joints an arm posture hint (<side>_arm_0..3.null
     # action keys) sets, used in place of ee_nullspace_weight for those joints
     # while a hint is present.
