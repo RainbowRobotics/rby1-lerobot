@@ -205,8 +205,8 @@ def test_ee_mode_ready_arms_stay_close_to_the_body() -> None:
     try:
         assert np.rad2deg(robot._ready_right[1]) == pytest.approx(-10.0)
         assert np.rad2deg(robot._ready_left[1]) == pytest.approx(10.0)
-        q = np.asarray(robot._robot.get_state().position)  # after the ready motion at connect
-        assert q[robot._model.right_arm_idx] == pytest.approx(robot._ready_right)
+        assert robot._ready_body[6:13] == pytest.approx(robot._ready_right)
+        assert robot._ready_body[13:] == pytest.approx(robot._ready_left)
     finally:
         robot.disconnect()
     robot = _connect()

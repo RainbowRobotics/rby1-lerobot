@@ -179,9 +179,10 @@ def test_v1_profile_compares_and_applies(tmp_path, caplog) -> None:
     )
     diffs = [d for d in rprofile.diff_profiles(ref, cur) if d.severity != rprofile.INFO]
     # Same settings: only the left-arm values that no longer exist, the fixed
-    # EE period of 0.3.0 and the impedance defaults changed in 0.3.1
-    # are reported.
+    # EE period of 0.3.0, the impedance defaults changed in 0.3.1 and the
+    # EE-mode arm ready pose (arm_1 -/+65 -> -/+10 deg) are reported.
     assert sorted(d.key for d in diffs) == [
+        "plugin_constants.ready_pose.body",
         "robot_config.ee_arm_damping_ratio", "robot_config.ee_arm_stiffness",
         "robot_config.ee_arm_torque_limit", "robot_config.ee_auto_action_period",
         "robot_config.joint_impedance_arm_stiffness",
