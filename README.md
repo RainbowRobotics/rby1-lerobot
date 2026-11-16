@@ -326,7 +326,10 @@ aborts, `--teleop.xr_connect_timeout_s=<s>` gives up after that time):
 1. In the headset browser open `https://<host-ip>:48322/client/?serverIP=<host-ip>&port=48322`
    (served by the CloudXR service on this host) and accept the self-signed certificate.
 2. Press Connect.
-3. Once the controllers are tracked the robot holds its pose until you squeeze a grip.
+3. Once the controllers are tracked the robot holds its pose. **Press Right A once to start**
+   (`start_on_right_a`, default on): until then nothing follows the headset — arms, torso,
+   head, grippers and base stay as they are. That first press does not move the robot.
+4. After that the robot still holds its pose until you squeeze a grip.
 
 If the host cannot serve the client, use `https://nvidia.github.io/IsaacCapture/client/`:
 enter the host IP there and first accept the certificate at `https://<host-ip>:48322/`.
@@ -342,7 +345,8 @@ the targets are held, as for any tracking loss.
 | Trigger | Gripper (fully pressed = closed) |
 | Right thumbstick / left thumbstick | Base linear velocity / yaw rate |
 | Right **B** | Stop: freeze every target, zero the base |
-| Right **A** | Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; re-reference the operator frame so the direction you are facing becomes robot +X; also resumes after a stop and re-centres the head origin. The base is not moved |
+| Right **A** (first press) | Start teleoperation: before it nothing follows the headset. The direction you are facing becomes robot +X and the look direction maps onto the head joints as they are; the robot does not move |
+| Right **A** (later) | Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; re-reference the operator frame so the direction you are facing becomes robot +X; also resumes after a stop and re-centres the head origin. The base is not moved |
 | Headset orientation | `head_0` (pan) / `head_1` (tilt) from the headset yaw / pitch in the operator frame. The target is a look direction in the **robot base frame**: the joints are re-solved for the measured torso orientation every tick, so bending or turning the torso does not move the gaze (`head_gaze_frame`). Like the EE offsets, the look direction at the moment of Right A (and of the first action) is latched onto the start-pose head joints (`head_latch_on_a`), so after a return the robot head is straight where you were looking |
 | Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, while **both** arms are clutched (`torso_engage=both_arms`, default; `any_arm` / `always` available) |
 | Headset pose (`wear_mode=neck`) | Torso pose (the robot head stays at the ready pose) |
@@ -528,6 +532,7 @@ when teleoperation starts, the robot moves it to the target during the startup r
 | `arm_posture_hint`, `record_posture_hint` | `True`, `False` | IOBT shoulder / elbow → nullspace hint (`<side>_arm_<i>.null`, i = 0..3); record them (adds 8 action dims; set `--robot.record_posture_hint=true` too) |
 | `posture_hint_smoothing`, `posture_hint_max_vel`, `posture_hint_hold_s`, `hint_wrist_source` | `0.3`, `2.0`, `1.0`, `"controller"` | Hint filtering (EMA weight, rad/s ramp from the measured joints on squeeze, re-seed after this long without body tracking); wrist point from the controller (default) or the IOBT wrist |
 | `clutch_threshold` | `0.5` | Squeeze value above which an arm follows |
+| `start_on_right_a` | `True` | Nothing follows the headset (arms, torso, head, grippers, base) until Right A is pressed for the first time. That press only starts teleoperation and references the operator frame; later presses return to the start pose. `False`: live as soon as the controllers are tracked |
 | `thumbstick_deadzone`, `base_max_linear`, `base_max_angular` | `0.15`, `0.3`, `0.6` | Thumbstick → base velocity mapping |
 | `head_yaw_offset_deg`, `head_pitch_offset_deg` | `0`, `0` | Head joints = headset yaw / pitch in the operator frame + these offsets (only used without `head_latch_on_a`) |
 | `head_gaze_frame` | `"base"` | `base`: head joints compensate the measured torso orientation so the gaze stays put in the base frame while the torso moves (also for the held head in neck mode); `torso`: joints commanded directly |

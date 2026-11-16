@@ -144,6 +144,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._gripper = {"right": 1.0, "left": 1.0}  # dataset convention: 1 = open
         self._base_vel = (0.0, 0.0, 0.0)
         self._stopped = False
+        # start_on_right_a: nothing follows the headset until the first Right A.
+        self._started = not config.start_on_right_a
         self._tracking = False
         self._warned_no_body = False
         self._last_status_log = 0.0
@@ -492,11 +494,15 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._gripper = {"right": 1.0, "left": 1.0}
         self._base_vel = (0.0, 0.0, 0.0)
         self._stopped = False
+        self._started = not cfg.start_on_right_a
         # The follower connects (and moves to its ready pose) after this, so
         # the targets are re-seeded again on the first get_action().
         self._needs_initial_resync = True
         self._needs_reference = True
-        logger.info("rby1_isaac: targets latched to the current robot pose (squeeze to follow).")
+        logger.info(
+            "rby1_isaac: targets latched to the current robot pose (%s).",
+            "press Right A to start, then squeeze to follow" if cfg.start_on_right_a else "squeeze to follow",
+        )
 
     # ------------------------------------------------------------------
     # get_action — main per-tick entry point
@@ -539,6 +545,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
             for clutch in self._clutch.values():
                 if clutch is not None:
                     clutch.disengage()
+        elif events["right_a"] and not self._started:
+            self._start(snap)
         elif events["right_a"]:
             if self._stopped:
                 logger.info("Right A — resuming.")
@@ -569,6 +577,32 @@ class Rby1XR(IsaacTeleopTeleoperator):
     # ------------------------------------------------------------------
     # Per-tick helpers
     # ------------------------------------------------------------------
+
+    @property
+    def is_started(self) -> bool:
+        """False while waiting for the first Right A (``start_on_right_a``)."""
+        return self._started
+
+    @property
+    def _idle(self) -> bool:
+        """Nothing may follow the headset: stopped (Right B) or not started yet."""
+        return self._stopped or not self._started
+
+    def _start(self, snap: RobotSnapshot) -> None:
+        """First Right A: go live from the robot's present pose, without moving it.
+
+        The operator frame was referenced on this press already (get_action);
+        the look direction of this moment maps onto the measured head joints,
+        and the controllers latch onto the grippers at the first squeeze.
+        """
+        logger.info("Right A — teleoperation started (squeeze to follow).")
+        self._started = True
+        self._stopped = False
+        if self.config.use_head:
+            self._head = self._make_head_retargeter()
+            self._head.hold(snap.head_q, snap.torso)
+            if self.config.head_latch_on_a:
+                self._head_latch_target = (snap.head_q.copy(), snap.torso.copy())
 
     def _resync_disengaged(self, snap: RobotSnapshot) -> None:
         """Re-seed held targets from the measured pose when the robot moved on its own.
@@ -859,6 +893,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
             mapper.reset_rate_limit(None)
             self._abs_state[side] = state
 
+        if not self._started:
+            release("hold (press Right A to start)")
+            return
         if self._stopped or self._returning or ctrl is None:
             release("hold")
             return
@@ -910,7 +947,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         dropouts while engaged keep the last hint (no fall-back to the robot's
         default nullspace pose mid-motion).
         """
-        if not self._posture or self._stopped or self._returning:
+        if not self._posture or self._idle or self._returning:
             return
         for side, retargeter in self._posture.items():
             clutch = self._clutch.get(side)
@@ -970,7 +1007,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
         if clutch is None:
             return
         driver = None
-        if self._stopped:
+        if not self._started:
+            self._torso_hold_reason = "not started (press Right A)"
+        elif self._stopped:
             self._torso_hold_reason = "stopped (Right B)"
         elif self._returning:
             self._torso_hold_reason = "returning to start pose (Right A)"
@@ -1020,7 +1059,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         )
 
     def _update_head(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot]) -> None:
-        if not self.config.use_head or self._stopped or self._returning:
+        if not self.config.use_head or self._idle or self._returning:
             return
         if self.config.wear_mode == "neck":
             return  # the held (start / ready) gaze stays; torso compensation happens in _build_action
@@ -1037,6 +1076,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         # Trigger 1 (squeezed) -> closed. Dataset convention: 1.0 = open. A free
         # hand pointing at / holding a camera-panel handle keeps its last gripper
         # value: its trigger is a UI click, not a gripper command.
+        if not self._started:
+            return  # keep the grippers where they are until the first Right A
         ui = self._viz.ui_active() if self._viz is not None else {}
         for side, ctrl in (("right", frame.right), ("left", frame.left)):
             if ctrl is None:
@@ -1049,7 +1090,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
 
     def _update_base(self, frame: XRFrame) -> None:
         cfg = self.config
-        if not cfg.use_mobile_base or self._stopped or self._returning:
+        if not cfg.use_mobile_base or self._idle or self._returning:
             self._base_vel = (0.0, 0.0, 0.0)
             return
         self._base_vel = thumbsticks_to_base_vel(
@@ -1112,7 +1153,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
             wz,
             hint("right"),
             hint("left"),
-            (" | STOPPED" if self._stopped else "")
+            ("" if self._started else " | NOT STARTED (press Right A)")
+            + (" | STOPPED" if self._stopped else "")
             + (f" | wear={self.config.wear_mode}" if self.config.wear_mode != "head" else "")
             + (f" | {self._viz.status()}" if self._viz is not None else ""),
         )

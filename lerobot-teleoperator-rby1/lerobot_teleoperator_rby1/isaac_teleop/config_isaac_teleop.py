@@ -208,6 +208,12 @@ class Rby1XRConfig(IsaacTeleopConfig):
     # ── Dead-man switch / session ─────────────────────────────────────
     # Squeeze value above which an arm follows its controller.
     clutch_threshold: float = 0.5
+    # True: nothing follows the headset (arms, torso, head, grippers, base)
+    # until Right A is pressed for the first time. That first press only starts
+    # teleoperation (and references the operator frame); it does not run the
+    # return-to-start motion later presses do. False: live as soon as the
+    # controllers are tracked.
+    start_on_right_a: bool = True
     # When to open the CloudXR/OpenXR session: at connect() (default) or lazily
     # on the first get_action(). "first_action" is a mitigation for Jetson Orin
     # hosts where creating Python threads after the CloudXR service starts can

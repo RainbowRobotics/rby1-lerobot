@@ -51,6 +51,8 @@ def make_teleop(session, reader_holder, **cfg_overrides):
     # tests cover the defaults).
     cfg_overrides.setdefault("reference_source", "auto")
     cfg_overrides.setdefault("ee_position_latch_on_a", False)
+    # … and the first-Right-A start gate (covered by its own test).
+    cfg_overrides.setdefault("start_on_right_a", False)
     cfg = Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **cfg_overrides)
 
     def reader_factory(address, model):
@@ -143,6 +145,59 @@ def test_deadman_follows_holds_and_gripper(stubbed_pipeline, monkeypatch):
     session.push(_frame(right=fakes.controller(_abs_hand(1.0), squeeze=0.9), body=body))
     a = t.get_action()
     assert a["right_ee.x"] == pytest.approx(goal[0])
+
+
+def test_nothing_follows_until_the_first_right_a(stubbed_pipeline, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    body = _abs_body()
+    head = fakes.head((0.0, 0.0, 1.6))
+    session = fakes.FakeSession()
+    session.push(_frame(right=fakes.controller(_abs_hand(0.3)), head=head, body=body))
+    readers: list = []
+    t = make_teleop(session, readers, torso_source="head", torso_engage="always", use_left_arm=False,
+                    start_on_right_a=True, **ABS_KW)
+    t.connect()
+    a0 = t.get_action()
+    r = readers[0]
+    assert not t.is_started
+
+    # Squeeze, trigger, thumbstick, a turned and moved head: everything is ignored.
+    turned = fakes.head((0.2, 0.0, 1.5), Rotation.from_euler("z", 40, degrees=True).as_quat())
+    busy = fakes.controller(_abs_hand(0.5, 0.0, 0.1), squeeze=0.9, trigger=1.0, thumb=(0.0, 1.0))
+    for _ in range(3):
+        clock[0] += 0.1
+        session.push(_frame(right=busy, head=turned, body=body))
+        a = t.get_action()
+        assert a == a0
+    assert a["right_gripper_0.pos"] == 1.0 and a["x.vel"] == 0.0
+    assert a["right_ee.x"] == pytest.approx(r.right_ee[0, 3]) and a["torso_ee.z"] == pytest.approx(r.torso[2, 3])
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], r.head_q)
+    assert not t._clutch["right"].engaged and not t._clutch["torso"].engaged
+
+    # First Right A: starts, but does not run the return-to-start motion.
+    clock[0] += 0.1
+    session.push(_frame(right=fakes.controller(_abs_hand(0.3), primary=True), head=turned, body=body))
+    a = t.get_action()
+    assert t.is_started and "reset.cmd" not in a and not t._returning
+    assert a["right_ee.x"] == pytest.approx(a0["right_ee.x"])
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], r.head_q, atol=1e-6)  # no head jump
+
+    # Now the trigger drives the gripper and a squeeze engages the arm.
+    clock[0] += 0.1
+    session.push(_frame(right=fakes.controller(_abs_hand(0.3), squeeze=0.9, trigger=0.75), head=turned, body=body))
+    a = t.get_action()
+    assert a["right_gripper_0.pos"] == pytest.approx(0.25)
+    assert t._clutch["right"].engaged and t._clutch["torso"].engaged
+    np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], r.head_q, atol=1e-6)  # same look direction
+
+    # A later Right A is the normal return-to-start.
+    clock[0] += 0.1
+    session.push(_frame(right=fakes.controller(_abs_hand(0.3)), head=turned, body=body))
+    t.get_action()
+    clock[0] += 0.1
+    session.push(_frame(right=fakes.controller(_abs_hand(0.3), primary=True), head=turned, body=body))
+    assert "reset.cmd" in t.get_action()
 
 
 def test_stop_and_resume(stubbed_pipeline, monkeypatch):
@@ -719,7 +774,7 @@ def test_viz_enabled_uses_televiz_owned_session(stubbed_pipeline):
         return readers[-1]
 
     t = mod.Rby1XR(
-        Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **cfg),
+        Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, **cfg}),
         session_factory=lambda pipeline: session,
         state_reader_factory=reader_factory,
         viz_module=FakeTeleviz,
@@ -886,7 +941,7 @@ def test_camera_panel_grab_holds_gripper_and_blocks_clutch(stubbed_pipeline, mon
         readers.append(fakes.FakeStateReader(address, model))
         return readers[-1]
 
-    t = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **cfg),
+    t = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, **cfg}),
                    session_factory=lambda pipeline: session, state_reader_factory=reader_factory,
                    viz_module=FakeTeleviz, viz_uploader=lambda f: f)
     t.connect()
@@ -927,7 +982,7 @@ def test_camera_panel_grab_holds_gripper_and_blocks_clutch(stubbed_pipeline, mon
     # A new teleop restores the saved layout.
     session2 = fakes.FakeSession()
     session2.push(_frame(right=fakes.controller()))
-    t2 = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **cfg),
+    t2 = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, **cfg}),
                     session_factory=lambda pipeline: session2, state_reader_factory=reader_factory,
                     viz_module=FakeTeleviz, viz_uploader=lambda f: f)
     t2.connect()
