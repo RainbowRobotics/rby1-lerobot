@@ -273,10 +273,11 @@ class Rby1Config(RobotConfig):
     ee_torso_target_gains: Tuple[float, float, float, float] = TORSO_TARGET_GAINS
 
     # ── Arm solvers (the same gains drive both arms) ───────────────────
-    # Joint stiffness and torque limit: the same values as joint impedance
-    # (joint_impedance_arm_stiffness / _torque_limit above).
+    # Joint stiffness: one third of the joint impedance values
+    # (joint_impedance_arm_stiffness above), softer for XR teleoperation.
+    # Torque limit: the same values as joint impedance.
     ee_arm_stiffness: List[float] = field(
-        default_factory=lambda: [1075.0, 990.0, 580.0, 265.0, 190.0, 205.0, 300.0]
+        default_factory=lambda: [358.0, 330.0, 193.0, 88.0, 63.0, 68.0, 100.0]
     )
     ee_arm_torque_limit: List[float] = field(
         default_factory=lambda: [30.0, 30.0, 25.0, 18.0, 8.0, 8.0, 8.0]

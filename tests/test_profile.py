@@ -39,7 +39,7 @@ def test_profile_contents(recorded) -> None:
     assert len(data["core_parameters"]) == len(rby.CORE_PARAMETERS)
     # Recorded after configure(): the plugin's cutoff, not the robot's stored 15 Hz.
     assert data["core_parameters"]["joint_position_command.cutoff_frequency"]["value"] == 5.0
-    assert data["robot_config"]["ee_arm_stiffness"][0] == 1075.0
+    assert data["robot_config"]["ee_arm_stiffness"][0] == 358.0
 
 
 def test_cutoff_is_session_only_and_restored() -> None:
