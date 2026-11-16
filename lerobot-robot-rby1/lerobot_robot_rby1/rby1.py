@@ -369,7 +369,7 @@ class Rby1(Robot):
             self._ready_right,
             self._ready_left,
             self._ready_head,
-        ) = ready_pose_for_version(self._resolved_version)
+        ) = ready_pose_for_version(self._resolved_version, self._config.action_mode)
         if self._config.action_mode == "ee" and self._config.ee_ready_torso_deg is not None:
             torso = np.deg2rad(np.asarray(self._config.ee_ready_torso_deg, dtype=np.float64))
             self._ready_body = np.concatenate([torso, self._ready_right, self._ready_left])

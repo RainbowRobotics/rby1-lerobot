@@ -187,6 +187,35 @@ def test_ee_ready_torso_deg_overrides_the_ready_torso() -> None:
         robot.disconnect()
 
 
+def test_ee_mode_ready_arms_stay_close_to_the_body() -> None:
+    from lerobot_robot_rby1.constants import ready_pose_for_version
+
+    for version in ("1.2", "1.3"):
+        body_j, right_j, left_j, _ = ready_pose_for_version(version)
+        body_e, right_e, left_e, _ = ready_pose_for_version(version, "ee")
+        assert np.rad2deg([right_j[1], left_j[1]]) == pytest.approx([-65.0, 65.0])
+        assert np.rad2deg([right_e[1], left_e[1]]) == pytest.approx([-10.0, 10.0])
+        # Only arm_1 differs; the 20-DoF body vector carries the same arms.
+        assert np.delete(right_e, 1) == pytest.approx(np.delete(right_j, 1))
+        assert np.delete(left_e, 1) == pytest.approx(np.delete(left_j, 1))
+        assert body_e[:6] == pytest.approx(body_j[:6])
+        assert body_e[6:13] == pytest.approx(right_e) and body_e[13:] == pytest.approx(left_e)
+
+    robot = _connect(action_mode="ee")
+    try:
+        assert np.rad2deg(robot._ready_right[1]) == pytest.approx(-10.0)
+        assert np.rad2deg(robot._ready_left[1]) == pytest.approx(10.0)
+        q = np.asarray(robot._robot.get_state().position)  # after the ready motion at connect
+        assert q[robot._model.right_arm_idx] == pytest.approx(robot._ready_right)
+    finally:
+        robot.disconnect()
+    robot = _connect()
+    try:
+        assert np.rad2deg(robot._ready_right[1]) == pytest.approx(-65.0)
+    finally:
+        robot.disconnect()
+
+
 def test_ee_ready_torso_deg_length_is_checked() -> None:
     with pytest.raises(ValueError, match="ee_ready_torso_deg"):
         Rby1Config(address="stub.invalid:1", ee_ready_torso_deg=[0.0, 45.0])

@@ -444,6 +444,7 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `ee_null_right_arm_deg` / `ee_null_left_arm_deg` | — | Nullspace joint target of each arm (deg) |
 | `ee_nullspace_weight` / `ee_nullspace_stiffness` / `ee_nullspace_damping_ratio` | `[2,2,2,2,2,2,1]` / `0.2` / `1.0` | Nullspace gains |
 | `ee_posture_hint_weight` | `4.0` | Nullspace weight of arm joints that carry a posture hint in the action |
+| arm ready pose (not a parameter) | `arm_1` = −10° / +10° | In EE mode the ready pose keeps the upper arms close to the body (right / left `arm_1`); joint mode uses −65° / +65°. The other arm joints are the same in both modes |
 | `ee_ready_torso_deg` | `None` | Torso ready pose (deg, `torso_0..5`) used in EE mode instead of the default. The default (`torso_2` = 0) is outside `ee_torso_joint_limits`; use e.g. `[0, 45, -90, 45, 0, 0]` with `use_torso=True` |
 | `ee_torso_stiffness` / `ee_torso_torque_limit` / `ee_torso_damping_ratio` | `[1700]*6` / `[600]*6` / `1.0` | Torso solver joint gains |
 | `ee_torso_target_gains` | `(1.0, π/2, 20, 40π)` | Torso target limits (same order as the arm) |

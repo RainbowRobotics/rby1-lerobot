@@ -133,12 +133,25 @@ READY_LEFT_V13 = np.deg2rad([15.0, 65.0, 15.0, -115.0, 0.0, 0.0, 0.0])
 READY_POSE_V13 = np.concatenate([READY_TORSO, READY_RIGHT_V13, READY_LEFT_V13])  # (20,)
 
 
-def ready_pose_for_version(version: str):
+# EE mode (action_mode="ee") keeps the upper arms close to the body: arm_1 is
+# -10 deg (right) / +10 deg (left) instead of -/+65 deg. The elbows then start
+# near the nullspace posture of the Cartesian solvers (arm_1 = -/+30 deg).
+EE_READY_ARM_1 = np.deg2rad(10.0)
+
+
+def ready_pose_for_version(version: str, action_mode: str = "joint"):
     """Return ``(body_pose, right_arm, left_arm, head)`` for a firmware version.
 
     ``body_pose`` is the 20-DOF [torso | right arm | left arm] vector. v1.3 uses
-    the wrist-zeroed arm pose; every other version uses the v1.2 pose.
+    the wrist-zeroed arm pose; every other version uses the v1.2 pose. With
+    ``action_mode="ee"`` arm_1 of both arms is ``EE_READY_ARM_1`` towards the body.
     """
     if (version or "").strip() == "1.3":
-        return READY_POSE_V13, READY_RIGHT_V13, READY_LEFT_V13, READY_HEAD
-    return READY_POSE, READY_RIGHT, READY_LEFT, READY_HEAD
+        body, right, left = READY_POSE_V13, READY_RIGHT_V13, READY_LEFT_V13
+    else:
+        body, right, left = READY_POSE, READY_RIGHT, READY_LEFT
+    if action_mode == "ee":
+        right, left = right.copy(), left.copy()
+        right[1], left[1] = -EE_READY_ARM_1, EE_READY_ARM_1
+        body = np.concatenate([body[: body.size - right.size - left.size], right, left])
+    return body, right, left, READY_HEAD

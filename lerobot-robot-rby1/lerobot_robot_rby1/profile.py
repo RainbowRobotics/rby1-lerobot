@@ -262,13 +262,13 @@ def read_robot_section(sdk_robot: Any, model: str, version: str) -> dict[str, An
     return section
 
 
-def plugin_constants(version: str) -> dict[str, Any]:
+def plugin_constants(version: str, action_mode: str = "joint") -> dict[str, Any]:
     """Behaviour-relevant values hard-coded in this plugin (not in Rby1Config)."""
     from . import command_builders as cb
     from . import constants as c
     from .constants import ready_pose_for_version
 
-    body, right, left, head = ready_pose_for_version(version)
+    body, right, left, head = ready_pose_for_version(version, action_mode)
     return to_jsonable(
         {
             "ready_pose": {"body": body, "head": head},
@@ -308,7 +308,7 @@ def build_profile(
         "robot": robot or {},
         "core_parameters": core_parameters or {},
         "robot_config": to_jsonable(robot_config),
-        "plugin_constants": plugin_constants(version),
+        "plugin_constants": plugin_constants(version, getattr(robot_config, "action_mode", "joint")),
     }
     return profile
 
