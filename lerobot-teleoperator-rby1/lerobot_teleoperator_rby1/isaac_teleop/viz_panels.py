@@ -49,34 +49,41 @@ class PanelLayout:
 CUDA_UPLOAD_HINT = (
     "Televiz takes camera frames as CUDA arrays, uploaded here with CuPy. "
     "`isaaccapture[cloudxr]` installs `cupy-cuda12x`; check that it imports and reaches the "
-    "GPU: python -c \"import cupy; print(cupy.zeros(1).device)\""
+    "GPU: python -c \"import cupy, numpy; print(cupy.asarray(numpy.zeros(1)).device)\""
 )
 
-# One reusable (H, W, 4) device buffer per resolution, alpha pre-filled.
-# ``layer.submit()`` copies before it returns, so reusing the buffer for the
-# next frame (or another panel of the same size) is safe. Uploads happen on
-# the render thread only.
-_cupy_buffers: dict[tuple[int, int], Any] = {}
+# One reusable (H, W, 4) host buffer (alpha pre-filled) and device buffer per
+# resolution. ``layer.submit()`` copies before it returns, so reusing the
+# device buffer for the next frame (or another panel of the same size) is
+# safe. Uploads happen on the render thread only.
+_cupy_buffers: dict[tuple[int, int], tuple[np.ndarray, Any]] = {}
 
 
 def rgb_to_rgba_cuda(frame: np.ndarray) -> Any:
     """Upload an (H, W, 3|4) uint8 host frame as a contiguous (H, W, 4) CUDA array (CuPy).
 
-    Same method as the upstream ``examples/camera_viz``. Raises a RuntimeError
-    with install guidance when CuPy cannot reach the GPU.
+    The RGBA frame is assembled on the host and copied to the device in one
+    memcpy (``ndarray.set``). Unlike the upstream ``examples/camera_viz``,
+    nothing is assigned on the device: CuPy compiles a kernel for that, which
+    needs the CUDA toolkit headers, and the RB-Y1 UPC (JetPack 6) only has the
+    driver library. Raises a RuntimeError with install guidance when CuPy
+    cannot reach the GPU.
     """
     try:
         import cupy as cp
 
-        frame = np.ascontiguousarray(frame)
         h, w, channels = frame.shape
-        buf = _cupy_buffers.get((h, w))
-        if buf is None:
-            buf = cp.empty((h, w, 4), dtype=cp.uint8)
-            buf[..., 3] = 255
-            _cupy_buffers[(h, w)] = buf
-        buf[..., :channels] = cp.asarray(frame)
-        return buf
+        buffers = _cupy_buffers.get((h, w))
+        if buffers is None:
+            host = np.full((h, w, 4), 255, dtype=np.uint8)
+            buffers = (host, cp.empty((h, w, 4), dtype=cp.uint8))
+            _cupy_buffers[(h, w)] = buffers
+        host, device = buffers
+        host[..., :channels] = frame
+        if channels < 4:
+            host[..., 3] = 255
+        device.set(host)
+        return device
     except Exception as e:  # noqa: BLE001
         reason = f"{e.__class__.__name__}: {str(e).splitlines()[0][:200] if str(e) else ''}"
         raise RuntimeError(f"{CUDA_UPLOAD_HINT} ({reason})") from e

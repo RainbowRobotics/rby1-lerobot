@@ -257,15 +257,15 @@ lerobot-teleoperate ... \
 ```
 
 Televiz takes frames as CUDA arrays. They are uploaded with **CuPy** (`cupy-cuda12x`,
-installed by `isaaccapture[cloudxr]`), as in the upstream `camera_viz` example. The
-teleoperator runs a small upload check when the Televiz session is created and stops
+installed by `isaaccapture[cloudxr]`): the RGBA frame is assembled on the host and copied
+to the GPU in one step, which needs only the CUDA driver library, not the CUDA toolkit
+(the UPC with JetPack 6 has no toolkit headers, so CuPy cannot compile kernels there).
+The teleoperator runs a small upload check when the Televiz session is created and stops
 with a hint if CuPy cannot reach the GPU:
 
 ```bash
-python -c "import cupy; print(cupy.zeros(1).device)"
+python -c "import cupy, numpy; print(cupy.asarray(numpy.zeros(1)).device)"
 ```
-
-`cupy-cuda12x` has not been checked on the UPC (JetPack 6) yet.
 
 Panels follow your head position, yaw and pitch — never roll — (`viz_lock_mode=gimbal`;
 `viz_follow_pitch=false` for yaw only, `head` = full head lock including roll, `world` =

@@ -209,11 +209,20 @@ def test_cupy_uploader_reuses_one_buffer_per_resolution(monkeypatch):
 
     allocations = []
 
+    class DeviceArray(np.ndarray):
+        """Only what the uploader may use: element assignment would need a compiled kernel."""
+
+        def set(self, host):
+            np.copyto(np.asarray(self), host)
+
+        def __setitem__(self, key, value):
+            raise AssertionError("device-side assignment needs the CUDA toolkit headers")
+
     def empty(shape, dtype):
         allocations.append(shape)
-        return np.empty(shape, dtype)
+        return np.empty(shape, dtype).view(DeviceArray)
 
-    fake_cupy = types.SimpleNamespace(empty=empty, asarray=np.asarray, uint8=np.uint8)
+    fake_cupy = types.SimpleNamespace(empty=empty, uint8=np.uint8)
     monkeypatch.setitem(sys.modules, "cupy", fake_cupy)
     monkeypatch.setattr(vp, "_cupy_buffers", {})
 
@@ -229,6 +238,7 @@ def test_cupy_uploader_reuses_one_buffer_per_resolution(monkeypatch):
 
     rgba = np.full((2, 3, 4), 7, np.uint8)  # handle images already carry alpha
     np.testing.assert_array_equal(vp.rgb_to_rgba_cuda(rgba), rgba)
+    assert (vp.rgb_to_rgba_cuda(rgb)[..., 3] == 255).all()  # alpha restored for the next RGB frame
 
     vp.rgb_to_rgba_cuda(np.zeros((4, 4, 3), np.uint8))
     assert allocations == [(2, 3, 4), (4, 4, 4)]
@@ -243,7 +253,7 @@ def test_cupy_uploader_error_names_the_fix(monkeypatch):
     def empty(shape, dtype):
         raise OSError("libcuda.so.1: cannot open shared object file")
 
-    monkeypatch.setitem(sys.modules, "cupy", types.SimpleNamespace(empty=empty, asarray=np.asarray, uint8=np.uint8))
+    monkeypatch.setitem(sys.modules, "cupy", types.SimpleNamespace(empty=empty, uint8=np.uint8))
     monkeypatch.setattr(vp, "_cupy_buffers", {})
     with pytest.raises(RuntimeError, match="(?s)CuPy.*libcuda"):
         vp.rgb_to_rgba_cuda(np.zeros((2, 2, 3), np.uint8))
