@@ -71,6 +71,7 @@ from .arm_retargeter import ArmPostureRetargeter, robot_reach
 from .base import IsaacTeleopTeleoperator
 from .clutch import Clutch
 from .config_isaac_teleop import Rby1XRConfig
+from .gating import Gates, Mode, compute_gates
 from .retargeters import (
     HeadRetargeter,
     body_drive_velocity,
@@ -615,13 +616,16 @@ class Rby1XR(IsaacTeleopTeleoperator):
             self._latch_head_offset(frame)
 
         self._advance_return_motion(frame, snap)
-        self._update_arm_absolute("right", frame, snap, now, dt)
-        self._update_arm_absolute("left", frame, snap, now, dt)
-        self._update_posture_hints(frame, snap, now, dt)
-        self._update_torso(frame, get_snap)
-        self._update_head(frame, get_snap)
-        self._update_grippers(frame)
-        self._update_base(frame)
+        # What may move this tick. Evaluated after the return motion advanced
+        # (it ends on its second tick) and after the body drive settled.
+        gates = self._gates()
+        self._update_arm_absolute("right", frame, snap, now, dt, gates)
+        self._update_arm_absolute("left", frame, snap, now, dt, gates)
+        self._update_posture_hints(frame, snap, now, dt, gates)
+        self._update_torso(frame, get_snap, gates)
+        self._update_head(frame, get_snap, gates)
+        self._update_grippers(frame, gates)
+        self._update_base(frame, gates)
         self._log_status(frame)
         return self._build_action()
 
@@ -634,10 +638,24 @@ class Rby1XR(IsaacTeleopTeleoperator):
         """False while waiting for the first Right A (``start_on_right_a``)."""
         return self._started
 
-    @property
-    def _idle(self) -> bool:
-        """Nothing may follow the headset: stopped (Right B) or not started yet."""
-        return self._stopped or not self._started
+    def _mode(self) -> Mode:
+        return Mode(
+            started=self._started,
+            stopped=self._stopped,
+            returning=self._returning,
+            grip_held=self._grip_held,
+            body_drive=self._body_drive is not None,
+        )
+
+    def _gates(self) -> Gates:
+        """What may follow the operator right now (the one place that decides it: ``gating``)."""
+        cfg = self.config
+        return compute_gates(
+            self._mode(),
+            head_base_require_grip=cfg.head_base_require_grip,
+            use_mobile_base=cfg.use_mobile_base,
+            body_drive_enabled=cfg.body_drive_enabled,
+        )
 
     # ------------------------------------------------------------------
     # Body drive: Left X held -> the base follows the operator 1:1
@@ -651,13 +669,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
         )
         pressed = held and not self._grip_held
         self._grip_held = held
-        if pressed and cfg.head_base_require_grip and self._started and not self._idle and not self._returning:
+        if pressed and cfg.head_base_require_grip and self._mode().active:
             # The head held while the grips were released: start from where it is.
             self._relatch_head(snap)
-
-    @property
-    def _head_base_live(self) -> bool:
-        return self._grip_held or not self.config.head_base_require_grip
 
     def _relatch_head(self, snap: RobotSnapshot) -> None:
         """Map the look direction of the next tracked head frame onto the measured head joints."""
@@ -694,11 +708,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             return False
         if self._body_drive_blocked:
             return False
-        allowed = (
-            cfg.body_drive_enabled and cfg.use_mobile_base and self._started and not self._stopped
-            and not self._returning and self._head_base_live
-        )
-        if not allowed:
+        if not self._gates().body_drive:
             self._end_body_drive("stopped, or no grip squeezed")
             return False
         body_yaw = self._shoulder_line_yaw(raw)
@@ -1131,7 +1141,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._head_latch_target = None
         logger.info("Head offset latched (headset look direction ↦ head joints %s).", np.round(head_q, 3).tolist())
 
-    def _update_arm_absolute(self, side: str, frame: XRFrame, snap: RobotSnapshot, t: float, dt: float) -> None:
+    def _update_arm_absolute(
+        self, side: str, frame: XRFrame, snap: RobotSnapshot, t: float, dt: float, gates: Gates
+    ) -> None:
         clutch = self._clutch[side]
         mapper = self._abs.get(side)
         if clutch is None or mapper is None:
@@ -1170,10 +1182,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
             mapper.reset_rate_limit(None)
             self._abs_state[side] = state
 
-        if not self._started:
-            release("hold (press Right A to start)")
+        if not gates.arms:
+            release(gates.arm_hold)
             return
-        if self._stopped or self._returning or ctrl is None:
+        if ctrl is None:
             release("hold")
             return
         if self._needs_reference and cfg.reference_source == "shoulders":
@@ -1213,7 +1225,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
             self._abs_state[side] = "track"
         clutch.set_commanded(T)
 
-    def _update_posture_hints(self, frame: XRFrame, snap: RobotSnapshot, t: float, dt: float) -> None:
+    def _update_posture_hints(
+        self, frame: XRFrame, snap: RobotSnapshot, t: float, dt: float, gates: Gates
+    ) -> None:
         """Retarget the arm posture only while that arm is engaged (squeeze held).
 
         A released arm must not move at all, so its nullspace hint is frozen
@@ -1224,7 +1238,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         dropouts while engaged keep the last hint (no fall-back to the robot's
         default nullspace pose mid-motion).
         """
-        if not self._posture or self._idle or self._returning:
+        if not self._posture or not gates.posture_hints:
             return
         for side, retargeter in self._posture.items():
             clutch = self._clutch.get(side)
@@ -1279,19 +1293,13 @@ class Rby1XR(IsaacTeleopTeleoperator):
             return frame.head.pose if frame.head is not None else None
         return None
 
-    def _update_torso(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot]) -> None:
+    def _update_torso(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot], gates: Gates) -> None:
         clutch = self._clutch["torso"]
         if clutch is None:
             return
         driver = None
-        if self._body_drive is not None:
-            self._torso_hold_reason = "base drive (Left X)"
-        elif not self._started:
-            self._torso_hold_reason = "not started (press Right A)"
-        elif self._stopped:
-            self._torso_hold_reason = "stopped (Right B)"
-        elif self._returning:
-            self._torso_hold_reason = "returning to start pose (Right A)"
+        if not gates.torso:
+            self._torso_hold_reason = gates.torso_hold
         elif not self._torso_engage_allowed():
             self._torso_hold_reason = f"arms not clutched (torso_engage={self.config.torso_engage})"
         else:
@@ -1337,8 +1345,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
             np.radians(cfg.torso_rpy_max_deg),
         )
 
-    def _update_head(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot]) -> None:
-        if not self.config.use_head or self._idle or self._returning or not self._head_base_live:
+    def _update_head(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot], gates: Gates) -> None:
+        if not self.config.use_head or not gates.head:
             return
         if self.config.wear_mode == "neck":
             return  # the held (start / ready) gaze stays; torso compensation happens in _build_action
@@ -1351,11 +1359,11 @@ class Rby1XR(IsaacTeleopTeleoperator):
             return
         self._head.update(frame.head.pose, snap.torso)
 
-    def _update_grippers(self, frame: XRFrame) -> None:
+    def _update_grippers(self, frame: XRFrame, gates: Gates) -> None:
         # Trigger 1 (squeezed) -> closed. Dataset convention: 1.0 = open. A free
         # hand pointing at / holding a camera-panel handle keeps its last gripper
         # value: its trigger is a UI click, not a gripper command.
-        if not self._started:
+        if not gates.grippers:
             return  # keep the grippers where they are until the first Right A
         ui = self._viz.ui_active() if self._viz is not None else {}
         for side, ctrl in (("right", frame.right), ("left", frame.left)):
@@ -1367,13 +1375,13 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 continue
             self._gripper[side] = 1.0 - float(np.clip(ctrl.trigger, 0.0, 1.0))
 
-    def _update_base(self, frame: XRFrame) -> None:
+    def _update_base(self, frame: XRFrame, gates: Gates) -> None:
         cfg = self.config
-        if not cfg.use_mobile_base or self._idle or self._returning or not self._head_base_live:
+        if not gates.base:
             self._base_vel = (0.0, 0.0, 0.0)
             return
-        if self._body_drive is not None:
-            return  # _update_body_drive set the velocity; the thumbsticks are ignored
+        if not gates.base_sticks:
+            return  # body drive: _update_body_drive set the velocity; the thumbsticks are ignored
         self._base_vel = thumbsticks_to_base_vel(
             frame.right.thumbstick if frame.right is not None else None,
             frame.left.thumbstick if frame.left is not None else None,
@@ -1436,7 +1444,11 @@ class Rby1XR(IsaacTeleopTeleoperator):
             hint("left"),
             self._reach_status()
             + self._body_drive_status()
-            + ("" if self._head_base_live or not self._started else " | head/base hold (no grip)")
+            + (
+                " | head/base hold (no grip)"
+                if self._started and self.config.head_base_require_grip and not self._grip_held
+                else ""
+            )
             + ("" if self._started else " | NOT STARTED (press Right A)")
             + (" | STOPPED" if self._stopped else "")
             + (f" | wear={self.config.wear_mode}" if self.config.wear_mode != "head" else "")
