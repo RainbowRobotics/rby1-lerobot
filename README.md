@@ -214,6 +214,23 @@ python lerobot-teleoperator-rby1/scripts/isaac_preflight_upc.py \
   --robot 192.168.30.1:50051 --camera-serial XXXXXXXXX --record-dryrun
 ```
 
+### Checking without a robot or a headset
+
+`lerobot-teleoperator-rby1/scripts/isaac_sim_e2e.py` runs the real follower plugin and the
+real teleoperator against a **simulated** RB-Y1 core (the vendor `rby1-sim-isaac` image in
+SDK mode runs the same core software as the robot), with a scripted operator instead of a
+headset. It checks the start on Right A, the arm following, the body drive (signs and
+convergence), Right B and the return to start, and reports how much the joints move right
+after the first end-effector command:
+
+```bash
+# in the rby1-sim-isaac checkout: HEADLESS=1 ./docker/run_sdk.sh --image 0.11.0-m_v1.3-isaac6.2.0
+python lerobot-teleoperator-rby1/scripts/isaac_sim_e2e.py --out /tmp/e2e
+```
+
+It only accepts a local address, because it moves whatever it is pointed at.
+`tests/bench_isaac_tick.py` times one teleoperator tick.
+
 ### Run
 
 ```bash
