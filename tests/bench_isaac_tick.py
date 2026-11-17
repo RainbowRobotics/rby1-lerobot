@@ -62,7 +62,7 @@ def build():
     for _ in range(10):
         tick()
         time.sleep(0.01)
-    assert teleop.is_started and teleop._clutch["right"].engaged and teleop._clutch["left"].engaged
+    assert teleop.is_started and teleop._core._clutch["right"].engaged and teleop._core._clutch["left"].engaged
     return teleop, op, robot, session
 
 

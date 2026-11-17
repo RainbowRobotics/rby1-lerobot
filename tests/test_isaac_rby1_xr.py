@@ -19,6 +19,7 @@ from lerobot_teleoperator_rby1.isaac_teleop.xr_frame import (
     BodyJointIndex,
 )
 import isaac_fakes as fakes
+from rby1_xr_teleop.arm_retargeter import forward_points, robot_reach
 
 # Robot-frame head rotation looking straight ahead (anchor -Z -> robot +X).
 R_HEAD_FWD = np.array([[0, 0, -1], [-1, 0, 0], [0, 1, 0]], float)
@@ -109,7 +110,7 @@ def _abs_hand(dx=0.0, dy=0.0, dz=0.0):
 def _abs_goal(reader, dx=0.0, dy=0.0, dz=0.0, side="right"):
     from lerobot_teleoperator_rby1.isaac_teleop.arm_retargeter import robot_shoulder_position
 
-    k = mod.robot_reach("1.3") / 0.6
+    k = robot_reach("1.3") / 0.6
     return robot_shoulder_position(reader.torso, side) + np.array([dx, dy, dz]) * k
 
 
@@ -175,13 +176,13 @@ def test_nothing_follows_until_the_first_right_a(stubbed_pipeline, monkeypatch):
     assert a["right_gripper_0.pos"] == 1.0 and a["x.vel"] == 0.0
     assert a["right_ee.x"] == pytest.approx(r.right_ee[0, 3]) and a["torso_ee.z"] == pytest.approx(r.torso[2, 3])
     np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], r.head_q)
-    assert not t._clutch["right"].engaged and not t._clutch["torso"].engaged
+    assert not t._core._clutch["right"].engaged and not t._core._clutch["torso"].engaged
 
     # First Right A: starts, but does not run the return-to-start motion.
     clock[0] += 0.1
     session.push(_frame(right=fakes.controller(_abs_hand(0.3), primary=True), head=turned, body=body))
     a = t.get_action()
-    assert t.is_started and "reset.cmd" not in a and not t._returning
+    assert t.is_started and "reset.cmd" not in a and not t._core._returning
     assert a["right_ee.x"] == pytest.approx(a0["right_ee.x"])
     np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], r.head_q, atol=1e-6)  # no head jump
 
@@ -190,7 +191,7 @@ def test_nothing_follows_until_the_first_right_a(stubbed_pipeline, monkeypatch):
     session.push(_frame(right=fakes.controller(_abs_hand(0.3), squeeze=0.9, trigger=0.75), head=turned, body=body))
     a = t.get_action()
     assert a["right_gripper_0.pos"] == pytest.approx(0.25)
-    assert t._clutch["right"].engaged and t._clutch["torso"].engaged
+    assert t._core._clutch["right"].engaged and t._core._clutch["torso"].engaged
     np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], r.head_q, atol=1e-6)  # same look direction
 
     # A later Right A is the normal return-to-start.
@@ -251,15 +252,15 @@ def _cal_teleop(monkeypatch, **cfg):
 
 def test_right_a_calibrates_the_arm_reach_and_starts(stubbed_pipeline, monkeypatch, caplog):
     t, session, clock, reader = _cal_teleop(monkeypatch)
-    assert t._abs["right"].robot_reach == reader.reach["right"]  # shoulder -> link_arm_6 from the robot
-    assert t._abs["right"].calibrated_reach is None and "reach=uncalibrated" in t._reach_status()
+    assert t._core._abs["right"].robot_reach == reader.reach["right"]  # shoulder -> link_arm_6 from the robot
+    assert t._core._abs["right"].calibrated_reach is None and "reach=uncalibrated" in t._core._reach_status()
 
     _cal_hold(t, session, clock, right=0.62, left=0.60)
-    with caplog.at_level("INFO", logger=mod.logger.name):
+    with caplog.at_level("INFO", logger="rby1_xr_teleop"):
         _cal_press(t, session, clock, right=0.62, left=0.60)
     assert t.is_started and "Arm reach calibrated" in caplog.text
-    assert t._abs["right"].human_reach == pytest.approx(0.62) and t._abs["left"].human_reach == pytest.approx(0.60)
-    assert t._reach_status() == " reach=R0.62/L0.60 (x1.06/1.10)"
+    assert t._core._abs["right"].human_reach == pytest.approx(0.62) and t._core._abs["left"].human_reach == pytest.approx(0.60)
+    assert t._core._reach_status() == " reach=R0.62/L0.60 (x1.06/1.10)"
 
     # Fixed for the session: moving the hand maps with that scale, whatever the body joints say.
     scale = reader.reach["right"] / 0.62
@@ -271,7 +272,7 @@ def test_right_a_calibrates_the_arm_reach_and_starts(stubbed_pipeline, monkeypat
     session.push(_frame(right=fakes.controller(tuple((ABS_SHOULDER + [0.4, 0.0, 0.0]).tolist()), squeeze=0.9),
                         body=_abs_body()))
     a = t.get_action()
-    assert t._abs["right"].human_reach == pytest.approx(0.62)
+    assert t._core._abs["right"].human_reach == pytest.approx(0.62)
     # Absolute mapping (no position latch in these fixtures): 0.4 m in front of the
     # operator's shoulder is 0.4 * scale in front of the robot's.
     from lerobot_teleoperator_rby1.isaac_teleop.arm_retargeter import robot_shoulder_position
@@ -283,9 +284,9 @@ def test_first_right_a_without_a_usable_reach_does_not_start(stubbed_pipeline, m
     t, session, clock, _ = _cal_teleop(monkeypatch)
     # Arms not extended (0.30 m is below the accepted range).
     _cal_hold(t, session, clock, right=0.30, left=0.30)
-    with caplog.at_level("WARNING", logger=mod.logger.name):
+    with caplog.at_level("WARNING", logger="rby1_xr_teleop"):
         _cal_press(t, session, clock, right=0.30, left=0.30)
-    assert not t.is_started and t._abs["right"].calibrated_reach is None
+    assert not t.is_started and t._core._abs["right"].calibrated_reach is None
     assert "Hold both arms straight out" in caplog.text and "0.300 m" in caplog.text
 
     # Too few samples in the window (the press came right after extending the arms).
@@ -298,24 +299,24 @@ def test_first_right_a_without_a_usable_reach_does_not_start(stubbed_pipeline, m
     # Held long enough: accepted.
     _cal_hold(t, session, clock, right=0.6, left=0.6)
     _cal_press(t, session, clock, right=0.6, left=0.6)
-    assert t.is_started and t._abs["left"].human_reach == pytest.approx(0.6)
+    assert t.is_started and t._core._abs["left"].human_reach == pytest.approx(0.6)
 
 
 def test_arm_reach_asymmetry_and_single_arm(stubbed_pipeline, monkeypatch, caplog):
     # One arm clearly shorter (not fully extended): the longer value is used for both.
     t, session, clock, _ = _cal_teleop(monkeypatch)
     _cal_hold(t, session, clock, right=0.64, left=0.50)
-    with caplog.at_level("WARNING", logger=mod.logger.name):
+    with caplog.at_level("WARNING", logger="rby1_xr_teleop"):
         _cal_press(t, session, clock, right=0.64, left=0.50)
     assert t.is_started and "differs between the arms" in caplog.text
-    assert t._abs["right"].human_reach == pytest.approx(0.64) and t._abs["left"].human_reach == pytest.approx(0.64)
+    assert t._core._abs["right"].human_reach == pytest.approx(0.64) and t._core._abs["left"].human_reach == pytest.approx(0.64)
 
     # Only one arm usable (the other controller is not tracked): its value is shared.
     t, session, clock, _ = _cal_teleop(monkeypatch)
     _cal_hold(t, session, clock, right=0.58, left=None)
     _cal_press(t, session, clock, right=0.58, left=None)
     assert t.is_started
-    assert t._abs["right"].human_reach == pytest.approx(0.58) and t._abs["left"].human_reach == pytest.approx(0.58)
+    assert t._core._abs["right"].human_reach == pytest.approx(0.58) and t._core._abs["left"].human_reach == pytest.approx(0.58)
 
 
 def test_later_right_a_recalibrates_only_with_extended_arms(stubbed_pipeline, monkeypatch, caplog):
@@ -326,24 +327,24 @@ def test_later_right_a_recalibrates_only_with_extended_arms(stubbed_pipeline, mo
 
     # Right A with the arms hanging / bent: the return-to-start still runs, the reach is kept.
     _cal_hold(t, session, clock, right=0.50, left=0.50)
-    with caplog.at_level("INFO", logger=mod.logger.name):
+    with caplog.at_level("INFO", logger="rby1_xr_teleop"):
         a = _cal_press(t, session, clock, right=0.50, left=0.50)
     assert "reset.cmd" in a and "Arm reach kept" in caplog.text
-    assert t._abs["right"].human_reach == pytest.approx(0.60)
-    t._return_motion = None  # skip the return motion bookkeeping
+    assert t._core._abs["right"].human_reach == pytest.approx(0.60)
+    t._core._return_motion = None  # skip the return motion bookkeeping
 
     # Out of range entirely: kept as well.
     _cal_hold(t, session, clock, right=0.20, left=0.20)
     assert "reset.cmd" in _cal_press(t, session, clock, right=0.20, left=0.20)
-    assert t._abs["right"].human_reach == pytest.approx(0.60)
-    t._return_motion = None
+    assert t._core._abs["right"].human_reach == pytest.approx(0.60)
+    t._core._return_motion = None
 
     # Extended again, a little longer: replaced, and the offsets are latched anew.
-    t._needs_offset_latch = {"right": False, "left": False}
+    t._core._needs_offset_latch = {"right": False, "left": False}
     _cal_hold(t, session, clock, right=0.63, left=0.62)
     _cal_press(t, session, clock, right=0.63, left=0.62)
-    assert t._abs["right"].human_reach == pytest.approx(0.63) and t._abs["left"].human_reach == pytest.approx(0.62)
-    assert t._needs_offset_latch == {"right": True, "left": True}
+    assert t._core._abs["right"].human_reach == pytest.approx(0.63) and t._core._abs["left"].human_reach == pytest.approx(0.62)
+    assert t._core._needs_offset_latch == {"right": True, "left": True}
 
 
 def test_arm_calibration_config_and_profile(stubbed_pipeline, monkeypatch, tmp_path):
@@ -429,7 +430,7 @@ def test_body_drive_follows_steps_and_turns(stubbed_pipeline, monkeypatch):
     # Pressing Left X moves nothing by itself; the torso target is frozen from here on.
     a = step(left_x=True)
     assert (a["x.vel"], a["y.vel"], a["theta.vel"]) == (0.0, 0.0, 0.0)
-    assert t._body_drive is not None and not t._clutch["torso"].engaged
+    assert t._core._body_drive is not None and not t._core._clutch["torso"].engaged
     torso = {k: v for k, v in a.items() if k.startswith("torso_ee.")}
 
     # One step forward and a little to the left: the base is asked to follow.
@@ -456,9 +457,9 @@ def test_body_drive_follows_steps_and_turns(stubbed_pipeline, monkeypatch):
     a = step(xy=(0.2, 0.1), body_deg=30.0, left_x=True)
     assert (a["x.vel"], a["y.vel"], a["theta.vel"]) == pytest.approx((0.0, 0.0, 0.0), abs=1e-6)
     a = step(xy=(0.2, 0.1), body_deg=30.0)
-    assert t._body_drive is None and (a["x.vel"], a["y.vel"], a["theta.vel"]) == (0.0, 0.0, 0.0)
+    assert t._core._body_drive is None and (a["x.vel"], a["y.vel"], a["theta.vel"]) == (0.0, 0.0, 0.0)
     assert (a["head_0.pos"], a["head_1.pos"]) == pytest.approx(head, abs=1e-6)
-    assert t._frame.yaw == pytest.approx(math.radians(-30.0))  # the operator frame stays with the body
+    assert t._core._frame.yaw == pytest.approx(math.radians(-30.0))  # the operator frame stays with the body
 
 
 def test_body_drive_keeps_a_clutched_arm_where_it_is(stubbed_pipeline, monkeypatch):
@@ -472,7 +473,7 @@ def test_body_drive_keeps_a_clutched_arm_where_it_is(stubbed_pipeline, monkeypat
     for xy, deg in (((0.05, 0.0), 10.0), ((0.1, 0.05), 25.0), ((0.1, 0.05), 40.0)):
         a = step(xy=xy, body_deg=deg, squeeze=0.9, left_x=True)
         assert {k: v for k, v in a.items() if k.startswith("right_ee.")} == pytest.approx(arm, abs=1e-6)
-    assert t._clutch["right"].engaged and a["theta.vel"] > 0.0
+    assert t._core._clutch["right"].engaged and a["theta.vel"] > 0.0
 
 
 def test_body_drive_stops_on_lost_tracking_and_large_error(stubbed_pipeline, monkeypatch, caplog):
@@ -480,9 +481,9 @@ def test_body_drive_stops_on_lost_tracking_and_large_error(stubbed_pipeline, mon
     step(left_x=True)
     assert step(xy=(0.1, 0.0), left_x=True)["x.vel"] == pytest.approx(0.1)
     # Shoulders lost: stop, and stay stopped until Left X is released and pressed again.
-    with caplog.at_level("WARNING", logger=mod.logger.name):
+    with caplog.at_level("WARNING", logger="rby1_xr_teleop"):
         a = step(xy=(0.1, 0.0), left_x=True, shoulders=False)
-    assert a["x.vel"] == 0.0 and t._body_drive is None and "press it again" in caplog.text
+    assert a["x.vel"] == 0.0 and t._core._body_drive is None and "press it again" in caplog.text
     assert step(xy=(0.3, 0.0), left_x=True)["x.vel"] == 0.0
     step(xy=(0.3, 0.0))
     step(xy=(0.3, 0.0), left_x=True)  # new origin here
@@ -490,21 +491,21 @@ def test_body_drive_stops_on_lost_tracking_and_large_error(stubbed_pipeline, mon
 
     # A jump beyond body_drive_max_error_m (tracking glitch): stop as well.
     a = step(xy=(1.5, 0.0), left_x=True)
-    assert a["x.vel"] == 0.0 and t._body_drive is None and t._body_drive_blocked
+    assert a["x.vel"] == 0.0 and t._core._body_drive is None and t._core._body_drive_blocked
 
     # Right B stops everything; the mode does not come back while stopped.
     step(xy=(1.5, 0.0))
     step(xy=(1.5, 0.0), left_x=True)
-    assert t._body_drive is not None
-    t._stopped = True
-    assert step(xy=(1.7, 0.0), left_x=True)["x.vel"] == 0.0 and t._body_drive is None
+    assert t._core._body_drive is not None
+    t._core._stopped = True
+    assert step(xy=(1.7, 0.0), left_x=True)["x.vel"] == 0.0 and t._core._body_drive is None
 
 
 def test_body_drive_needs_odometry_mobile_base_and_a_started_session(stubbed_pipeline, monkeypatch):
     t, reader, step = _drive_teleop(monkeypatch)
     reader.odometry = None
     step(left_x=True)
-    assert step(xy=(0.2, 0.0), left_x=True)["x.vel"] == 0.0 and t._body_drive is None
+    assert step(xy=(0.2, 0.0), left_x=True)["x.vel"] == 0.0 and t._core._body_drive is None
 
     t, reader, step = _drive_teleop(monkeypatch, body_drive_enabled=False)
     step(left_x=True)
@@ -516,7 +517,7 @@ def test_body_drive_needs_odometry_mobile_base_and_a_started_session(stubbed_pip
 
     t, reader, step = _drive_teleop(monkeypatch, use_mobile_base=False)
     step(left_x=True)
-    assert "x.vel" not in step(xy=(0.2, 0.0), left_x=True) and t._body_drive is None
+    assert "x.vel" not in step(xy=(0.2, 0.0), left_x=True) and t._core._body_drive is None
 
     with pytest.raises(ValueError, match="body_drive_kp_linear"):
         Rby1XRConfig(body_drive_kp_linear=0.0)
@@ -547,7 +548,7 @@ def test_head_and_base_hold_while_no_grip_is_squeezed(stubbed_pipeline, monkeypa
     assert (a["head_0.pos"], a["head_1.pos"]) == pytest.approx(head0)
     step(left_x=True, neck_deg=30.0)
     a = step(xy=(0.2, 0.0), left_x=True, neck_deg=30.0)
-    assert a["x.vel"] == 0.0 and t._body_drive is None
+    assert a["x.vel"] == 0.0 and t._core._body_drive is None
     step(xy=(0.2, 0.0), neck_deg=30.0)
 
     # Squeezing: the head does not jump to the 30 deg it is turned by — it starts from here.
@@ -563,15 +564,17 @@ def test_head_and_base_hold_while_no_grip_is_squeezed(stubbed_pipeline, monkeypa
     # Releasing the grip stops the base at once (body drive ends) and holds the head.
     a = step(xy=(0.3, 0.0), neck_deg=40.0, left_x=True)
     held = (a["head_0.pos"], a["head_1.pos"])
-    assert a["x.vel"] == 0.0 and t._body_drive is None
+    assert a["x.vel"] == 0.0 and t._core._body_drive is None
     reader.head_q = np.array(held)  # the (fake) robot followed the head command
     a = stick(xy=(0.3, 0.0), neck_deg=0.0)
     assert a["x.vel"] == 0.0 and (a["head_0.pos"], a["head_1.pos"]) == pytest.approx(held)
 
 
 def test_body_drive_on_a_differential_base_has_no_lateral_velocity(stubbed_pipeline, monkeypatch):
+    import dataclasses
+
     t, reader, step = _drive_teleop(monkeypatch)
-    reader.model_name = "a"
+    t._core.robot = dataclasses.replace(t._core.robot, holonomic=False)
     step(left_x=True)
     a = step(xy=(0.1, 0.1), left_x=True)
     assert a["x.vel"] == pytest.approx(0.1) and a["y.vel"] == 0.0
@@ -648,7 +651,7 @@ def test_torso_follows_body_only_when_both_arms_clutched(stubbed_pipeline):
     assert a["torso_ee.z"] == pytest.approx(0.8)
     assert a["torso_ee.x"] == pytest.approx(readers[0].torso[0, 3] + 0.3)
     assert abs(a["torso_ee.wy"]) == pytest.approx(math.radians(10))
-    assert "clamped[z-]" in t._torso_hold_reason
+    assert "clamped[z-]" in t._core._torso_hold_reason
 
     # Release one arm -> torso freezes even though the body keeps moving.
     readers[0].torso[:3, 3] = [0.3, 0.0, 0.8]  # robot has reached the commanded pose
@@ -720,10 +723,10 @@ def test_torso_engage_policy(stubbed_pipeline, policy, squeeze_left, expect_foll
     a = t.get_action()
     if expect_follow:
         assert a["torso_ee.z"] == pytest.approx(z0 - 0.1)
-        assert t._torso_hold_reason == "following"
+        assert t._core._torso_hold_reason == "following"
     else:
         assert a["torso_ee.z"] == pytest.approx(z0)
-        assert "arms not clutched" in t._torso_hold_reason
+        assert "arms not clutched" in t._core._torso_hold_reason
 
 
 def test_first_action_resyncs_to_ready_pose_reached_after_connect(stubbed_pipeline):
@@ -801,7 +804,7 @@ def test_right_a_returns_to_start_pose(stubbed_pipeline, monkeypatch):
     clock[0] += 2.0  # the follower blocked for its motion
     session.push(_frame(right=fakes.controller(_abs_hand(0.9), squeeze=0.0), head=fakes.head(quat=_head_quat(30)), body=body))
     a = t.get_action()
-    assert "reset.cmd" not in a and not t._returning
+    assert "reset.cmd" not in a and not t._core._returning
     assert a["right_ee.x"] == pytest.approx(x_start)
     # The head origin was latched when A was pressed (headset at 0 deg ↦ start
     # pose); the headset is now at 30 deg, so after arrival the head follows.
@@ -829,7 +832,7 @@ def test_right_a_rereferences_operator_yaw(stubbed_pipeline, monkeypatch):
     # Nothing in the body frame is used for the reference here (no shoulders) -> head gaze.
     session.push(_frame(right=fakes.controller(_abs_hand(), primary=True), head=fakes.head(quat=_head_quat(90))))
     t.get_action()
-    assert t._frame.yaw == pytest.approx(-math.pi / 2)
+    assert t._core._frame.yaw == pytest.approx(-math.pi / 2)
     clock[0] += 1.0  # return motion done
     t.get_action()
     # Squeeze with the hand 0.3 m "forward" for the operator = raw robot +Y of the shoulder.
@@ -874,7 +877,7 @@ def test_absolute_mode_deadman_ramp_track_hold(stubbed_pipeline, monkeypatch):
     a = t.get_action()  # first action: start pose + orientation offset latched
     x0 = readers[0].right_ee[0, 3]
     assert a["right_ee.x"] == pytest.approx(x0)  # dead-man not held -> hold
-    reach = mod.robot_reach("1.3")
+    reach = robot_reach("1.3")
     # Hand 0.3 m in front of the human shoulder -> robot: shoulder + 0.3 * (reach / 0.6) along x.
     hand = (0.3, -0.3, 1.5)
     goal_x = readers[0].torso[0, 3] + 0.0 + 0.3 * reach / 0.6
@@ -887,7 +890,7 @@ def test_absolute_mode_deadman_ramp_track_hold(stubbed_pipeline, monkeypatch):
     clock[0] += 0.6
     a = t.get_action()  # ramp done -> tracking the absolute target
     assert a["right_ee.x"] == pytest.approx(goal_x)
-    assert t._abs_state["right"] == "track"
+    assert t._core._abs_state["right"] == "track"
     # Move the hand: target follows absolutely (no clutch delta).
     hand2 = (0.15, -0.3, 1.5)
     clock[0] += 0.02
@@ -898,7 +901,7 @@ def test_absolute_mode_deadman_ramp_track_hold(stubbed_pipeline, monkeypatch):
     session.push(_frame(right=fakes.controller((0.5, -0.3, 1.5), squeeze=0.0), body=body))
     held = t.get_action()["right_ee.x"]
     assert held == pytest.approx(readers[0].torso[0, 3] + 0.15 * reach / 0.6)
-    assert t._abs_state["right"] == "hold"
+    assert t._core._abs_state["right"] == "hold"
 
 
 def test_absolute_mode_holds_without_body(stubbed_pipeline, monkeypatch):
@@ -911,14 +914,14 @@ def test_absolute_mode_holds_without_body(stubbed_pipeline, monkeypatch):
     t.connect()
     a = t.get_action()
     assert a["right_ee.x"] == pytest.approx(readers[0].right_ee[0, 3])
-    assert "hold" in t._abs_state["right"]
+    assert "hold" in t._core._abs_state["right"]
 
 
 def test_posture_hint_keys_and_recording(stubbed_pipeline, monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
     q_true = np.array([0.3, -0.4, 0.2, -1.2])
-    S, E, W = mod.forward_points(q_true, "right") if hasattr(mod, "forward_points") else (None, None, None)
+    S, E, W = forward_points(q_true, "right") if hasattr(mod, "forward_points") else (None, None, None)
     from lerobot_teleoperator_rby1.isaac_teleop.arm_retargeter import forward_points
 
     S, E, W = forward_points(q_true, "right")
@@ -1031,11 +1034,11 @@ def test_reference_prefers_shoulder_line_over_head(stubbed_pipeline):
     t = make_teleop(session, readers, torso_source="none", use_torso=False, use_head=False, arm_posture_hint=True)
     t.connect()
     t.get_action()
-    assert t._frame.yaw == pytest.approx(0.0, abs=1e-6)
+    assert t._core._frame.yaw == pytest.approx(0.0, abs=1e-6)
     # Operator turns 90 deg left (shoulders now along -x .. +x): facing +Y.
     session.push(_frame(right=fakes.controller(primary=True), body=_shoulders_body((0.2, 0), (-0.2, 0))))
     t.get_action()
-    assert t._frame.yaw == pytest.approx(-math.pi / 2, abs=1e-6)
+    assert t._core._frame.yaw == pytest.approx(-math.pi / 2, abs=1e-6)
 
 
 def test_right_a_latches_orientation_against_start_pose(stubbed_pipeline, monkeypatch):
@@ -1088,7 +1091,7 @@ def test_neck_mode_head_fixed_and_torso_follows_headset(stubbed_pipeline):
     head_q = readers[0].head_q.copy()
     z0 = readers[0].torso[2, 3]
     np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], head_q)
-    assert t._torso_hold_reason == "following"
+    assert t._core._torso_hold_reason == "following"
     # Headset (hanging from the neck) moves down 10 cm and yaws 30 deg: the head
     # joints stay put, the torso follows the headset pose.
     session.push(_frame(right=fakes.controller(squeeze=0.9), head=fakes.head((0.0, 0.0, 1.4), quat=_head_quat(30))))
@@ -1107,7 +1110,7 @@ def test_neck_mode_reference_from_controllers_when_no_body(stubbed_pipeline):
     t = make_teleop(session, readers, wear_mode="neck", torso_source="none", use_torso=False)
     t.connect()
     t.get_action()
-    assert t._frame.yaw == pytest.approx(-math.pi / 2, abs=1e-6)  # facing +Y -> rotated to +X
+    assert t._core._frame.yaw == pytest.approx(-math.pi / 2, abs=1e-6)  # facing +Y -> rotated to +X
 
 
 def test_neck_mode_absolute_ee_uses_headset_shoulder_estimate(stubbed_pipeline, monkeypatch):
@@ -1131,10 +1134,10 @@ def test_neck_mode_absolute_ee_uses_headset_shoulder_estimate(stubbed_pipeline, 
     t.get_action()
     clock[0] += 1.0
     a = t.get_action()
-    reach = mod.robot_reach("1.3")
+    reach = robot_reach("1.3")
     expected_x = readers[0].torso[0, 3] + 0.35 * reach / 0.6
     assert a["right_ee.x"] == pytest.approx(expected_x, abs=1e-6)
-    assert t._abs_state["right"] == "track"
+    assert t._core._abs_state["right"] == "track"
 
 
 def test_viz_enabled_uses_televiz_owned_session(stubbed_pipeline):
@@ -1281,10 +1284,10 @@ def test_head_latch_waits_for_tracked_head(stubbed_pipeline):
     readers[0].head_q = np.array([0.2, 0.7])
     a = t.get_action()
     np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], [0.2, 0.7])
-    assert t._head_latch_target is not None  # pending
+    assert t._core._head_latch_target is not None  # pending
     session.push(_frame(right=fakes.controller(), head=fakes.head(quat=_head_quat(35, 10))))
     a = t.get_action()
-    assert t._head_latch_target is None
+    assert t._core._head_latch_target is None
     np.testing.assert_allclose([a["head_0.pos"], a["head_1.pos"]], [0.2, 0.7], atol=1e-6)
 
 
@@ -1342,7 +1345,7 @@ def test_camera_panel_grab_holds_gripper_and_blocks_clutch(stubbed_pipeline, mon
         # Squeezing while grabbing does not clutch the arm; the gripper is still held.
         session.push(_frame(right=ctrl((0.3, 2.035, -1.5), trigger=0.9, squeeze=0.9)))
         a = t.get_action()
-        assert not t._clutch["right"].engaged and a["right_gripper_0.pos"] == 1.0
+        assert not t._core._clutch["right"].engaged and a["right_gripper_0.pos"] == 1.0
         assert wait(lambda: abs(t._viz.layout("front").offset_x - 0.3) < 0.03)
         # Release: layout persisted.
         session.push(_frame(right=ctrl((0.3, 2.035, -1.5), trigger=0.0)))
@@ -1430,18 +1433,18 @@ def test_reference_shoulders_waits_for_body_then_uses_shoulder_line(stubbed_pipe
                     reference_source="shoulders", **ABS_KW)
     t.connect()
     a = t.get_action()
-    assert t._frame.needs_reference and t._frame.yaw == 0.0
+    assert t._core._frame.needs_reference and t._core._frame.yaw == 0.0
     assert a["right_ee.x"] == pytest.approx(readers[0].right_ee[0, 3])
-    assert t._abs_state["right"] == "hold (waiting for shoulders)"
+    assert t._core._abs_state["right"] == "hold (waiting for shoulders)"
     # Shoulders appear (facing +X while the head still looks 60 deg left): shoulder line wins.
     body = _shoulders_body((0, -0.2), (0, 0.2))
     session.push(_frame(right=fakes.controller(_abs_hand(), squeeze=0.9), head=fakes.head(quat=_head_quat(60)), body=body))
     t.get_action()
-    assert not t._frame.needs_reference and t._frame.yaw == pytest.approx(0.0)
+    assert not t._core._frame.needs_reference and t._core._frame.yaw == pytest.approx(0.0)
     # Right A without shoulders falls back to the gaze (with a warning) instead of waiting.
     session.push(_frame(right=fakes.controller(_abs_hand(), primary=True), head=fakes.head(quat=_head_quat(60))))
     t.get_action()
-    assert t._frame.yaw == pytest.approx(-math.radians(60))
+    assert t._core._frame.yaw == pytest.approx(-math.radians(60))
 
 
 def test_ee_offsets_latched_at_first_engage_not_at_button(stubbed_pipeline, monkeypatch):
@@ -1470,7 +1473,7 @@ def test_ee_offsets_latched_at_first_engage_not_at_button(stubbed_pipeline, monk
     np.testing.assert_allclose([a["right_ee.wx"], a["right_ee.wy"], a["right_ee.wz"]],
                                Rotation.from_matrix(r_start[:3, :3]).as_rotvec(), atol=1e-6)
     # Move the hand 0.1 m forward and yaw the controller 20 deg: start + k*0.1, orientation + 20 deg.
-    k = mod.robot_reach("1.3") / 0.6
+    k = robot_reach("1.3") / 0.6
     q2 = (Rotation.from_euler("z", 20, degrees=True) * Rotation.from_quat(q_tilt)).as_quat()
     session.push(_frame(right=fakes.controller(_abs_hand(0.3, 0.1, -0.1), quat=q2, squeeze=0.9), body=body))
     a = t.get_action()
@@ -1484,7 +1487,7 @@ def test_ee_offsets_latched_at_first_engage_not_at_button(stubbed_pipeline, monk
     session.push(_frame(right=fakes.controller(_abs_hand(0.5, -0.3, 0.3), quat=q_weird, squeeze=0.0), body=body))  # let go
     clock[0] += 1.0
     t.get_action()  # return finished, nothing engaged -> offsets still pending
-    assert t._needs_offset_latch["right"]
+    assert t._core._needs_offset_latch["right"]
     # Squeeze again from yet another posture: the arm stays at the start pose (offsets from THIS posture).
     q3 = Rotation.from_euler("y", -30, degrees=True).as_quat()
     session.push(_frame(right=fakes.controller(_abs_hand(-0.1, 0.2, 0.0), quat=q3, squeeze=0.9), body=body))
@@ -1495,7 +1498,7 @@ def test_ee_offsets_latched_at_first_engage_not_at_button(stubbed_pipeline, monk
     np.testing.assert_allclose([a["right_ee.x"], a["right_ee.y"], a["right_ee.z"]], r_start[:3, 3], atol=1e-9)
     np.testing.assert_allclose([a["right_ee.wx"], a["right_ee.wy"], a["right_ee.wz"]],
                                Rotation.from_matrix(r_start[:3, :3]).as_rotvec(), atol=1e-6)
-    assert not t._needs_offset_latch["right"]
+    assert not t._core._needs_offset_latch["right"]
 
 
 def test_right_a_joint_return_emits_reset_cmd_and_holds_start_pose(stubbed_pipeline, monkeypatch):
@@ -1519,12 +1522,12 @@ def test_right_a_joint_return_emits_reset_cmd_and_holds_start_pose(stubbed_pipel
     a = t.get_action()
     assert a["reset.cmd"] == pytest.approx(3.0)
     assert a["right_ee.x"] == pytest.approx(x_start) and a["head_1.pos"] == pytest.approx(head_start)
-    assert a["x.vel"] == 0.0 and t._returning
+    assert a["x.vel"] == 0.0 and t._core._returning
     # Next tick (the follower blocked for the motion): finished, no reset key, targets still at start.
     clock[0] += 3.0
     session.push(_frame(right=fakes.controller(_abs_hand(0.3), squeeze=0.0, thumb=(0, 1.0)), head=fakes.head(quat=_head_quat(0)), body=body))
     a = t.get_action()
-    assert "reset.cmd" not in a and not t._returning
+    assert "reset.cmd" not in a and not t._core._returning
     assert a["right_ee.x"] == pytest.approx(x_start) and a["x.vel"] == pytest.approx(0.3)
 
 
@@ -1541,7 +1544,7 @@ def test_torso_target_clamped_to_workspace_box(stubbed_pipeline):
     t = make_teleop(session, readers, torso_source="head", torso_engage="always", use_head=False)
     t.connect()
     a = t.get_action()  # engage; torso at (0, 0, 1.0), rpy 0 -> inside the box
-    assert a["torso_ee.x"] == pytest.approx(0.0) and "clamped" not in t._torso_hold_reason
+    assert a["torso_ee.x"] == pytest.approx(0.0) and "clamped" not in t._core._torso_hold_reason
     # Headset moves 0.7 m forward and pitches 70 deg forward (about base y): x -> 0.45, pitch -> 50 deg.
     q1 = Rotation.from_euler("y", 70, degrees=True).as_quat()
     session.push(_frame(right=fakes.controller(squeeze=0.9), left=fakes.controller(squeeze=0.9), head=fakes.head(pos=(0.7, 0.0, 0.0), quat=q1)))
@@ -1549,7 +1552,7 @@ def test_torso_target_clamped_to_workspace_box(stubbed_pipeline):
     assert a["torso_ee.x"] == pytest.approx(0.45, abs=1e-6)
     rot = Rotation.from_rotvec([a["torso_ee.wx"], a["torso_ee.wy"], a["torso_ee.wz"]])
     assert rot.as_euler("xyz", degrees=True)[1] == pytest.approx(50.0, abs=1e-6)
-    assert "clamped[x+,pitch+]" in t._torso_hold_reason
+    assert "clamped[x+,pitch+]" in t._core._torso_hold_reason
     # Config validation.
     with pytest.raises(ValueError):
         Rby1XRConfig(torso_pos_min=[0.5, 0, 0], torso_pos_max=[0.4, 0, 0])

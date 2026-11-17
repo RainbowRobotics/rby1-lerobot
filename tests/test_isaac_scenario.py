@@ -103,7 +103,7 @@ class Session:
         if not self.rows:
             return
         prev = self.rows[-1][1]
-        returning = "reset.cmd" in a or "reset.cmd" in prev or t._returning
+        returning = "reset.cmd" in a or "reset.cmd" in prev or t._core._returning
         if not live and not returning:
             for k in POSE_KEYS + HEAD_KEYS:
                 assert a[k] == pytest.approx(prev[k], abs=1e-12), f"{where}: {k} changes while not started / stopped"
@@ -146,8 +146,8 @@ def run_default_scenario(monkeypatch) -> Session:
     s.tick("right-a-start")
     op.right_a = False
     assert t.is_started
-    assert t._abs["right"].calibrated_reach == pytest.approx(0.60, abs=1e-3)
-    assert t._abs["left"].calibrated_reach == pytest.approx(0.58, abs=1e-3)
+    assert t._core._abs["right"].calibrated_reach == pytest.approx(0.60, abs=1e-3)
+    assert t._core._abs["left"].calibrated_reach == pytest.approx(0.58, abs=1e-3)
 
     # 3. Hands back to rest. Without a grip neither the head nor the base moves.
     a = s.move(12, "rest", right_hand=HAND_REST, left_hand=HAND_REST)
@@ -163,12 +163,12 @@ def run_default_scenario(monkeypatch) -> Session:
     a = s.tick("engage")
     assert _pose(a, "right_ee") == pytest.approx(_pose(held, "right_ee"), abs=1e-9)
     assert _pose(a, "left_ee") == pytest.approx(_pose(held, "left_ee"), abs=1e-9)
-    assert t._clutch["right"].engaged and t._clutch["left"].engaged
+    assert t._core._clutch["right"].engaged and t._core._clutch["left"].engaged
     before = s.hold(65, "ramp")  # engage_ramp_s
     assert _pose(before, "right_ee")[:3] == pytest.approx(_pose(held, "right_ee")[:3], abs=1e-6)  # offsets latched
     s.move(20, "arm-move", right_hand=(0.35, -0.05, -0.25))
     a = s.hold(3, "arm-move")
-    scale = t._abs["right"].robot_reach / t._abs["right"].calibrated_reach
+    scale = t._core._abs["right"].robot_reach / t._core._abs["right"].calibrated_reach
     moved = _pose(a, "right_ee")[:3] - _pose(before, "right_ee")[:3]
     assert moved == pytest.approx(scale * np.array([0.10, -0.05, 0.10]), abs=2e-3)
     assert _pose(a, "left_ee")[:3] == pytest.approx(_pose(before, "left_ee")[:3], abs=1e-6)
@@ -216,7 +216,7 @@ def run_default_scenario(monkeypatch) -> Session:
     assert _pose(a, "left_ee")[:3] == pytest.approx(arms0[1][:3], abs=5e-3)
     op.left_x = False
     a = s.tick("drive-exit")
-    assert [a[k] for k in BASE_KEYS] == [0.0, 0.0, 0.0] and t._body_drive is None
+    assert [a[k] for k in BASE_KEYS] == [0.0, 0.0, 0.0] and t._core._body_drive is None
 
     # 8. Right B during a body drive stops everything.
     op.left_x = True
@@ -240,7 +240,7 @@ def run_default_scenario(monkeypatch) -> Session:
     assert s.robot.resets == 1 and "reset.cmd" not in a
     for prefix, start in zip(EE_PREFIXES, s.robot.start[:3]):
         assert _pose(a, prefix)[:3] == pytest.approx(start[:3, 3], abs=1e-9)
-    assert t._abs["right"].calibrated_reach == pytest.approx(0.60, abs=1e-3)  # arms were not out: kept
+    assert t._core._abs["right"].calibrated_reach == pytest.approx(0.60, abs=1e-3)  # arms were not out: kept
 
     # 10. Squeezing again after the return does not move the arms.
     set_op(**grips)
@@ -252,18 +252,18 @@ def run_default_scenario(monkeypatch) -> Session:
     #     with the shoulder estimated from the headset (shoulder_source="auto").
     op.body_tracked = False
     a = s.hold(40, "no-body")
-    assert not t._clutch["torso"].engaged and t._clutch["right"].engaged
+    assert not t._core._clutch["torso"].engaged and t._core._clutch["right"].engaged
     # Headset lost as well, for longer than abs_hold_s: now the arms hold too.
     op.head_tracked = False
     s.hold(34, "no-body-no-head")
     a = s.hold(6, "no-body-no-head")
-    assert not t._clutch["right"].engaged and not t._clutch["left"].engaged
+    assert not t._core._clutch["right"].engaged and not t._core._clutch["left"].engaged
     # Tracking is back: the arms ramp in again from where they held.
     set_op(body_tracked=True, head_tracked=True)
     b = s.tick("tracking-back")
     assert _pose(b, "right_ee") == pytest.approx(_pose(a, "right_ee"), abs=1e-9)
     s.hold(69, "tracking-back")
-    assert t._clutch["right"].engaged
+    assert t._core._clutch["right"].engaged
 
     # 12. The headset is lost during a body drive: the base stops until Left X is pressed again.
     op.left_x = True
@@ -272,7 +272,7 @@ def run_default_scenario(monkeypatch) -> Session:
     assert a["x.vel"] > 0.0
     op.head_tracked = False
     a = s.tick("drive-lost")
-    assert [a[k] for k in BASE_KEYS] == [0.0, 0.0, 0.0] and t._body_drive is None and t._body_drive_blocked
+    assert [a[k] for k in BASE_KEYS] == [0.0, 0.0, 0.0] and t._core._body_drive is None and t._core._body_drive_blocked
     op.head_tracked = True
     a = s.hold(3, "drive-blocked")
     assert [a[k] for k in BASE_KEYS] == [0.0, 0.0, 0.0]

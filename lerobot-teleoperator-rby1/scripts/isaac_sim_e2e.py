@@ -108,7 +108,7 @@ class Run:
         if self.first_command_t is None:
             self.first_command_t = time.monotonic()
         self.robot.send_action(action)
-        snap = self.teleop._last_snapshot
+        snap = self.teleop._core._last_snapshot
         x, y, yaw = se2_xyyaw(getattr(snap, "odometry", None))
         row: dict[str, Any] = {"t": t0, "label": label, "odom_x": x, "odom_y": y, "odom_yaw": yaw}
         for name, T in (("torso", snap.torso), ("right_ee", snap.right_ee), ("left_ee", snap.left_ee)):
@@ -180,7 +180,7 @@ def scenario_arms(run: Run, results: list) -> None:
     op.right_a = True
     run.tick("right-a-start")
     op.right_a = False
-    reach = {side: m.calibrated_reach for side, m in teleop._abs.items()}
+    reach = {side: m.calibrated_reach for side, m in teleop._core._abs.items()}
     check(results, "arms: Right A starts and measures the reach", teleop.is_started and all(reach.values()),
           f"started={teleop.is_started}, reach={ {k: None if v is None else round(v, 3) for k, v in reach.items()} }")
     run.move(1.0, "rest", right_hand=HAND_REST, left_hand=HAND_REST)
@@ -226,30 +226,30 @@ def scenario_drive(run: Run, results: list, holonomic: bool) -> None:
     x0, y0 = op.xy
     op.left_x = True
     run.tick("drive-enter")
-    check(results, "drive: Left X enters the body drive", teleop._body_drive is not None, f"active={teleop._body_drive is not None}")
+    check(results, "drive: Left X enters the body drive", teleop._core._body_drive is not None, f"active={teleop._core._body_drive is not None}")
 
     run.move(3.0, "drive-forward", xy=(x0 + 0.30, y0))
     run.hold(3.0, "drive-forward")
     fx, fy, fyaw = _relative(start, _odometry(run))
-    alive = teleop._body_drive is not None
+    alive = teleop._core._body_drive is not None
     check(results, "drive: a step forward drives the base forward (+0.30 m, within 3 cm)",
           alive and abs(fx - 0.30) < 0.03 and abs(fy) < 0.03,
           f"odometry moved x {fx:+.3f} m, y {fy:+.3f} m, yaw {math.degrees(fyaw):+.1f}°; mode alive={alive}")
 
-    if holonomic and teleop._body_drive is not None:
+    if holonomic and teleop._core._body_drive is not None:
         run.move(2.5, "drive-left", xy=(x0 + 0.30, y0 + 0.20))
         run.hold(3.0, "drive-left")
         lx, ly, _ = _relative(start, _odometry(run))
-        alive = teleop._body_drive is not None
+        alive = teleop._core._body_drive is not None
         check(results, "drive: a step to the left drives the base left (+0.20 m, within 3 cm)",
               alive and abs(ly - 0.20) < 0.03 and abs(lx - 0.30) < 0.03,
               f"odometry at x {lx:+.3f} m, y {ly:+.3f} m; mode alive={alive}")
 
-    if teleop._body_drive is not None:
+    if teleop._core._body_drive is not None:
         run.move(3.0, "drive-turn", body_deg=op.body_deg + 30.0)
         run.hold(3.0, "drive-turn")
         _, _, yaw = _relative(start, _odometry(run))
-        alive = teleop._body_drive is not None
+        alive = teleop._core._body_drive is not None
         check(results, "drive: turning the body left turns the base left (+30°, within 3°)",
               alive and abs(math.degrees(yaw) - 30.0) < 3.0,
               f"odometry turned {math.degrees(yaw):+.1f}°; mode alive={alive}")
@@ -257,7 +257,7 @@ def scenario_drive(run: Run, results: list, holonomic: bool) -> None:
 
 def scenario_stop(run: Run, results: list) -> None:
     op, teleop = run.op, run.teleop
-    if teleop._body_drive is None:
+    if teleop._core._body_drive is None:
         op.left_x = True
         run.tick("drive-enter")
     x, y = op.xy
@@ -280,7 +280,7 @@ def scenario_stop(run: Run, results: list) -> None:
 
 def scenario_return(run: Run, results: list) -> None:
     op, teleop = run.op, run.teleop
-    start = teleop._start_snapshot
+    start = teleop._core._start_snapshot
     op.right_squeeze = op.left_squeeze = 0.0
     run.tick("pre-return")
     op.right_a = True

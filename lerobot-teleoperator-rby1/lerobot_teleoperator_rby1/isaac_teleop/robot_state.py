@@ -9,10 +9,11 @@ robot (``lerobot_robot_rby1.Rby1``); this class never sends commands.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
+from rby1_xr_teleop.state import RobotState
 
 logger = logging.getLogger(__name__)
 
@@ -21,18 +22,8 @@ FK_LINKS = ["base", "link_torso_5", "link_right_arm_6", "link_left_arm_6"]
 _IDX_BASE, _IDX_TORSO_5, _IDX_RIGHT_ARM_6, _IDX_LEFT_ARM_6 = range(4)
 
 
-@dataclass(frozen=True)
-class RobotSnapshot:
-    """Measured poses (4x4, base frame) and head joints (rad) at one instant."""
-
-    torso: np.ndarray
-    right_ee: np.ndarray
-    left_ee: np.ndarray
-    head_q: np.ndarray
-    right_q: np.ndarray | None = None  # (7,) rad
-    left_q: np.ndarray | None = None
-    # Base odometry as a 3x3 SE(2) homogeneous transform (None when the robot reports none).
-    odometry: np.ndarray | None = None
+# The measured state the teleoperation core consumes (kept under its former name here).
+RobotSnapshot = RobotState
 
 
 class Rby1StateReader:
