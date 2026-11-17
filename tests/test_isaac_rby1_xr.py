@@ -53,6 +53,7 @@ def make_teleop(session, reader_holder, **cfg_overrides):
     cfg_overrides.setdefault("ee_position_latch_on_a", False)
     # … and the first-Right-A start gate (covered by its own test).
     cfg_overrides.setdefault("start_on_right_a", False)
+    cfg_overrides.setdefault("arm_length_source", "body")
     cfg = Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **cfg_overrides)
 
     def reader_factory(address, model):
@@ -198,6 +199,171 @@ def test_nothing_follows_until_the_first_right_a(stubbed_pipeline, monkeypatch):
     clock[0] += 0.1
     session.push(_frame(right=fakes.controller(_abs_hand(0.3), primary=True), head=turned, body=body))
     assert "reset.cmd" in t.get_action()
+
+
+# ── Arm reach calibration on Right A ────────────────────────────────────────
+CAL_KW = {**ABS_KW, "arm_length_source": "calibrate", "start_on_right_a": True, "torso_source": "none",
+          "use_torso": False, "use_head": False}
+CAL_LEFT_SHOULDER = ABS_SHOULDER * np.array([1, -1, 1])
+
+
+def _cal_body():
+    """Both shoulders valid (elbow / wrist joints are irrelevant for the calibration)."""
+    pos = np.zeros((24, 3), np.float32)
+    pos[int(BodyJointIndex.RIGHT_SHOULDER)] = ABS_SHOULDER
+    pos[int(BodyJointIndex.LEFT_SHOULDER)] = CAL_LEFT_SHOULDER
+    return fakes.body(positions=pos)
+
+
+def _cal_frame(right=None, left=None, primary=False, squeeze=0.0):
+    """Controllers ``right`` / ``left`` metres straight in front of their shoulders."""
+    def ctrl(shoulder, reach, a=False):
+        return None if reach is None else fakes.controller(
+            tuple((shoulder + [reach, 0.0, 0.0]).tolist()), primary=a, squeeze=squeeze)
+    return _frame(right=ctrl(ABS_SHOULDER, right, primary), left=ctrl(CAL_LEFT_SHOULDER, left), body=_cal_body())
+
+
+def _cal_hold(t, session, clock, n=8, **reach):
+    for _ in range(n):
+        clock[0] += 0.05
+        session.push(_cal_frame(**reach))
+        t.get_action()
+
+
+def _cal_press(t, session, clock, **reach):
+    clock[0] += 0.05
+    session.push(_cal_frame(primary=True, **reach))
+    return t.get_action()
+
+
+def _cal_teleop(monkeypatch, **cfg):
+    clock = [100.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    session = fakes.FakeSession()
+    session.push(_cal_frame(right=0.3, left=0.3))
+    readers: list = []
+    t = make_teleop(session, readers, **{**CAL_KW, **cfg})
+    t.connect()
+    t.get_action()
+    return t, session, clock, readers[0]
+
+
+def test_right_a_calibrates_the_arm_reach_and_starts(stubbed_pipeline, monkeypatch, caplog):
+    t, session, clock, reader = _cal_teleop(monkeypatch)
+    assert t._abs["right"].robot_reach == reader.reach["right"]  # shoulder -> link_arm_6 from the robot
+    assert t._abs["right"].calibrated_reach is None and "reach=uncalibrated" in t._reach_status()
+
+    _cal_hold(t, session, clock, right=0.62, left=0.60)
+    with caplog.at_level("INFO", logger=mod.logger.name):
+        _cal_press(t, session, clock, right=0.62, left=0.60)
+    assert t.is_started and "Arm reach calibrated" in caplog.text
+    assert t._abs["right"].human_reach == pytest.approx(0.62) and t._abs["left"].human_reach == pytest.approx(0.60)
+    assert t._reach_status() == " reach=R0.62/L0.60 (x1.06/1.10)"
+
+    # Fixed for the session: moving the hand maps with that scale, whatever the body joints say.
+    scale = reader.reach["right"] / 0.62
+    hand = fakes.controller(tuple((ABS_SHOULDER + [0.3, 0.0, 0.0]).tolist()), squeeze=0.9)
+    clock[0] += 0.05
+    session.push(_frame(right=hand, body=_abs_body()))  # elbow / wrist joints present now: ignored
+    t.get_action()
+    clock[0] += 0.2  # engage ramp done
+    session.push(_frame(right=fakes.controller(tuple((ABS_SHOULDER + [0.4, 0.0, 0.0]).tolist()), squeeze=0.9),
+                        body=_abs_body()))
+    a = t.get_action()
+    assert t._abs["right"].human_reach == pytest.approx(0.62)
+    # Absolute mapping (no position latch in these fixtures): 0.4 m in front of the
+    # operator's shoulder is 0.4 * scale in front of the robot's.
+    from lerobot_teleoperator_rby1.isaac_teleop.arm_retargeter import robot_shoulder_position
+
+    assert a["right_ee.x"] == pytest.approx(robot_shoulder_position(reader.torso, "right")[0] + 0.4 * scale)
+
+
+def test_first_right_a_without_a_usable_reach_does_not_start(stubbed_pipeline, monkeypatch, caplog):
+    t, session, clock, _ = _cal_teleop(monkeypatch)
+    # Arms not extended (0.30 m is below the accepted range).
+    _cal_hold(t, session, clock, right=0.30, left=0.30)
+    with caplog.at_level("WARNING", logger=mod.logger.name):
+        _cal_press(t, session, clock, right=0.30, left=0.30)
+    assert not t.is_started and t._abs["right"].calibrated_reach is None
+    assert "Hold both arms straight out" in caplog.text and "0.300 m" in caplog.text
+
+    # Too few samples in the window (the press came right after extending the arms).
+    clock[0] += 1.0
+    session.push(_cal_frame(right=0.6, left=0.6))
+    t.get_action()
+    _cal_press(t, session, clock, right=0.6, left=0.6)
+    assert not t.is_started
+
+    # Held long enough: accepted.
+    _cal_hold(t, session, clock, right=0.6, left=0.6)
+    _cal_press(t, session, clock, right=0.6, left=0.6)
+    assert t.is_started and t._abs["left"].human_reach == pytest.approx(0.6)
+
+
+def test_arm_reach_asymmetry_and_single_arm(stubbed_pipeline, monkeypatch, caplog):
+    # One arm clearly shorter (not fully extended): the longer value is used for both.
+    t, session, clock, _ = _cal_teleop(monkeypatch)
+    _cal_hold(t, session, clock, right=0.64, left=0.50)
+    with caplog.at_level("WARNING", logger=mod.logger.name):
+        _cal_press(t, session, clock, right=0.64, left=0.50)
+    assert t.is_started and "differs between the arms" in caplog.text
+    assert t._abs["right"].human_reach == pytest.approx(0.64) and t._abs["left"].human_reach == pytest.approx(0.64)
+
+    # Only one arm usable (the other controller is not tracked): its value is shared.
+    t, session, clock, _ = _cal_teleop(monkeypatch)
+    _cal_hold(t, session, clock, right=0.58, left=None)
+    _cal_press(t, session, clock, right=0.58, left=None)
+    assert t.is_started
+    assert t._abs["right"].human_reach == pytest.approx(0.58) and t._abs["left"].human_reach == pytest.approx(0.58)
+
+
+def test_later_right_a_recalibrates_only_with_extended_arms(stubbed_pipeline, monkeypatch, caplog):
+    t, session, clock, _ = _cal_teleop(monkeypatch)
+    _cal_hold(t, session, clock, right=0.60, left=0.60)
+    _cal_press(t, session, clock, right=0.60, left=0.60)
+    assert t.is_started
+
+    # Right A with the arms hanging / bent: the return-to-start still runs, the reach is kept.
+    _cal_hold(t, session, clock, right=0.50, left=0.50)
+    with caplog.at_level("INFO", logger=mod.logger.name):
+        a = _cal_press(t, session, clock, right=0.50, left=0.50)
+    assert "reset.cmd" in a and "Arm reach kept" in caplog.text
+    assert t._abs["right"].human_reach == pytest.approx(0.60)
+    t._return_motion = None  # skip the return motion bookkeeping
+
+    # Out of range entirely: kept as well.
+    _cal_hold(t, session, clock, right=0.20, left=0.20)
+    assert "reset.cmd" in _cal_press(t, session, clock, right=0.20, left=0.20)
+    assert t._abs["right"].human_reach == pytest.approx(0.60)
+    t._return_motion = None
+
+    # Extended again, a little longer: replaced, and the offsets are latched anew.
+    t._needs_offset_latch = {"right": False, "left": False}
+    _cal_hold(t, session, clock, right=0.63, left=0.62)
+    _cal_press(t, session, clock, right=0.63, left=0.62)
+    assert t._abs["right"].human_reach == pytest.approx(0.63) and t._abs["left"].human_reach == pytest.approx(0.62)
+    assert t._needs_offset_latch == {"right": True, "left": True}
+
+
+def test_arm_calibration_config_and_profile(stubbed_pipeline, monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="start_on_right_a"):
+        Rby1XRConfig(arm_length_source="calibrate", start_on_right_a=False)
+    with pytest.raises(ValueError, match="arm_calibration_min_m"):
+        Rby1XRConfig(arm_calibration_min_m=0.9, arm_calibration_max_m=0.8)
+    assert Rby1XRConfig().arm_length_source == "calibrate"
+
+    import json
+
+    path = tmp_path / "rby1_profile.json"
+    t, session, clock, reader = _cal_teleop(monkeypatch, profile_out=str(path))
+    assert "arm_calibration" not in json.loads(path.read_text())["teleop"]
+    _cal_hold(t, session, clock, right=0.60, left=0.60)
+    _cal_press(t, session, clock, right=0.60, left=0.60)
+    teleop = json.loads(path.read_text())["teleop"]
+    assert teleop["type"] == "rby1_isaac" and teleop["config"]["arm_length_source"] == "calibrate"
+    right = teleop["arm_calibration"]["right"]
+    assert right["operator_reach_m"] == pytest.approx(0.60) and right["robot_reach_m"] == reader.reach["right"]
+    assert right["scale"] == pytest.approx(reader.reach["right"] / 0.60)
 
 
 def test_stop_and_resume(stubbed_pipeline, monkeypatch):
@@ -774,7 +940,7 @@ def test_viz_enabled_uses_televiz_owned_session(stubbed_pipeline):
         return readers[-1]
 
     t = mod.Rby1XR(
-        Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, **cfg}),
+        Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, "arm_length_source": "body", **cfg}),
         session_factory=lambda pipeline: session,
         state_reader_factory=reader_factory,
         viz_module=FakeTeleviz,
@@ -941,7 +1107,7 @@ def test_camera_panel_grab_holds_gripper_and_blocks_clutch(stubbed_pipeline, mon
         readers.append(fakes.FakeStateReader(address, model))
         return readers[-1]
 
-    t = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, **cfg}),
+    t = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, "arm_length_source": "body", **cfg}),
                    session_factory=lambda pipeline: session, state_reader_factory=reader_factory,
                    viz_module=FakeTeleviz, viz_uploader=lambda f: f)
     t.connect()
@@ -982,7 +1148,7 @@ def test_camera_panel_grab_holds_gripper_and_blocks_clutch(stubbed_pipeline, mon
     # A new teleop restores the saved layout.
     session2 = fakes.FakeSession()
     session2.push(_frame(right=fakes.controller()))
-    t2 = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, **cfg}),
+    t2 = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, "arm_length_source": "body", **cfg}),
                     session_factory=lambda pipeline: session2, state_reader_factory=reader_factory,
                     viz_module=FakeTeleviz, viz_uploader=lambda f: f)
     t2.connect()

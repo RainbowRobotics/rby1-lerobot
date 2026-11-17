@@ -160,6 +160,10 @@ class FakeStateReader:
         self.head_q = np.array([0.0, 0.85])
         self.right_q = np.zeros(7)
         self.left_q = np.zeros(7)
+        self.reach = {"right": 0.66, "left": 0.66}  # shoulder -> link_arm_6, straight arm
+
+    def arm_reach(self, side):
+        return self.reach[side]
 
     def connect(self):
         self.connected = True

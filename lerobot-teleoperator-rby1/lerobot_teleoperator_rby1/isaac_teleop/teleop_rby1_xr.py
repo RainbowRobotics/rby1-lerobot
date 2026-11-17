@@ -47,6 +47,7 @@ import math
 import socket
 import subprocess
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -95,6 +96,12 @@ from .xr_frame import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Fewest shoulder -> controller samples an arm-reach calibration accepts.
+_CALIBRATION_MIN_SAMPLES = 5
+# A later Right A replaces the reach only by a value at least this fraction of
+# the current one: an arm that is not extended can only measure short.
+_CALIBRATION_KEEP_RATIO = 0.95
 
 # The CloudXR service serves the web client itself (isaaccapture >= 1.6,
 # host_client); the hosted page is the fallback when that is unreachable.
@@ -172,6 +179,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._abs_last_body_t: dict[str, float | None] = {"right": None, "left": None}
         self._posture: dict[str, ArmPostureRetargeter] = {}
         self._hints: dict[str, np.ndarray | None] = {"right": None, "left": None}
+        # arm_length_source="calibrate": recent (time, |controller - shoulder|) per arm.
+        self._reach_samples: dict[str, deque[tuple[float, float]]] = {"right": deque(), "left": deque()}
         self._last_snapshot: RobotSnapshot | None = None
         # Per arm: latch the controller↦gripper offsets at the next engage.
         self._needs_offset_latch: dict[str, bool] = {"right": True, "left": True}
@@ -344,13 +353,21 @@ class Rby1XR(IsaacTeleopTeleoperator):
             version = "1.3"
         self._robot_version = version
         reach = robot_reach(version)
+        calibrate = cfg.arm_length_source == "calibrate"
         offset = rpy_deg_to_matrix(cfg.ee_orientation_offset_rpy_deg)
         for side, enabled in (("right", cfg.use_right_arm), ("left", cfg.use_left_arm)):
             if not enabled:
                 continue
+            side_reach = reach
+            # The calibrated operator reach is shoulder -> controller, so the
+            # robot side is shoulder -> the commanded link (link_<side>_arm_6).
+            arm_reach = getattr(self._reader, "arm_reach", None) if calibrate else None
+            if arm_reach is not None:
+                side_reach = float(arm_reach(side))
             self._abs[side] = AbsoluteEeMapper(
                 side,
-                robot_reach=reach,
+                robot_reach=side_reach,
+                estimate_reach=not calibrate,
                 human_reach=cfg.human_arm_length_m if cfg.arm_length_source == "config" else None,
                 position_scale=cfg.ee_position_scale,
                 reach_max_ratio=cfg.ee_reach_max_ratio,
@@ -369,8 +386,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
                     hold_s=cfg.posture_hint_hold_s,
                 )
         logger.info(
-            "rby1_isaac: absolute arm mapping, posture_hint=%s (robot version %s, reach %.3f m)",
-            cfg.arm_posture_hint, version, reach,
+            "rby1_isaac: absolute arm mapping, posture_hint=%s (robot version %s, reach %s m, operator reach: %s)",
+            cfg.arm_posture_hint, version,
+            "/".join(f"{m.robot_reach:.3f}" for m in self._abs.values()) or f"{reach:.3f}",
+            cfg.arm_length_source,
         )
 
     def _build_pipeline(self) -> Any:
@@ -501,7 +520,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._needs_reference = True
         logger.info(
             "rby1_isaac: targets latched to the current robot pose (%s).",
-            "press Right A to start, then squeeze to follow" if cfg.start_on_right_a else "squeeze to follow",
+            ("hold both arms straight out in front and press Right A to start, then squeeze to follow"
+             if cfg.arm_length_source == "calibrate"
+             else "press Right A to start, then squeeze to follow")
+            if cfg.start_on_right_a else "squeeze to follow",
         )
 
     # ------------------------------------------------------------------
@@ -546,8 +568,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 if clutch is not None:
                     clutch.disengage()
         elif events["right_a"] and not self._started:
-            self._start(snap)
+            if self._calibrate_arms():
+                self._start(snap)
         elif events["right_a"]:
+            self._calibrate_arms()
             if self._stopped:
                 logger.info("Right A — resuming.")
             self._stopped = False
@@ -587,6 +611,92 @@ class Rby1XR(IsaacTeleopTeleoperator):
     def _idle(self) -> bool:
         """Nothing may follow the headset: stopped (Right B) or not started yet."""
         return self._stopped or not self._started
+
+    def _calibrate_arms(self) -> bool:
+        """Fix the operator reach from the arms held straight out (``arm_length_source="calibrate"``).
+
+        Called on every Right A. The reach of each arm is the median
+        shoulder -> controller distance of the last ``arm_calibration_window_s``.
+        Returns False only when nothing is calibrated yet and no arm gave a
+        usable value: the first Right A then does not start teleoperation.
+        Later presses never block; they replace the reach only by a value that
+        is not clearly shorter (an arm that is not extended measures short).
+        """
+        cfg = self.config
+        if cfg.arm_length_source != "calibrate" or not self._abs:
+            return True
+        now = time.monotonic()
+        measured: dict[str, float] = {}
+        seen: dict[str, str] = {}
+        for side in self._abs:
+            values = [d for t, d in self._reach_samples[side] if now - t <= cfg.arm_calibration_window_s]
+            if len(values) < _CALIBRATION_MIN_SAMPLES:
+                seen[side] = f"{len(values)} samples"
+                continue
+            reach = float(np.median(values))
+            seen[side] = f"{reach:.3f} m"
+            if cfg.arm_calibration_min_m <= reach <= cfg.arm_calibration_max_m:
+                measured[side] = reach
+        current = {side: m.calibrated_reach for side, m in self._abs.items()}
+        calibrated = all(v is not None for v in current.values())
+        summary = ", ".join(f"{side} {text}" for side, text in seen.items())
+
+        if not measured:
+            if calibrated:
+                logger.info("Arm reach kept (%s; not measured on this Right A: %s).", self._reach_status().strip(), summary)
+                return True
+            logger.warning(
+                "Arm reach not measured (%s; accepted %.2f-%.2f m with controllers and shoulders tracked). "
+                "Hold both arms straight out in front and press Right A again.",
+                summary, cfg.arm_calibration_min_m, cfg.arm_calibration_max_m,
+            )
+            return False
+
+        longest = max(measured.values())
+        if len(measured) == 2 and (longest - min(measured.values())) / longest > cfg.arm_calibration_max_asymmetry:
+            logger.warning("Arm reach differs between the arms (%s): using %.3f m for both.", summary, longest)
+            measured = {side: longest for side in measured}
+        # An arm without a usable value shares the other arm's.
+        new = {side: measured.get(side, longest) for side in self._abs}
+
+        if calibrated and any(new[side] < _CALIBRATION_KEEP_RATIO * current[side] for side in new):
+            logger.info("Arm reach kept (%s; this Right A measured shorter: %s).", self._reach_status().strip(), summary)
+            return True
+        for side, mapper in self._abs.items():
+            mapper.set_human_reach(new[side])
+        # The controller -> gripper offsets belong to the old scale.
+        self._needs_offset_latch = {side: True for side in self._needs_offset_latch}
+        logger.info("Arm reach calibrated:%s (measured %s).", self._reach_status(), summary)
+        self._record_arm_calibration()
+        return True
+
+    def _reach_status(self) -> str:
+        """`` reach=R0.61/L0.60 (x0.96)`` for the status line; empty outside "calibrate"."""
+        if self.config.arm_length_source != "calibrate" or not self._abs:
+            return ""
+        if any(m.calibrated_reach is None for m in self._abs.values()):
+            return " reach=uncalibrated"
+        parts = "/".join(f"{side[0].upper()}{m.calibrated_reach:.2f}" for side, m in self._abs.items())
+        scales = "/".join(f"{m.robot_reach / m.calibrated_reach * m.position_scale:.2f}" for m in self._abs.values())
+        return f" reach={parts} (x{scales})"
+
+    def _record_arm_calibration(self) -> None:
+        cfg = self.config
+        if not cfg.profile_out:
+            return
+        from lerobot_robot_rby1.profile import update_profile_section
+
+        calibration = {
+            side: {
+                "operator_reach_m": m.calibrated_reach,
+                "robot_reach_m": m.robot_reach,
+                "scale": m.robot_reach / m.calibrated_reach * m.position_scale,
+            }
+            for side, m in self._abs.items()
+        }
+        update_profile_section(
+            cfg.profile_out, "teleop", {"type": self.name, "config": cfg, "arm_calibration": calibration}
+        )
 
     def _start(self, snap: RobotSnapshot) -> None:
         """First Right A: go live from the robot's present pose, without moving it.
@@ -884,6 +994,13 @@ class Rby1XR(IsaacTeleopTeleoperator):
             mapper.set_shoulder(est)
             self._abs_last_body_t[side] = t
         body_ok = self._abs_last_body_t[side] is not None and t - self._abs_last_body_t[side] <= cfg.abs_hold_s
+        if cfg.arm_length_source == "calibrate":
+            samples = self._reach_samples[side]
+            shoulder = mapper.shoulder
+            if ctrl is not None and shoulder is not None and self._abs_last_body_t[side] == t:
+                samples.append((t, float(np.linalg.norm(ctrl.position - shoulder))))
+            while samples and t - samples[0][0] > cfg.arm_calibration_window_s:
+                samples.popleft()
 
         def release(state: str) -> None:
             if clutch.engaged:
@@ -1153,7 +1270,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
             wz,
             hint("right"),
             hint("left"),
-            ("" if self._started else " | NOT STARTED (press Right A)")
+            self._reach_status()
+            + ("" if self._started else " | NOT STARTED (press Right A)")
             + (" | STOPPED" if self._stopped else "")
             + (f" | wear={self.config.wear_mode}" if self.config.wear_mode != "head" else "")
             + (f" | {self._viz.status()}" if self._viz is not None else ""),

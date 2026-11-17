@@ -80,3 +80,23 @@ def test_position_offset_latch_moves_with_torso():
     m.reset_position_offset()
     p2_nominal = m.target(hand, ident, T2)[:3, 3]
     np.testing.assert_allclose(p2 - p2_nominal, T2[:3, :3] @ (target_p - p_nominal), atol=1e-12)
+
+
+def test_set_human_reach_fixes_the_reach():
+    from lerobot_teleoperator_rby1.isaac_teleop.absolute_ee import AbsoluteEeMapper
+
+    S, E, W = np.array([0.0, -0.3, 1.5]), np.array([0.0, -0.3, 1.2]), np.array([0.0, -0.3, 0.9])
+    # estimate_reach=False ("calibrate"): body joints never set the reach; the fallback applies until calibrated.
+    m = AbsoluteEeMapper("right", robot_reach=0.6, fallback_reach=0.62, estimate_reach=False)
+    m.observe_body(S, E, W)
+    assert m.human_reach == 0.62 and m.calibrated_reach is None and m.shoulder is not None
+    m.set_human_reach(0.55)
+    m.observe_body(S, E, W)
+    assert m.human_reach == 0.55 and m.calibrated_reach == 0.55
+    # A body-estimating mapper stops updating once a reach is set.
+    m = AbsoluteEeMapper("right", robot_reach=0.6, reach_smoothing=1.0)
+    m.observe_body(S, E, W)
+    assert m.human_reach == pytest.approx(0.6)
+    m.set_human_reach(0.5)
+    m.observe_body(S, E + [0.0, 0.0, -0.1], W + [0.0, 0.0, -0.2])
+    assert m.human_reach == 0.5

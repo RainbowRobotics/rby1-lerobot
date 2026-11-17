@@ -107,6 +107,32 @@ class Rby1StateReader:
         left_q = np.asarray(q[self._model.left_arm_idx], dtype=np.float64).copy()
         return RobotSnapshot(torso, right, left, head_q, right_q, left_q)
 
+    def arm_reach(self, side: str) -> float:
+        """Shoulder -> ``link_<side>_arm_6`` distance (m) of the straight arm.
+
+        Forward kinematics with that arm's joints at zero (the arm hanging
+        straight); nothing is commanded. The next :meth:`read` overwrites the
+        scratch state.
+        """
+        from .arm_retargeter import robot_shoulder_position
+
+        if self._robot is None:
+            raise RuntimeError("Rby1StateReader is not connected.")
+        q = np.asarray(self._robot.get_state().position, dtype=np.float64).copy()
+        q[self._model.right_arm_idx if side == "right" else self._model.left_arm_idx] = 0.0
+        self._state.set_q(q)
+        self._dyn.compute_forward_kinematics(self._state)
+        torso = np.asarray(
+            self._dyn.compute_transformation(self._state, _IDX_BASE, _IDX_TORSO_5), dtype=float
+        )
+        ee = np.asarray(
+            self._dyn.compute_transformation(
+                self._state, _IDX_BASE, _IDX_RIGHT_ARM_6 if side == "right" else _IDX_LEFT_ARM_6
+            ),
+            dtype=float,
+        )
+        return float(np.linalg.norm(ee[:3, 3] - robot_shoulder_position(torso, side)))
+
     def close(self) -> None:
         if self._robot is not None:
             try:

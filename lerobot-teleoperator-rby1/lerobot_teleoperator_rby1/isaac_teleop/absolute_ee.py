@@ -27,6 +27,7 @@ class AbsoluteEeMapper:
         robot_reach: float,
         human_reach: float | None = None,   # None = estimate from the body joints
         fallback_reach: float | None = None,  # used while no body estimate exists yet
+        estimate_reach: bool = True,          # False: only set_human_reach() changes the reach
         position_scale: float = 1.0,
         reach_max_ratio: float = 0.98,
         shoulder_smoothing: float = 0.2,
@@ -39,6 +40,8 @@ class AbsoluteEeMapper:
         self.robot_reach = robot_reach
         self._human_reach_cfg = human_reach
         self._fallback_reach = fallback_reach
+        self._estimate_reach = estimate_reach
+        self._calibrated_reach: float | None = None
         self.position_scale = position_scale
         self.reach_max_ratio = reach_max_ratio
         self.shoulder_smoothing = shoulder_smoothing
@@ -60,7 +63,18 @@ class AbsoluteEeMapper:
     def human_reach(self) -> float | None:
         if self._human_reach_cfg is not None:
             return self._human_reach_cfg
+        if self._calibrated_reach is not None:
+            return self._calibrated_reach
         return self._human_reach if self._human_reach is not None else self._fallback_reach
+
+    @property
+    def calibrated_reach(self) -> float | None:
+        """Reach fixed by :meth:`set_human_reach` (None = not calibrated)."""
+        return self._calibrated_reach
+
+    def set_human_reach(self, reach: float) -> None:
+        """Fix the operator reach (shoulder -> controller, m); body estimates no longer change it."""
+        self._calibrated_reach = float(reach)
 
     def set_shoulder(self, shoulder: np.ndarray) -> None:
         """Set the (already estimated) shoulder position directly, no smoothing."""
@@ -112,6 +126,8 @@ class AbsoluteEeMapper:
             else:
                 a = self.shoulder_smoothing
                 self._shoulder = a * s + (1.0 - a) * self._shoulder
+        if not self._estimate_reach or self._calibrated_reach is not None:
+            return
         if shoulder is not None and elbow is not None and wrist is not None:
             reach = float(np.linalg.norm(np.asarray(elbow) - np.asarray(shoulder)) + np.linalg.norm(np.asarray(wrist) - np.asarray(elbow)))
             if reach > 0.2:

@@ -323,9 +323,14 @@ aborts, `--teleop.xr_connect_timeout_s=<s>` gives up after that time):
 1. In the headset browser open `https://<host-ip>:48322/client/?serverIP=<host-ip>&port=48322`
    (served by the CloudXR service on this host) and accept the self-signed certificate.
 2. Press Connect.
-3. Once the controllers are tracked the robot holds its pose. **Press Right A once to start**
+3. Once the controllers are tracked the robot holds its pose. **Hold both arms straight out in
+   front and press Right A once to start**
    (`start_on_right_a`, default on): until then nothing follows the headset — arms, torso,
    head, grippers and base stay as they are. That first press does not move the robot.
+   It also measures your reach (shoulder → controller, `arm_length_source=calibrate`): the
+   hand-to-shoulder vector is scaled by robot reach ÷ that value for the whole session.
+   If the arms were not extended (reach outside `arm_calibration_min_m`–`_max_m`) the
+   press is refused with a log message; extend the arms, hold for half a second and press again.
 4. After that the robot still holds its pose until you squeeze a grip.
 
 If the host cannot serve the client, use `https://nvidia.github.io/IsaacCapture/client/`:
@@ -342,8 +347,8 @@ the targets are held, as for any tracking loss.
 | Trigger | Gripper (fully pressed = closed) |
 | Right thumbstick / left thumbstick | Base linear velocity / yaw rate |
 | Right **B** | Stop: freeze every target, zero the base |
-| Right **A** (first press) | Start teleoperation: before it nothing follows the headset. The direction you are facing becomes robot +X and the look direction maps onto the head joints as they are; the robot does not move |
-| Right **A** (later) | Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; re-reference the operator frame so the direction you are facing becomes robot +X; also resumes after a stop and re-centres the head origin. The base is not moved |
+| Right **A** (first press) | Start teleoperation: before it nothing follows the headset. Press it with both arms held straight out in front: the shoulder → controller distance of each arm becomes the operator reach for the session (refused, and not started, when no arm gives a usable value). The direction you are facing becomes robot +X and the look direction maps onto the head joints as they are; the robot does not move |
+| Right **A** (later) | Measures the reach again and replaces it only when the arms are extended (a clearly shorter value is ignored, so pressing with the arms down changes nothing). Release every clutch and return arms, torso and head to the start pose (the pose right after the ready-pose motion) over `ready_return_duration_s`; re-reference the operator frame so the direction you are facing becomes robot +X; also resumes after a stop and re-centres the head origin. The base is not moved |
 | Headset orientation | `head_0` (pan) / `head_1` (tilt) from the headset yaw / pitch in the operator frame. The target is a look direction in the **robot base frame**: the joints are re-solved for the measured torso orientation every tick, so bending or turning the torso does not move the gaze (`head_gaze_frame`). Like the EE offsets, the look direction at the moment of Right A (and of the first action) is latched onto the start-pose head joints (`head_latch_on_a`), so after a return the robot head is straight where you were looking |
 | Body tracking (`torso_source=body`) or headset (`head`) | Torso pose, while **both** arms are clutched (`torso_engage=both_arms`, default; `any_arm` / `always` available) |
 | Headset pose (`wear_mode=neck`) | Torso pose (the robot head stays at the ready pose) |
@@ -523,7 +528,8 @@ when teleoperation starts, the robot moves it to the target during the startup r
 | `viz_frame_bridge`, `viz_layout_file`, `viz_layout_reset` | `"auto"`, `~/.cache/rby1_isaac/viz_layout.json`, `False` | Televiz ← tracking-space transform from simultaneous head poses (`identity` to skip); where moved panels are saved / restored (`""` = off); ignore the saved layout once |
 | `engage_ramp_s`, `ee_max_linear_vel`, `ee_max_angular_vel` | `2.0`, `1.0`, `3.0` | Ramp to the absolute target on engage; rate limits (m/s, rad/s) |
 | `ee_position_scale`, `ee_reach_max_ratio` | `1.0`, `0.98` | Extra multiplier on the robot/human reach ratio; clamp of the hand-to-shoulder distance |
-| `arm_length_source`, `human_arm_length_m` | `"body"`, `0.62` | Human reach from body tracking (`|S-E|+|E-W|`) or from the config |
+| `arm_length_source`, `human_arm_length_m` | `"calibrate"`, `0.62` | Operator reach the hand-to-shoulder vector is scaled by (robot reach ÷ this). `calibrate`: shoulder → controller distance measured on Right A with the arms straight out, fixed for the session (needs `start_on_right_a`); `body`: body tracking `|S-E|+|E-W|`, updated while running; `config`: `human_arm_length_m` (e.g. a known value per operator) |
+| `arm_calibration_window_s`, `arm_calibration_min_m`, `arm_calibration_max_m`, `arm_calibration_max_asymmetry` | `0.5`, `0.45`, `0.85`, `0.10` | `calibrate`: the reach is the median of the samples of this window before the press; a value outside the range is rejected; when the arms differ by more than this fraction the longer value is used for both. The measured values are logged, shown in the status line (`reach=R0.61/L0.60 (x0.96/0.98)`) and written to the profile's `teleop.arm_calibration` |
 | `ee_orientation_latch_on_a`, `ee_position_latch_on_a`, `ee_orientation_offset_rpy_deg` | `True`, `True`, `[0,0,0]` | Controller → gripper orientation / position offsets, latched at the **first squeeze** after connect and after Right A (the controller then ↦ the start-pose gripper, so squeezing without moving the hand does not move the arm; the posture used to press A is irrelevant); `[0,0,0]` fixed orientation offset when not latched |
 | `reference_source` | `"shoulders"` | Operator frame (+X) from the body-tracking shoulder line at the first action and on Right A alike (arms hold until both shoulders are valid; Right A without shoulders falls back to the gaze with a warning); `gaze` = headset look direction both times; `auto` = shoulder line when valid else gaze |
 | `arm_posture_hint`, `record_posture_hint` | `True`, `False` | IOBT shoulder / elbow → nullspace hint (`<side>_arm_<i>.null`, i = 0..3); record them (adds 8 action dims; set `--robot.record_posture_hint=true` too) |

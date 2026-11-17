@@ -29,7 +29,7 @@ DEFAULT_BASE_T_ANCHOR: list[list[float]] = [
 SESSION_START_CHOICES = ("connect", "first_action")
 TORSO_SOURCE_CHOICES = ("body", "head", "none")
 TORSO_ENGAGE_CHOICES = ("both_arms", "any_arm", "always")
-ARM_LENGTH_SOURCE_CHOICES = ("body", "config")
+ARM_LENGTH_SOURCE_CHOICES = ("calibrate", "body", "config")
 HINT_WRIST_SOURCE_CHOICES = ("controller", "body")
 ROBOT_VERSION_CHOICES = ("auto", "1.2", "1.3")
 WEAR_MODE_CHOICES = ("head", "neck")
@@ -158,8 +158,25 @@ class Rby1XRConfig(IsaacTeleopConfig):
     engage_ramp_s: float = 2.0
     ee_position_scale: float = 1.0          # extra multiplier on the reach ratio
     ee_reach_max_ratio: float = 0.98        # clamp |hand - shoulder| to this × robot reach
-    arm_length_source: str = "body"         # "body" (IOBT |S-E|+|E-W|) | "config"
-    human_arm_length_m: float = 0.62        # used when arm_length_source="config"
+    # Operator reach the hand-to-shoulder vector is scaled by (robot reach / this):
+    #   "calibrate": measured when Right A is pressed with both arms held straight
+    #                out in front — the shoulder -> controller distance, fixed for
+    #                the session (needs start_on_right_a);
+    #   "body":      IOBT |S-E|+|E-W|, updated while running;
+    #   "config":    human_arm_length_m.
+    arm_length_source: str = "calibrate"
+    # Shoulder -> controller distance (m): the fixed value for "config", and the
+    # value used until a reach is measured / estimated in the other modes.
+    human_arm_length_m: float = 0.62
+    # "calibrate": the reach is the median of the samples of the last
+    # arm_calibration_window_s before the press. A reach outside [min, max] is
+    # rejected (arm not extended, tracking off). When the two arms differ by
+    # more than arm_calibration_max_asymmetry (fraction), the longer one is
+    # used for both: an arm that is not fully extended only measures short.
+    arm_calibration_window_s: float = 0.5
+    arm_calibration_min_m: float = 0.45
+    arm_calibration_max_m: float = 0.85
+    arm_calibration_max_asymmetry: float = 0.10
     shoulder_smoothing: float = 0.2         # EMA on the IOBT shoulder position
     ee_max_linear_vel: float = 1.0          # m/s rate limit of the absolute target
     ee_max_angular_vel: float = 3.0         # rad/s
@@ -326,6 +343,15 @@ class Rby1XRConfig(IsaacTeleopConfig):
         ):
             if value not in choices:
                 raise ValueError(f"{name} must be one of {choices}, got {value!r}")
+        if self.arm_length_source == "calibrate" and not self.start_on_right_a:
+            raise ValueError(
+                'arm_length_source="calibrate" measures the reach on Right A and needs '
+                'start_on_right_a=True (use "body" or "config" otherwise)'
+            )
+        if not 0.0 < self.arm_calibration_min_m < self.arm_calibration_max_m:
+            raise ValueError("arm_calibration_min_m must be positive and below arm_calibration_max_m")
+        if self.arm_calibration_window_s <= 0.0 or self.arm_calibration_max_asymmetry < 0.0:
+            raise ValueError("arm_calibration_window_s must be > 0 and arm_calibration_max_asymmetry >= 0")
         if self.record_posture_hint and not self.arm_posture_hint:
             raise ValueError("record_posture_hint requires arm_posture_hint=True")
         if len(self.ee_orientation_offset_rpy_deg) != 3:
