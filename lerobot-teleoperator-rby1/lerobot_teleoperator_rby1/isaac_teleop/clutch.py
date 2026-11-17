@@ -8,7 +8,8 @@ Adapted from the upstream LeRobot example
 from __future__ import annotations
 
 import numpy as np
-from scipy.spatial.transform import Rotation
+
+from .so3 import matrix_from_quat, quat_from_matrix, renormalize
 
 
 class Clutch:
@@ -44,11 +45,11 @@ class Clutch:
     def __init__(self, home_base_T_ee: np.ndarray):  # noqa: N803
         home = np.asarray(home_base_T_ee, dtype=float)
         self._last_commanded_pos = home[:3, 3].copy()
-        self._last_commanded_rot = Rotation.from_matrix(home[:3, :3])
+        self._last_commanded_rot = renormalize(home[:3, :3])
         self._home_pos = self._last_commanded_pos.copy()
         self._home_rot = self._last_commanded_rot
         self._origin_pos = np.zeros(3, dtype=float)
-        self._origin_rot = Rotation.from_quat(np.array([0.0, 0.0, 0.0, 1.0]))
+        self._origin_rot = np.eye(3)
         self._engaged = False
 
     # ------------------------------------------------------------------
@@ -93,14 +94,14 @@ class Clutch:
             measured = np.asarray(measured_base_T_ee, dtype=float)
             self._home_pos = measured[:3, 3].copy()
             if latch_orientation == "measured":
-                self._home_rot = Rotation.from_matrix(measured[:3, :3])
+                self._home_rot = renormalize(measured[:3, :3])
             else:
                 self._home_rot = self._last_commanded_rot
         else:
             self._home_pos = self._last_commanded_pos.copy()
             self._home_rot = self._last_commanded_rot
         self._origin_pos = np.asarray(grip_pos, dtype=float).copy()
-        self._origin_rot = Rotation.from_quat(np.asarray(grip_quat, dtype=float))
+        self._origin_rot = matrix_from_quat(grip_quat)
         # The engage frame commands exactly the home pose.
         self._last_commanded_pos = self._home_pos.copy()
         self._last_commanded_rot = self._home_rot
@@ -109,11 +110,10 @@ class Clutch:
     def rebase(self, grip_pos: np.ndarray, grip_quat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return the absolute base-frame target ``(pos [m], quat [xyzw])`` for this frame."""
         pos = self._home_pos + (np.asarray(grip_pos, dtype=float) - self._origin_pos)
-        rot_ctrl = Rotation.from_quat(np.asarray(grip_quat, dtype=float))
-        rot = (rot_ctrl * self._origin_rot.inv()) * self._home_rot
+        rot = renormalize(matrix_from_quat(grip_quat) @ self._origin_rot.T @ self._home_rot)
         self._last_commanded_pos = pos.copy()
         self._last_commanded_rot = rot
-        return pos, rot.as_quat()
+        return pos, quat_from_matrix(rot)
 
     def disengage(self) -> None:
         """Stop following; :attr:`last_commanded` is held until the next engage."""
@@ -127,7 +127,7 @@ class Clutch:
         """
         T = np.asarray(base_T_ee, dtype=float)
         self._last_commanded_pos = T[:3, 3].copy()
-        self._last_commanded_rot = Rotation.from_matrix(T[:3, :3])
+        self._last_commanded_rot = renormalize(T[:3, :3])
 
     def hold_at(self, base_T_ee: np.ndarray) -> None:  # noqa: N803
         """Re-seed the held pose (and home) to ``base_T_ee`` while disengaged.
@@ -138,14 +138,14 @@ class Clutch:
         """
         T = np.asarray(base_T_ee, dtype=float)
         self._last_commanded_pos = T[:3, 3].copy()
-        self._last_commanded_rot = Rotation.from_matrix(T[:3, :3])
+        self._last_commanded_rot = renormalize(T[:3, :3])
         self._home_pos = self._last_commanded_pos.copy()
         self._home_rot = self._last_commanded_rot
         self._engaged = False
 
 
-def _se3(pos: np.ndarray, rot: Rotation) -> np.ndarray:
+def _se3(pos: np.ndarray, rot: np.ndarray) -> np.ndarray:
     T = np.eye(4)
-    T[:3, :3] = rot.as_matrix()
+    T[:3, :3] = rot
     T[:3, 3] = pos
     return T

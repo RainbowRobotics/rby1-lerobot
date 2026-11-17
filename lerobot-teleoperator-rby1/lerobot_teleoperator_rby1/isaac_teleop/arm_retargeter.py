@@ -37,7 +37,8 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.spatial.transform import Rotation
+
+from .so3 import rot_axis_angle, rot_x, rot_y, rot_z
 
 DEG = math.pi / 180.0
 
@@ -73,7 +74,7 @@ def robot_shoulder_position(T_torso: np.ndarray, side: str) -> np.ndarray:  # no
 
 
 def _rot(axis: np.ndarray, angle: float) -> np.ndarray:
-    return Rotation.from_rotvec(np.asarray(axis, dtype=float) * angle).as_matrix()
+    return rot_axis_angle(axis, angle)
 
 
 def _wrap(a: float) -> float:
@@ -82,7 +83,7 @@ def _wrap(a: float) -> float:
 
 def forearm_dir_link2(q3: float, version: str = "1.3") -> np.ndarray:
     g = FOREARM_VEC.get(version, FOREARM_VEC["1.3"])
-    return _rot(np.array([0.0, 1.0, 0.0]), q3) @ (g / np.linalg.norm(g))
+    return rot_y(q3) @ (g / np.linalg.norm(g))
 
 
 def _q1_violation(q1: float, lim: np.ndarray) -> float:
@@ -108,9 +109,9 @@ def _solve_q0_q1(u: np.ndarray, e: np.ndarray, side: str, prev: np.ndarray | Non
     """
     a0 = ARM0_AXIS[side]
     lim = ARM_LIMITS[side]
-    c = np.cross(a0, u)
     # (R_a0(-q0) u)_x = u_x cos q0 - (a0 x u)_x sin q0  (a0_x = 0)  must equal e_x.
-    A, B, C = float(u[0]), float(-c[0]), float(e[0])
+    cross_x = float(a0[1]) * float(u[2]) - float(a0[2]) * float(u[1])  # (a0 x u)_x
+    A, B, C = float(u[0]), -cross_x, float(e[0])
     r = math.hypot(A, B)
     base = math.atan2(B, A)
     if r < 1e-9:
@@ -141,7 +142,7 @@ def _solve_q0_q1(u: np.ndarray, e: np.ndarray, side: str, prev: np.ndarray | Non
     else:
         _, _, idx = min(solutions, key=lambda t: (t[0], t[1]))
     q0, q1 = pairs[int(idx)]
-    q1 = float(np.clip(q1, lim[1][0], lim[1][1]))
+    q1 = min(max(q1, float(lim[1][0])), float(lim[1][1]))
     return q0, q1
 
 
@@ -174,7 +175,7 @@ def solve_shoulder_elbow(
     prev = None if q_prev is None else np.asarray(q_prev, dtype=float)
 
     # --- q3 from the elbow angle (independent of q0..q2): cos(phi) = e . R_y(q3) g
-    cos_phi = float(np.clip(np.dot(u, f), -1.0, 1.0))
+    cos_phi = min(max(float(np.dot(u, f)), -1.0), 1.0)
     P = float(e[0] * g[0] + e[2] * g[2])
     Q = float(e[0] * g[2] - e[2] * g[0])
     rp = math.hypot(P, Q)
@@ -192,8 +193,9 @@ def solve_shoulder_elbow(
     # small x offsets of the rest vectors; the same elbow angle is reached on
     # both sides of q3*. A human elbow does not hyper-extend, so take the
     # flexion side (the more negative candidate).
-    q3 = min(in_range) if in_range else min(q3_cands, key=lambda x: abs(x - np.clip(x, ELBOW_MIN, lim[3][1])))
-    q3 = float(np.clip(q3, ELBOW_MIN, lim[3][1]))
+    q3_max = float(lim[3][1])
+    q3 = min(in_range) if in_range else min(q3_cands, key=lambda x: abs(x - min(max(x, ELBOW_MIN), q3_max)))
+    q3 = min(max(q3, ELBOW_MIN), q3_max)
     w2 = forearm_dir_link2(q3, version)
     w2_az = math.atan2(w2[1], w2[0]) if math.hypot(w2[0], w2[1]) >= 0.05 else None
 
@@ -201,9 +203,9 @@ def solve_shoulder_elbow(
     q2 = float(prev[2]) if prev is not None else 0.0
     q0 = q1 = 0.0
     for _ in range(max(1, iterations)):
-        e_q2 = _rot(np.array([0.0, 0.0, 1.0]), q2) @ e
+        e_q2 = rot_z(q2) @ e
         q0, q1 = _solve_q0_q1(u, e_q2, side, prev)
-        f1 = _rot(np.array([1.0, 0.0, 0.0]), -q1) @ (_rot(a0, -q0) @ f)
+        f1 = rot_x(-q1) @ (_rot(a0, -q0) @ f)
         if w2_az is None or math.hypot(f1[0], f1[1]) < 0.05:
             q2_new = q2  # straight arm: azimuth undefined, keep the previous value
         else:
@@ -213,11 +215,15 @@ def solve_shoulder_elbow(
             break
         q2 = q2_new
 
-    q = np.array([q0, q1, q2, q3], dtype=float)
-    q[0] = float(np.clip(q[0], lim[0][0], lim[0][1]))
-    q[1] = float(np.clip(q[1], lim[1][0], lim[1][1]))
-    q[2] = float(np.clip(q[2], lim[2][0], lim[2][1]))
-    return q
+    return np.array(
+        [
+            min(max(q0, float(lim[0][0])), float(lim[0][1])),
+            min(max(q1, float(lim[1][0])), float(lim[1][1])),
+            min(max(q2, float(lim[2][0])), float(lim[2][1])),
+            q3,
+        ],
+        dtype=float,
+    )
 
 
 def forward_points(q: np.ndarray, side: str, version: str = "1.3") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -227,10 +233,10 @@ def forward_points(q: np.ndarray, side: str, version: str = "1.3") -> tuple[np.n
     """
     q = np.asarray(q, dtype=float)
     S = SHOULDER_OFFSET[side].copy()
-    R01 = _rot(ARM0_AXIS[side], q[0]) @ _rot(np.array([1.0, 0.0, 0.0]), q[1])
-    R2 = R01 @ _rot(np.array([0.0, 0.0, 1.0]), q[2])
+    R01 = _rot(ARM0_AXIS[side], q[0]) @ rot_x(q[1])
+    R2 = R01 @ rot_z(q[2])
     E = S + R2 @ UPPER_ARM_VEC
-    R3 = R2 @ _rot(np.array([0.0, 1.0, 0.0]), q[3])
+    R3 = R2 @ rot_y(q[3])
     W = E + R3 @ FOREARM_VEC.get(version, FOREARM_VEC["1.3"])
     return S, E, W
 

@@ -12,9 +12,16 @@ config).
 from __future__ import annotations
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 from .arm_retargeter import robot_shoulder_position
+from .so3 import (
+    matrix_from_quat,
+    matrix_from_rotvec,
+    matrix_from_rpy_deg,
+    renormalize,
+    rot_z,
+    rotvec_from_matrix,
+)
 
 
 class AbsoluteEeMapper:
@@ -116,7 +123,7 @@ class AbsoluteEeMapper:
     def rotate_shoulder(self, yaw: float) -> None:
         """Rotate the smoothed shoulder about z, with an operator frame that was turned by ``yaw``."""
         if self._shoulder is not None:
-            self._shoulder = Rotation.from_euler("z", yaw).as_matrix() @ self._shoulder
+            self._shoulder = rot_z(yaw) @ self._shoulder
 
     def reset_rate_limit(self, T: np.ndarray | None) -> None:  # noqa: N803
         self._last_T = None if T is None else np.asarray(T, dtype=float).copy()
@@ -156,7 +163,7 @@ class AbsoluteEeMapper:
         if n > max_len:
             d_t = d_t * (max_len / n)
         p = robot_shoulder_position(T_torso, self.side) + Rt @ (d_t + self._p_offset_t)
-        R = Rotation.from_quat(np.asarray(ctrl_orientation_xyzw, dtype=float)).as_matrix() @ self._R_offset
+        R = matrix_from_quat(ctrl_orientation_xyzw) @ self._R_offset
         T = np.eye(4)
         T[:3, :3] = R
         T[:3, 3] = p
@@ -176,20 +183,20 @@ class AbsoluteEeMapper:
         if n > max_dp:
             dp = dp * (max_dp / n)
         out[:3, 3] = self._last_T[:3, 3] + dp
-        dR = Rotation.from_matrix(T[:3, :3]) * Rotation.from_matrix(self._last_T[:3, :3]).inv()
-        rv = dR.as_rotvec()
+        last_R = self._last_T[:3, :3]
+        rv = rotvec_from_matrix(T[:3, :3] @ last_R.T)
         ang = float(np.linalg.norm(rv))
         max_ang = self.max_angular_vel * dt
         if ang > max_ang:
             rv = rv * (max_ang / ang)
-        out[:3, :3] = (Rotation.from_rotvec(rv) * Rotation.from_matrix(self._last_T[:3, :3])).as_matrix()
+        out[:3, :3] = renormalize(matrix_from_rotvec(rv) @ last_R)
         self._last_T = out.copy()
         return out
 
 
 def rpy_deg_to_matrix(rpy_deg) -> np.ndarray:
     r, p, y = [float(v) for v in rpy_deg]
-    return Rotation.from_euler("xyz", [r, p, y], degrees=True).as_matrix()
+    return matrix_from_rpy_deg(r, p, y)
 
 
 def is_finite_pose(T: np.ndarray) -> bool:  # noqa: N803

@@ -13,6 +13,7 @@ from collections.abc import Sequence
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from .so3 import matrix_from_rotvec, renormalize, rotvec_from_matrix
 from .xr_frame import BodyState
 
 # OpenXR: a tracked head/view pose looks along its local -Z axis.
@@ -282,12 +283,10 @@ def interpolate_pose(T0: np.ndarray, T1: np.ndarray, alpha: float) -> np.ndarray
     a = float(np.clip(alpha, 0.0, 1.0))
     T0 = np.asarray(T0, dtype=float)
     T1 = np.asarray(T1, dtype=float)
-    r0 = Rotation.from_matrix(T0[:3, :3])
-    r1 = Rotation.from_matrix(T1[:3, :3])
-    delta = r1 * r0.inv()
-    rot = Rotation.from_rotvec(delta.as_rotvec() * a) * r0
+    R0 = T0[:3, :3]
+    delta = rotvec_from_matrix(T1[:3, :3] @ R0.T)
     out = np.eye(4)
-    out[:3, :3] = rot.as_matrix()
+    out[:3, :3] = renormalize(matrix_from_rotvec(delta * a) @ R0)
     out[:3, 3] = (1.0 - a) * T0[:3, 3] + a * T1[:3, 3]
     return out
 
@@ -388,7 +387,7 @@ def se3_to_ee_action(T: np.ndarray, prefix: str) -> dict[str, float]:  # noqa: N
     Same convention as ``lerobot_robot_rby1.command_builders.action_from_pose``.
     """
     T = np.asarray(T, dtype=float)
-    rotvec = Rotation.from_matrix(T[:3, :3]).as_rotvec()
+    rotvec = rotvec_from_matrix(T[:3, :3])
     return {
         f"{prefix}.x": float(T[0, 3]),
         f"{prefix}.y": float(T[1, 3]),

@@ -55,7 +55,9 @@ def test_rate_limit_and_rpy():
     out = m.rate_limit(T1, dt=0.1)
     assert out[0, 3] == pytest.approx(0.1)
     assert Rotation.from_matrix(out[:3, :3]).magnitude() == pytest.approx(0.1)
-    np.testing.assert_allclose(rpy_deg_to_matrix([0, 0, 90]), Rotation.from_euler("z", 90, degrees=True).as_matrix())
+    np.testing.assert_allclose(
+        rpy_deg_to_matrix([0, 0, 90]), Rotation.from_euler("z", 90, degrees=True).as_matrix(), atol=1e-12
+    )
 
 
 def test_position_offset_latch_moves_with_torso():
