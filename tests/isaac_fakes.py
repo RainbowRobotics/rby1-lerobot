@@ -181,3 +181,50 @@ class FakeStateReader:
 
     def close(self):
         self.connected = False
+
+
+class FollowingRobot:
+    """Makes a :class:`FakeStateReader` follow the teleoperator's actions, like the follower would.
+
+    ``apply(action)`` after every ``get_action()``: end-effector and torso
+    targets become the measured poses, head targets the measured head joints,
+    the base velocity is integrated into the odometry, and ``reset.cmd`` puts
+    arms, torso and head back at the pose the robot had when this object was
+    created (the follower's ready-pose motion). ``follow`` in (0, 1] is the
+    fraction of the remaining distance covered per tick (1 = exact tracking).
+    """
+
+    EE = (("torso_ee", "torso"), ("right_ee", "right_ee"), ("left_ee", "left_ee"))
+
+    def __init__(self, reader: FakeStateReader, *, dt: float, follow: float = 1.0) -> None:
+        self.reader = reader
+        self.dt = dt
+        self.follow = follow
+        self.start = (
+            reader.torso.copy(), reader.right_ee.copy(), reader.left_ee.copy(), reader.head_q.copy(),
+        )
+        self.resets = 0
+
+    def apply(self, action: dict[str, Any]) -> float:
+        """Apply one action; returns the seconds the follower would block for (``reset.cmd``)."""
+        from lerobot_robot_rby1.command_builders import pose_from_action
+        from lerobot_teleoperator_rby1.isaac_teleop.retargeters import interpolate_pose
+
+        r = self.reader
+        reset_s = float(action.get("reset.cmd", 0.0) or 0.0)
+        if reset_s > 0.0:
+            r.torso, r.right_ee, r.left_ee, r.head_q = (x.copy() for x in self.start)
+            self.resets += 1
+        else:
+            for prefix, attr in self.EE:
+                if f"{prefix}.x" in action:
+                    target = pose_from_action(action, prefix)
+                    setattr(r, attr, interpolate_pose(getattr(r, attr), target, self.follow))
+            if "head_0.pos" in action:
+                target = np.array([action["head_0.pos"], action["head_1.pos"]], dtype=float)
+                r.head_q = r.head_q + self.follow * (target - r.head_q)
+        if r.odometry is not None and "x.vel" in action:
+            vx, vy, wz = (float(action[k]) * self.dt for k in ("x.vel", "y.vel", "theta.vel"))
+            c, s = np.cos(wz), np.sin(wz)
+            r.odometry = r.odometry @ np.array([[c, -s, vx], [s, c, vy], [0.0, 0.0, 1.0]])
+        return reset_s
