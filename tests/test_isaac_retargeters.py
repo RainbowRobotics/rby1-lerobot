@@ -194,3 +194,42 @@ def test_clamp_pose_box_components():
     assert clipped == ["x+", "z-", "pitch+", "yaw-"]
     np.testing.assert_allclose(out[:3, 3], [0.45, 0.1, 0.8])
     np.testing.assert_allclose(Rotation.from_matrix(out[:3, :3]).as_euler("xyz", degrees=True), [5, 50, -45], atol=1e-9)
+
+
+def test_se2_relative():
+    from lerobot_teleoperator_rby1.isaac_teleop.retargeters import se2_relative
+
+    def se2(x, y, yaw):
+        c, s = math.cos(yaw), math.sin(yaw)
+        return np.array([[c, -s, x], [s, c, y], [0.0, 0.0, 1.0]])
+
+    T0 = se2(1.0, 2.0, math.radians(90))
+    # 0.5 m along the start frame's +x (world +y), turned a further 30 deg.
+    x, y, yaw = se2_relative(T0, se2(1.0, 2.5, math.radians(120)))
+    assert (x, y) == pytest.approx((0.5, 0.0), abs=1e-9) and yaw == pytest.approx(math.radians(30))
+    assert se2_relative(T0, T0) == pytest.approx((0.0, 0.0, 0.0), abs=1e-12)
+
+
+def test_body_drive_velocity():
+    from lerobot_teleoperator_rby1.isaac_teleop.retargeters import body_drive_velocity
+
+    kw = dict(kp_linear=2.0, kp_angular=2.0, max_linear=0.4, max_angular=0.8)
+    # Proportional inside the limits.
+    v, e = body_drive_velocity((0.1, -0.05), 0.2, (0.0, 0.0), 0.0, **kw)
+    assert v == pytest.approx((0.2, -0.1, 0.4)) and e == pytest.approx((0.1, -0.05, 0.2))
+    # Speed and yaw-rate clamps keep the direction.
+    v, _ = body_drive_velocity((0.6, 0.8), -2.0, (0.0, 0.0), 0.0, **kw)
+    assert math.hypot(v[0], v[1]) == pytest.approx(0.4) and v[1] / v[0] == pytest.approx(0.8 / 0.6)
+    assert v[2] == pytest.approx(-0.8)
+    # Deadbands.
+    v, _ = body_drive_velocity((0.005, 0.0), 0.01, (0.0, 0.0), 0.0, deadband_m=0.01, deadband_rad=0.02, **kw)
+    assert v == (0.0, 0.0, 0.0)
+    # The error is in the start frame; the command is in the robot's current frame (turned 90 deg left).
+    v, _ = body_drive_velocity((0.1, 0.0), math.pi / 2, (0.0, 0.0), math.pi / 2, **kw)
+    assert v == pytest.approx((0.0, -0.2, 0.0), abs=1e-9)
+    # Reached: nothing left to do.
+    v, e = body_drive_velocity((0.3, 0.1), 0.5, (0.3, 0.1), 0.5, **kw)
+    assert v == (0.0, 0.0, 0.0) and e == pytest.approx((0.0, 0.0, 0.0))
+    # A differential base gets no lateral velocity.
+    v, _ = body_drive_velocity((0.1, 0.1), 0.0, (0.0, 0.0), 0.0, holonomic=False, **kw)
+    assert v == pytest.approx((0.2, 0.0, 0.0))

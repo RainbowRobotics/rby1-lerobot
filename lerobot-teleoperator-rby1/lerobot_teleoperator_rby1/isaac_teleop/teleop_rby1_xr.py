@@ -73,13 +73,16 @@ from .clutch import Clutch
 from .config_isaac_teleop import Rby1XRConfig
 from .retargeters import (
     HeadRetargeter,
+    body_drive_velocity,
     chest_pose_from_body,
     clamp_pose_box,
     head_yaw_pitch,
     interpolate_pose,
+    se2_relative,
     se3_to_ee_action,
     smoothstep,
     thumbsticks_to_base_vel,
+    wrap_pi,
 )
 from .robot_state import Rby1StateReader, RobotSnapshot
 from .viz_grab import HandInput, hand_input, load_layouts, save_layouts
@@ -179,6 +182,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._abs_last_body_t: dict[str, float | None] = {"right": None, "left": None}
         self._posture: dict[str, ArmPostureRetargeter] = {}
         self._hints: dict[str, np.ndarray | None] = {"right": None, "left": None}
+        # Body drive (Left X held): entry state, or None. _body_drive_blocked
+        # holds it off after an abort until Left X is released.
+        self._body_drive: _BodyDrive | None = None
+        self._body_drive_blocked = False
         # arm_length_source="calibrate": recent (time, |controller - shoulder|) per arm.
         self._reach_samples: dict[str, deque[tuple[float, float]]] = {"right": deque(), "left": deque()}
         self._last_snapshot: RobotSnapshot | None = None
@@ -426,14 +433,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
         yaw: float | None = None
         source = ""
         src = self.config.reference_source
-        if src != "gaze" and raw.body is not None:
-            ls, rs = int(BodyJointIndex.LEFT_SHOULDER), int(BodyJointIndex.RIGHT_SHOULDER)
-            if bool(raw.body.valid[ls]) and bool(raw.body.valid[rs]):
-                across = raw.body.positions[ls] - raw.body.positions[rs]  # right -> left
-                fwd = np.cross(across, np.array([0.0, 0.0, 1.0]))
-                if np.linalg.norm(fwd[:2]) > 1e-3:
-                    yaw = math.atan2(fwd[1], fwd[0])
-                    source = "shoulder line"
+        if src != "gaze":
+            yaw = self._shoulder_line_yaw(raw)
+            if yaw is not None:
+                source = "shoulder line"
         if yaw is None and src == "shoulders" and self.config.wear_mode != "neck":
             if not on_button:
                 # First reference: wait for the shoulders (the arms hold meanwhile).
@@ -467,6 +470,20 @@ class Rby1XR(IsaacTeleopTeleoperator):
         if abs(_wrap_angle(self._yaw_correction - old)) > 1e-6 or on_button:
             self._on_reference_changed()
         return True
+
+    @staticmethod
+    def _shoulder_line_yaw(raw: XRFrame) -> float | None:
+        """Yaw (rad) the operator's body faces, from the body-tracking shoulder line; None when invalid."""
+        if raw.body is None:
+            return None
+        ls, rs = int(BodyJointIndex.LEFT_SHOULDER), int(BodyJointIndex.RIGHT_SHOULDER)
+        if not (bool(raw.body.valid[ls]) and bool(raw.body.valid[rs])):
+            return None
+        across = raw.body.positions[ls] - raw.body.positions[rs]  # right -> left
+        fwd = np.cross(across, np.array([0.0, 0.0, 1.0]))
+        if np.linalg.norm(fwd[:2]) <= 1e-3:
+            return None
+        return math.atan2(fwd[1], fwd[0])
 
     def _on_reference_changed(self) -> None:
         """Everything derived from the operator frame must start over."""
@@ -514,6 +531,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._base_vel = (0.0, 0.0, 0.0)
         self._stopped = False
         self._started = not cfg.start_on_right_a
+        self._body_drive = None
+        self._body_drive_blocked = False
         # The follower connects (and moves to its ready pose) after this, so
         # the targets are re-seeded again on the first get_action().
         self._needs_initial_resync = True
@@ -580,6 +599,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 start = self._start_snapshot
                 self._head_latch_target = (start.head_q.copy(), start.torso.copy())
 
+        if self._update_body_drive(raw, snap) and raw is not None:
+            # The operator frame turned with the body this tick.
+            frame = _mask_grabbing_hands(rotate_frame_about_z(raw, self._yaw_correction), grabbing)
+
         now = time.monotonic()
         dt = 1.0 / 60.0 if self._last_tick_t is None else float(np.clip(now - self._last_tick_t, 1e-3, 0.1))
         self._last_tick_t = now
@@ -611,6 +634,107 @@ class Rby1XR(IsaacTeleopTeleoperator):
     def _idle(self) -> bool:
         """Nothing may follow the headset: stopped (Right B) or not started yet."""
         return self._stopped or not self._started
+
+    # ------------------------------------------------------------------
+    # Body drive: Left X held -> the base follows the operator 1:1
+    # ------------------------------------------------------------------
+
+    def _end_body_drive(self, reason: str, *, block: bool = False) -> None:
+        if self._body_drive is None:
+            return
+        self._body_drive = None
+        self._body_drive_blocked = block
+        self._base_vel = (0.0, 0.0, 0.0)
+        (logger.warning if block else logger.info)(
+            "Base drive ended (%s)%s.", reason, " — release Left X and press it again to resume" if block else ""
+        )
+
+    def _update_body_drive(self, raw: XRFrame | None, snap: RobotSnapshot) -> bool:
+        """Run the body-drive mode for this tick; True when the operator frame was turned.
+
+        While Left X is held the base follows the operator's displacement
+        (headset, horizontal) and turn (shoulder line) since the press, measured
+        against the robot's odometry. The operator frame follows the body's
+        turn, so head and arm commands stay relative to the body.
+        """
+        cfg = self.config
+        pressed = raw is not None and raw.left is not None and raw.left.primary
+        if not pressed:
+            self._end_body_drive("Left X released")
+            self._body_drive_blocked = False
+            return False
+        if self._body_drive_blocked:
+            return False
+        allowed = (
+            cfg.body_drive_enabled and cfg.use_mobile_base and self._started and not self._stopped
+            and not self._returning
+        )
+        if not allowed:
+            self._end_body_drive("stopped")
+            return False
+        body_yaw = self._shoulder_line_yaw(raw)
+        odometry = getattr(snap, "odometry", None)
+        tracked = raw.head is not None and body_yaw is not None and odometry is not None
+        drive = self._body_drive
+        if drive is None:
+            if not tracked:
+                return False  # entered on the first tick with headset, shoulders and odometry
+            drive = self._body_drive = _BodyDrive(
+                origin_xy=raw.head.position[:2].copy(),
+                body_yaw=body_yaw,
+                yaw_correction0=self._yaw_correction,
+                odometry0=np.asarray(odometry, dtype=float).copy(),
+            )
+            torso = self._clutch.get("torso")
+            if torso is not None:
+                torso.disengage()
+            logger.info("Base drive (Left X held): the torso holds, the base follows your steps and turns.")
+        if not tracked:
+            self._end_body_drive("headset, shoulders or odometry lost", block=True)
+            return False
+
+        # Operator pose since the press, in the base frame of that moment (yaw unwrapped, lightly filtered).
+        a = cfg.body_drive_smoothing
+        drive.turn_raw += wrap_pi(body_yaw - drive.body_yaw)
+        drive.body_yaw = body_yaw
+        c0, s0 = math.cos(drive.yaw_correction0), math.sin(drive.yaw_correction0)
+        d = raw.head.position[:2] - drive.origin_xy
+        step = np.array([c0 * d[0] - s0 * d[1], s0 * d[0] + c0 * d[1]])
+        drive.turn += a * (drive.turn_raw - drive.turn)
+        drive.step += a * (step - drive.step)
+        # Robot pose since the press, from its odometry (yaw unwrapped).
+        x, y, yaw = se2_relative(drive.odometry0, odometry)
+        drive.robot_turn += wrap_pi(yaw - drive.robot_yaw_wrapped)
+        drive.robot_yaw_wrapped = yaw
+
+        holonomic = str(getattr(self._reader, "model_name", "m")).lower() != "a"
+        velocity, error = body_drive_velocity(
+            drive.step, drive.turn, (x, y), drive.robot_turn,
+            kp_linear=cfg.body_drive_kp_linear, kp_angular=cfg.body_drive_kp_angular,
+            max_linear=cfg.body_drive_max_linear, max_angular=cfg.body_drive_max_angular,
+            deadband_m=cfg.body_drive_deadband_m, deadband_rad=math.radians(cfg.body_drive_deadband_deg),
+            holonomic=holonomic,
+        )
+        drive.error = error
+        if math.hypot(error[0], error[1]) > cfg.body_drive_max_error_m or abs(error[2]) > math.radians(
+            cfg.body_drive_max_error_deg
+        ):
+            self._end_body_drive(
+                f"the base is too far behind: {error[0]:+.2f}, {error[1]:+.2f} m, {math.degrees(error[2]):+.0f} deg",
+                block=True,
+            )
+            return False
+        self._base_vel = velocity
+
+        # The operator frame turns with the body: head = neck angle, arms relative to the body.
+        correction = drive.yaw_correction0 - drive.turn
+        delta = correction - self._yaw_correction
+        if abs(delta) < 1e-9:
+            return False
+        self._yaw_correction = correction
+        for mapper in self._abs.values():
+            mapper.rotate_shoulder(delta)
+        return True
 
     def _calibrate_arms(self) -> bool:
         """Fix the operator reach from the arms held straight out (``arm_length_source="calibrate"``).
@@ -669,6 +793,13 @@ class Rby1XR(IsaacTeleopTeleoperator):
         logger.info("Arm reach calibrated:%s (measured %s).", self._reach_status(), summary)
         self._record_arm_calibration()
         return True
+
+    def _body_drive_status(self) -> str:
+        drive = self._body_drive
+        if drive is None:
+            return ""
+        ex, ey, eyaw = drive.error
+        return f" | BASE DRIVE err=({ex:+.2f},{ey:+.2f},{math.degrees(eyaw):+.0f}°)"
 
     def _reach_status(self) -> str:
         """`` reach=R0.61/L0.60 (x0.96)`` for the status line; empty outside "calibrate"."""
@@ -1124,7 +1255,9 @@ class Rby1XR(IsaacTeleopTeleoperator):
         if clutch is None:
             return
         driver = None
-        if not self._started:
+        if self._body_drive is not None:
+            self._torso_hold_reason = "base drive (Left X)"
+        elif not self._started:
             self._torso_hold_reason = "not started (press Right A)"
         elif self._stopped:
             self._torso_hold_reason = "stopped (Right B)"
@@ -1210,6 +1343,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         if not cfg.use_mobile_base or self._idle or self._returning:
             self._base_vel = (0.0, 0.0, 0.0)
             return
+        if self._body_drive is not None:
+            return  # _update_body_drive set the velocity; the thumbsticks are ignored
         self._base_vel = thumbsticks_to_base_vel(
             frame.right.thumbstick if frame.right is not None else None,
             frame.left.thumbstick if frame.left is not None else None,
@@ -1271,6 +1406,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             hint("right"),
             hint("left"),
             self._reach_status()
+            + self._body_drive_status()
             + ("" if self._started else " | NOT STARTED (press Right A)")
             + (" | STOPPED" if self._stopped else "")
             + (f" | wear={self.config.wear_mode}" if self.config.wear_mode != "head" else "")
@@ -1355,6 +1491,22 @@ def _mask_grabbing_hands(frame: XRFrame, grabbing: dict[str, str | None]) -> XRF
     right = mask(frame.right) if grabbing.get("right") else frame.right
     left = mask(frame.left) if grabbing.get("left") else frame.left
     return XRFrame(right=right, left=left, head=frame.head, body=frame.body)
+
+
+class _BodyDrive:
+    """State of one body-drive episode (Left X held), all relative to the press."""
+
+    def __init__(self, *, origin_xy: np.ndarray, body_yaw: float, yaw_correction0: float, odometry0: np.ndarray):
+        self.origin_xy = origin_xy            # headset xy at the press (raw XR frame)
+        self.body_yaw = body_yaw              # last shoulder-line yaw (raw XR frame)
+        self.yaw_correction0 = yaw_correction0
+        self.odometry0 = odometry0            # robot odometry at the press (3x3 SE(2))
+        self.turn_raw = 0.0                   # operator turn since the press, unwrapped (rad)
+        self.turn = 0.0                       # … filtered
+        self.step = np.zeros(2)               # operator displacement since the press, start base frame (m), filtered
+        self.robot_yaw_wrapped = 0.0
+        self.robot_turn = 0.0                 # robot turn since the press, unwrapped (rad)
+        self.error = (0.0, 0.0, 0.0)
 
 
 class _ReturnMotion:

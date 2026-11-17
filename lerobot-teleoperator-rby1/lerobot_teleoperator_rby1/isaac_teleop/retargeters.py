@@ -333,6 +333,50 @@ def thumbsticks_to_base_vel(
     return vx, vy, wz
 
 
+def se2_relative(T0: np.ndarray, T: np.ndarray) -> tuple[float, float, float]:  # noqa: N803
+    """``(x, y, yaw)`` of the SE(2) pose ``T`` in the frame of ``T0`` (3x3 homogeneous transforms)."""
+    rel = np.linalg.inv(np.asarray(T0, dtype=float)) @ np.asarray(T, dtype=float)
+    return float(rel[0, 2]), float(rel[1, 2]), math.atan2(float(rel[1, 0]), float(rel[0, 0]))
+
+
+def body_drive_velocity(
+    target_xy: Sequence[float],
+    target_yaw: float,
+    robot_xy: Sequence[float],
+    robot_yaw: float,
+    *,
+    kp_linear: float,
+    kp_angular: float,
+    max_linear: float,
+    max_angular: float,
+    deadband_m: float = 0.0,
+    deadband_rad: float = 0.0,
+    holonomic: bool = True,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Base velocity that moves the robot from its pose to the target pose.
+
+    Target and robot pose are both relative to the same start frame (the base
+    at the moment the mode was entered); yaw angles are unwrapped. Returns the
+    body-frame command ``(vx, vy, wz)`` and the error ``(ex, ey, eyaw)`` in the
+    start frame. Proportional control with a deadband and a speed clamp; a
+    non-holonomic base (``holonomic=False``) gets no lateral velocity.
+    """
+    ex = float(target_xy[0]) - float(robot_xy[0])
+    ey = float(target_xy[1]) - float(robot_xy[1])
+    eyaw = float(target_yaw) - float(robot_yaw)
+    vx = vy = wz = 0.0
+    if math.hypot(ex, ey) > deadband_m:
+        c, s = math.cos(robot_yaw), math.sin(robot_yaw)
+        vx = kp_linear * (c * ex + s * ey)   # start frame -> current base frame
+        vy = kp_linear * (-s * ex + c * ey) if holonomic else 0.0
+        speed = math.hypot(vx, vy)
+        if speed > max_linear:
+            vx, vy = vx * max_linear / speed, vy * max_linear / speed
+    if abs(eyaw) > deadband_rad:
+        wz = float(np.clip(kp_angular * eyaw, -max_angular, max_angular))
+    return (vx, vy, wz), (ex, ey, eyaw)
+
+
 # ---------------------------------------------------------------------------
 # Action encoding
 # ---------------------------------------------------------------------------

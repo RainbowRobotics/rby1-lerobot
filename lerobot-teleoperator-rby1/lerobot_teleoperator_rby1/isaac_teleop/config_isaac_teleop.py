@@ -245,6 +245,27 @@ class Rby1XRConfig(IsaacTeleopConfig):
     base_max_linear: float = 0.3   # m/s at full deflection
     base_max_angular: float = 0.6  # rad/s at full deflection
 
+    # ── Body drive: hold Left X -> the base follows the operator 1:1 ──
+    # While Left X is held the torso target is frozen and the base follows the
+    # operator's own motion since the press: the headset's horizontal
+    # displacement and the turn of the shoulder line, against the robot's
+    # odometry (proportional position control, velocity commands). The
+    # operator frame turns with the body meanwhile, so the head command is the
+    # neck angle and the arms stay as they are relative to the torso. The
+    # thumbsticks are ignored while it is active; releasing Left X stops the base.
+    body_drive_enabled: bool = True
+    body_drive_kp_linear: float = 2.0       # (m/s) per m of position error
+    body_drive_kp_angular: float = 2.0      # (rad/s) per rad of heading error
+    body_drive_max_linear: float = 0.4      # m/s
+    body_drive_max_angular: float = 0.8     # rad/s
+    body_drive_deadband_m: float = 0.01
+    body_drive_deadband_deg: float = 1.0
+    body_drive_smoothing: float = 0.3       # EMA weight of the new operator sample (1.0 = none)
+    # Leave the mode (until Left X is pressed again) when the base is this far
+    # behind: a tracking jump, or a base that cannot follow.
+    body_drive_max_error_m: float = 0.6
+    body_drive_max_error_deg: float = 60.0
+
     # ── Headset orientation -> head_0 (yaw) / head_1 (pitch) ─────────
     # The gaze follows the headset yaw / pitch measured in the operator frame
     # (Right A sets which direction is straight ahead and latches the look
@@ -352,6 +373,16 @@ class Rby1XRConfig(IsaacTeleopConfig):
             raise ValueError("arm_calibration_min_m must be positive and below arm_calibration_max_m")
         if self.arm_calibration_window_s <= 0.0 or self.arm_calibration_max_asymmetry < 0.0:
             raise ValueError("arm_calibration_window_s must be > 0 and arm_calibration_max_asymmetry >= 0")
+        for name in (
+            "body_drive_kp_linear", "body_drive_kp_angular", "body_drive_max_linear",
+            "body_drive_max_angular", "body_drive_max_error_m", "body_drive_max_error_deg",
+        ):
+            if getattr(self, name) <= 0.0:
+                raise ValueError(f"{name} must be > 0")
+        if self.body_drive_deadband_m < 0.0 or self.body_drive_deadband_deg < 0.0:
+            raise ValueError("body_drive_deadband_m / _deg must be >= 0")
+        if not 0.0 < self.body_drive_smoothing <= 1.0:
+            raise ValueError("body_drive_smoothing must be in (0, 1]")
         if self.record_posture_hint and not self.arm_posture_hint:
             raise ValueError("record_posture_hint requires arm_posture_hint=True")
         if len(self.ee_orientation_offset_rpy_deg) != 3:

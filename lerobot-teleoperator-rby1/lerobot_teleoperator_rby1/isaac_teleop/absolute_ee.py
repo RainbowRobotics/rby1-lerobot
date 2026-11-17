@@ -113,6 +113,11 @@ class AbsoluteEeMapper:
         """Forget the smoothed shoulder (e.g. after the operator frame was re-referenced)."""
         self._shoulder = None
 
+    def rotate_shoulder(self, yaw: float) -> None:
+        """Rotate the smoothed shoulder about z, with an operator frame that was turned by ``yaw``."""
+        if self._shoulder is not None:
+            self._shoulder = Rotation.from_euler("z", yaw).as_matrix() @ self._shoulder
+
     def reset_rate_limit(self, T: np.ndarray | None) -> None:  # noqa: N803
         self._last_T = None if T is None else np.asarray(T, dtype=float).copy()
 

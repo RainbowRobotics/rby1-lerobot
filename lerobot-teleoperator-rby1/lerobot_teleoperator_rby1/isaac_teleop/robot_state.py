@@ -31,6 +31,8 @@ class RobotSnapshot:
     head_q: np.ndarray
     right_q: np.ndarray | None = None  # (7,) rad
     left_q: np.ndarray | None = None
+    # Base odometry as a 3x3 SE(2) homogeneous transform (None when the robot reports none).
+    odometry: np.ndarray | None = None
 
 
 class Rby1StateReader:
@@ -105,7 +107,10 @@ class Rby1StateReader:
         head_q = np.asarray(q[self._model.head_idx], dtype=np.float64).copy()
         right_q = np.asarray(q[self._model.right_arm_idx], dtype=np.float64).copy()
         left_q = np.asarray(q[self._model.left_arm_idx], dtype=np.float64).copy()
-        return RobotSnapshot(torso, right, left, head_q, right_q, left_q)
+        odometry = getattr(state, "odometry", None)
+        if odometry is not None:
+            odometry = np.asarray(odometry, dtype=np.float64).reshape(3, 3).copy()
+        return RobotSnapshot(torso, right, left, head_q, right_q, left_q, odometry)
 
     def arm_reach(self, side: str) -> float:
         """Shoulder -> ``link_<side>_arm_6`` distance (m) of the straight arm.

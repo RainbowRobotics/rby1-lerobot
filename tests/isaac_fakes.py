@@ -138,7 +138,8 @@ def se3(pos=(0.0, 0.0, 0.0), rot=None) -> np.ndarray:
 
 
 class FakeSnapshot:
-    def __init__(self, torso, right_ee, left_ee, head_q, right_q=None, left_q=None):
+    def __init__(self, torso, right_ee, left_ee, head_q, right_q=None, left_q=None, odometry=None):
+        self.odometry = odometry
         self.torso = torso
         self.right_ee = right_ee
         self.left_ee = left_ee
@@ -161,6 +162,8 @@ class FakeStateReader:
         self.right_q = np.zeros(7)
         self.left_q = np.zeros(7)
         self.reach = {"right": 0.66, "left": 0.66}  # shoulder -> link_arm_6, straight arm
+        self.odometry = np.eye(3)  # SE(2); None = the robot reports no odometry
+        self.model_name = "m"
 
     def arm_reach(self, side):
         return self.reach[side]
@@ -173,6 +176,7 @@ class FakeStateReader:
         return FakeSnapshot(
             self.torso.copy(), self.right_ee.copy(), self.left_ee.copy(), self.head_q.copy(),
             self.right_q.copy(), self.left_q.copy(),
+            None if self.odometry is None else self.odometry.copy(),
         )
 
     def close(self):

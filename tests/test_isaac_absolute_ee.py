@@ -100,3 +100,13 @@ def test_set_human_reach_fixes_the_reach():
     m.set_human_reach(0.5)
     m.observe_body(S, E + [0.0, 0.0, -0.1], W + [0.0, 0.0, -0.2])
     assert m.human_reach == 0.5
+
+
+def test_rotate_shoulder_follows_a_turned_operator_frame():
+    from lerobot_teleoperator_rby1.isaac_teleop.absolute_ee import AbsoluteEeMapper
+
+    m = AbsoluteEeMapper("right", robot_reach=0.6, human_reach=0.6)
+    m.rotate_shoulder(0.3)  # nothing stored yet: no-op
+    m.set_shoulder(np.array([1.0, 0.0, 1.4]))
+    m.rotate_shoulder(np.pi / 2)
+    np.testing.assert_allclose(m.shoulder, [0.0, 1.0, 1.4], atol=1e-12)
