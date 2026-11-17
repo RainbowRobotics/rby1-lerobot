@@ -6,7 +6,7 @@ landmarks and palm, and the HMD pose — no controllers. :class:`StreamReceiver`
 connects to it, low-pass filters the inputs with time constants based on the
 packet timestamps, and publishes an immutable :class:`Snapshot`.
 
-Ported from the semi-humanoid teleoperation ``rby1_ces_elbow.py`` (CES branch).
+Ported from the semi-humanoid teleoperation ``rby1_lerobot_wb.py``.
 """
 
 from __future__ import annotations

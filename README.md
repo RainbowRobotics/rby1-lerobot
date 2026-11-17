@@ -187,8 +187,9 @@ the teleoperator's analytic IK (that is what places the elbow).
 | Palm position / hand orientation | `link_<side>_arm_6` pose (elbow flexion mapped 1:1 to the robot elbow, `hand_map="elbow"`) |
 | Elbow direction | Arm nullspace joint targets (`<side>_arm_<i>.null`) |
 | Upper-body tilt / twist | `link_torso_5` orientation (clamped) |
-| Walking / turning (pelvis) | Base velocity, closed loop on the base odometry |
-| Gaze (HMD) | `head_0` / `head_1` |
+| Walking / turning (pelvis) | Base velocity, closed loop on the base odometry. The base moves `base_scale` (0.6) × your displacement and turns `base_scale_yaw` (0.6) × your turn; the rest of the turn goes to the torso yaw |
+| — (`head_mode="gaze"`, default) | `head_0` / `head_1` look at a robot hand tip: the left one after each latch, **p** switches hands |
+| Gaze (HMD) (`head_mode="hmd"`) | `head_0` / `head_1` |
 | Thumb–index pinch | Gripper close |
 
 The bundled arm model is RB-Y1 **M v1.3**; `connect()` compares it with the robot's
@@ -213,7 +214,9 @@ lerobot-teleoperate \
 1. The robot moves to the ready pose above (the pose the retargeting is tuned for).
 2. Stand in a similar posture and press **Enter** in that terminal: this instant is
    Δ = 0 between you and the robot. **Space** holds (base stops, arms and torso keep
-   their target); **Enter** re-latches and resumes.
+   their target); **Enter** re-latches and resumes; **p** switches the hand the head
+   looks at. The torso yaw clamps at ±120°, so after turning more than about ±300°
+   since the latch (with `base_scale_yaw=0.6`), press **Enter** to re-latch.
 
 `use_head`, `use_gripper` and `use_mobile_base` must match between `--robot.*` and
 `--teleop.*` (the teleoperator defaults all three to `true`). The same flags work

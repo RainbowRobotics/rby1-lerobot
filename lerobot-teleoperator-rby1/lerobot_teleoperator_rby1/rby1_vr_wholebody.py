@@ -5,7 +5,8 @@ Meta_with_hands app (inside-out body tracking + hand tracking, no
 controllers). The operator's upper body drives the torso, the hands drive
 the arms (elbow flexion mapped 1:1 to the robot elbow), the gaze drives the
 head, pinching drives the grippers and walking / turning drives the mobile
-base (pelvis displacement tracked with the base odometry).
+base (pelvis displacement × ``base_scale``, tracked with the base odometry).
+By default the head looks at a robot hand tip (``head_mode="gaze"``).
 
 Control flow
 ------------
@@ -21,13 +22,14 @@ Control flow
    torso / arm EE poses, arm nullspace joint targets (the IK solution, which
    places the elbow), head joints, grippers and base velocity.
 
-Keys: **Enter** latch / re-latch and resume, **Space** hold (base stops, arms
-and torso keep their last target).
+Keys: **Enter** latch / re-latch and resume (the head starts on the left
+hand), **Space** hold (base stops, arms and torso keep their last target),
+**p** switch the hand the head looks at.
 
 Following the LeRobot convention this class never commands the robot: the
 follower ``lerobot_robot_rby1.Rby1`` with ``action_mode="wholebody"``
 executes the actions. Ported from the semi-humanoid teleoperation
-``rby1_ces_elbow.py`` (CES branch).
+``rby1_lerobot_wb.py``.
 """
 
 from __future__ import annotations
@@ -266,6 +268,8 @@ class Rby1VRWholebody(Teleoperator):
             base_err_stop=c.base_err_stop, base_err_go=c.base_err_go,
             base_yaw_stop=math.radians(c.base_yaw_stop_deg), base_yaw_go=math.radians(c.base_yaw_go_deg),
             base_max_lag=c.base_max_lag, base_max_lag_yaw=math.radians(c.base_max_lag_yaw_deg),
+            base_scale=c.base_scale, base_scale_yaw=c.base_scale_yaw,
+            head_mode=c.head_mode, head_slew_w=c.head_slew_w,
             hand_map=c.hand_map, tau_elbow=c.tau_elbow, elbow_slew_w=math.radians(c.elbow_slew_deg),
             arm_scale=c.arm_scale, arm6_offset=math.radians(c.arm6_offset_deg),
             pinch_open_m=c.pinch_open_m, pinch_threshold=c.pinch_threshold, pinch_hyst=c.pinch_hyst,
@@ -335,6 +339,11 @@ class Rby1VRWholebody(Teleoperator):
             if key == " " and self._state == "RUN":
                 self._state = "HOLD"
                 logger.info("HOLD — base stopped, arms/torso frozen; [Enter] to re-latch.")
+            elif key == "p":
+                if self._config.head_mode == "gaze":
+                    logger.info(f"Head gaze -> {self._rt.toggle_gaze()} hand.")
+                else:
+                    logger.info('[p] ignored: head_mode="hmd".')
             elif key in ("\n", "\r"):
                 self._try_latch(snap, meas, now)
 
@@ -383,8 +392,10 @@ class Rby1VRWholebody(Teleoperator):
         self._rt.latch(snap, meas, now)
         self._state = "RUN"
         self._last_tick = None
-        logger.info(f"LATCHED psi0={math.degrees(self._rt.psi0):.0f} deg, hand_map={self._config.hand_map}, "
-                    f"heading={self._config.heading}.")
+        c = self._config
+        logger.info(f"LATCHED psi0={math.degrees(self._rt.psi0):.0f} deg, hand_map={c.hand_map}, "
+                    f"heading={c.heading}, base_scale={c.base_scale:.2f}/yaw {c.base_scale_yaw:.2f}, "
+                    f"head={c.head_mode}{' (left hand)' if c.head_mode == 'gaze' else ''}.")
 
     # ------------------------------------------------------------------ #
     # Action
@@ -429,6 +440,6 @@ class Rby1VRWholebody(Teleoperator):
             f"v=({tg.base_v[0]:+.2f},{tg.base_v[1]:+.2f}) w={tg.base_w:+.2f} "
             f"{'MOVE' if i.get('moving') else 'stop'} odom={'ok' if i.get('odom') else 'NO'} | "
             f"torso ypr=({math.degrees(y):.0f},{math.degrees(p):.0f},{math.degrees(r):.0f})"
-            f"{'*' if i.get('torso_clip') else ''} | head=({math.degrees(tg.head[0]):.0f},"
+            f"{'*' if i.get('torso_clip') else ''} | head[{i.get('gaze', '?')}]=({math.degrees(tg.head[0]):.0f},"
             f"{math.degrees(tg.head[1]):.0f})"
         )

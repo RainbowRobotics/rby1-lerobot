@@ -1,9 +1,10 @@
 """Whole-body retargeting: operator body + hands → RB-Y1 torso, arms, head, base.
 
-Ported from the semi-humanoid teleoperation ``rby1_ces_elbow.py`` (CES
-branch). The control law is unchanged; the only difference is that the tick
-length ``dt`` is passed in (LeRobot runs at the configured ``--fps``) instead
-of the fixed 50 Hz of the original loop.
+Ported from the semi-humanoid teleoperation ``rby1_lerobot_wb.py`` (itself
+``rby1_ces_elbow.py`` plus base scaling and the hand-gaze head mode). The
+control law is unchanged; the only difference is that the tick length ``dt``
+is passed in (LeRobot runs at the configured ``--fps``) instead of the fixed
+50 Hz of the original loop.
 
 Mapping summary (what → where)
 
@@ -14,9 +15,11 @@ Mapping summary (what → where)
                                               sensitivity blow-up near full extension)
     upper-body tilt (U roll/pitch/yaw)      → link_torso_5 orientation, rigid rotation
                                               about the torso_3 pivot
-    pelvis planar motion / heading (W)      → base SE(2) position target → velocity
-                                              (P + feed-forward, odometry closed loop)
-    HMD gaze (yaw vs chest, pitch delta)    → head_0 / head_1
+    pelvis planar motion / heading (W)      → base SE(2) position target, × base_scale /
+                                              base_scale_yaw (rest of the turn → torso yaw)
+                                              → velocity (P + feed-forward, odometry loop)
+    head_mode="gaze": a robot hand tip      → head_0 / head_1 (left after a latch, toggled)
+    head_mode="hmd": HMD gaze               → head_0 / head_1 (yaw vs chest, pitch delta)
     thumb-index distance / pinch_open_m     → gripper (hysteresis)
 
 Frames: the stream frame W keeps the direction faced at app start as +X.
@@ -40,7 +43,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from .wb_kinematics import Rby1Arms, Rx, Ry, Rz, make_frame, wrap
+from .wb_kinematics import Rby1Arms, Rx, Ry, Rz, load_urdf, make_frame, wrap
 from .wb_stream import (
     ARM_JOINTS,
     HIPS,
@@ -113,6 +116,16 @@ class Tuning:
     base_yaw_go: float = math.radians(2.5)
     base_max_lag: float = 0.5
     base_max_lag_yaw: float = math.radians(60)
+    # Base mapping scale: robot displacement = scale × operator pelvis
+    # displacement (same for x and y); robot yaw = scale_yaw × heading change.
+    # The remaining (1 − scale_yaw)·Δψ is taken up by the torso yaw (clamped
+    # at ±TORSO_YAW_LIMIT — re-latch when it saturates).
+    base_scale: float = 0.6
+    base_scale_yaw: float = 0.6
+    # Head: "gaze" looks at a hand tip (left after each latch, toggle_gaze()
+    # switches), "hmd" follows the operator's gaze (HMD).
+    head_mode: str = "gaze"
+    head_slew_w: float = 2.0                 # rad/s, gaze command rate limit
     # Hand mapping / gripper.
     hand_map: str = "elbow"                  # elbow | palm
     tau_elbow: float = 0.10                  # s, operator flexion low-pass (elbow map)
@@ -335,6 +348,36 @@ class Retargeter:
         self.hands: dict[str, HandState] = {}
         self.k: dict[str, float] = {}
         self.base_jumps = 0
+        # Head gaze: point where the head_0 (yaw, z) and head_1 (pitch, y) axes
+        # meet, in link_torso_5 coordinates (read from the URDF).
+        j = load_urdf()
+        assert np.allclose(j["head_base"].R, np.eye(3)) and np.allclose(j["head_0"].R, np.eye(3))
+        assert np.allclose(j["head_0"].axis, (0, 0, 1)) and np.allclose(j["head_1"].axis, (0, 1, 0))
+        assert np.allclose(j["head_1"].xyz, 0)
+        self.head_pivot = j["head_base"].xyz + j["head_0"].xyz
+        self.gaze_side = "left"
+        self.gaze_point = np.full(3, np.nan)  # looked-at point (measured, torso_5)
+
+    def toggle_gaze(self) -> str:
+        """Switch the hand the head looks at (gaze mode); returns the new side."""
+        self.gaze_side = "right" if self.gaze_side == "left" else "left"
+        return self.gaze_side
+
+    def _gaze(self, meas: Measured, dt: float) -> None:
+        """head_0 / head_1 command towards the gaze_side hand tip (measured FK, slew limited)."""
+        arm = self.model.arms[self.gaze_side]
+        T = np.linalg.inv(meas.T_t5) @ meas.T_arm6[self.gaze_side]
+        p = T[:3, 3] + T[:3, :3] @ arm.p_ee
+        self.gaze_point = p
+        d = p - self.head_pivot
+        if float(np.linalg.norm(d)) < 0.05:
+            return
+        # head_1 rotates about +y: positive looks down → pitch = atan2(−dz, horizontal distance).
+        yaw = math.atan2(d[1], d[0])
+        pitch = math.atan2(-d[2], math.hypot(d[0], d[1]))
+        des = np.clip([yaw, pitch], -HEAD_LIMIT, HEAD_LIMIT)
+        step = self.tn.head_slew_w * dt
+        self.head_cmd = self.head_cmd + np.clip(des - self.head_cmd, -step, step)
 
     # -- latch ---------------------------------------------------------------
     def latch(self, snap: Snapshot, meas: Measured, now: float) -> None:
@@ -362,6 +405,7 @@ class Retargeter:
         self.p_t_last = np.zeros(2)
         self.psi_raw_prev = self.psi0
         self.psi_prev = self.psi0
+        self.psi_cont = self.psi0  # unwrapped heading (accumulates past ±180°), for the yaw scale
         self.v_ff = np.zeros(2)
         self.w_ff = 0.0
         self.base_moving = False
@@ -391,6 +435,7 @@ class Retargeter:
         self.head_cmd = meas.q[self.head_idx].copy()
         self.head1_0 = float(self.head_cmd[1])
         self.hmd_pitch0 = self._hmd_angles(snap.hmd)[1] if snap.hmd.ok else None
+        self.gaze_side = "left"  # every latch starts looking at the left hand
         self.latched = True
         self.latch_time = now
 
@@ -424,7 +469,7 @@ class Retargeter:
             self.v_ff[:] = 0.0
             self.w_ff = 0.0
             info["body"] = "lost" if not body_fresh else "hold"
-            return self._emit(np.zeros(2), 0.0, info)
+            return self._emit(meas, np.zeros(2), 0.0, info, dt)
         if self.body_was_lost and self.lost_since is not None:
             logger.warning(f"Body stream back after {now - self.lost_since:.2f}s")
             self.lost_since = None
@@ -438,14 +483,14 @@ class Retargeter:
         else:
             psi_raw = op.shoulder_yaw
 
-        # --- base SE(2) target: operator displacement rotated by ψ_ref (1:1)
+        # --- base SE(2) target: operator displacement rotated by ψ_ref, × base_scale
         psi_ref = self.psi0 + self.slip_yaw
-        p_t_raw = rot2(-psi_ref) @ (op.hips_xy - self.hips_xy0)
+        p_op_raw = rot2(-psi_ref) @ (op.hips_xy - self.hips_xy0)  # operator displacement (unscaled)
         v_inst, w_inst = np.zeros(2), 0.0
         jump, jump_yaw = self.body_was_lost, 0.0
         if self.p_t_prev is not None:
-            # Gate on unfiltered values; a filtered jump spreads over ticks.
-            jump_p = p_t_raw - self.p_t_prev
+            # Gate on unfiltered, unscaled values (BASE_JUMP_M is an operator distance).
+            jump_p = p_op_raw - self.p_t_prev
             jump_yaw = float(wrap(psi_raw - self.psi_raw_prev))
             if np.linalg.norm(jump_p) > BASE_JUMP_M or abs(jump_yaw) > BASE_JUMP_YAW:
                 jump = True
@@ -453,7 +498,8 @@ class Retargeter:
                 logger.warning(f"Base jump gate: |dp|={np.linalg.norm(jump_p):.2f} m "
                                f"dyaw={math.degrees(jump_yaw):.0f} deg -> world reference re-based")
             else:
-                v_inst = jump_p / dt
+                v_inst = tn.base_scale * jump_p / dt
+        p_t_raw = tn.base_scale * p_op_raw
         if jump:
             # Glitch / recenter / return from hold: re-base the world reference
             # here and keep the base target so far in the slip.
@@ -461,10 +507,11 @@ class Retargeter:
             self.h_vec = rot2(jump_yaw) @ self.h_vec
             self.hips_xy0 = op.hips_xy.copy()
             self.slip = -self.p_t_last
+            p_op_raw = np.zeros(2)
             p_t_raw = np.zeros(2)
             psi_ref = self.psi0 + self.slip_yaw
         self.body_was_lost = False
-        self.p_t_prev = p_t_raw.copy()
+        self.p_t_prev = p_op_raw.copy()
         self.psi_raw_prev = psi_raw
 
         # Heading filter (seam-safe: filter the unit vector, then atan2).
@@ -472,11 +519,15 @@ class Retargeter:
         self.h_vec = unit(self.h_vec + a * (np.array([math.cos(psi_raw), math.sin(psi_raw)]) - self.h_vec))
         psi = math.atan2(self.h_vec[1], self.h_vec[0])
         if not jump:
-            w_inst = float(wrap(psi - self.psi_prev)) / dt
+            w_inst = tn.base_scale_yaw * float(wrap(psi - self.psi_prev)) / dt
+        # Unwrapped accumulation: with a scale < 1, scale·wrap(ψ − ψ_ref) would flip
+        # sign at ±180° and turn the base the wrong way. On a jump ψ and ψ_ref move
+        # by the same jump_yaw, so their difference stays continuous.
+        self.psi_cont += float(wrap(psi - self.psi_prev))
         self.psi_prev = psi
         dpsi = float(wrap(psi - self.psi0))
         p_t = p_t_raw - self.slip
-        theta_t = float(wrap(psi - psi_ref))
+        theta_t = tn.base_scale_yaw * (self.psi_cont - psi_ref)
 
         # Feed-forward: operator velocity (low-passed).
         a_ff = lpf_alpha(dt, tn.base_tau_ff)
@@ -495,7 +546,9 @@ class Retargeter:
         e_th = float(wrap(theta_t - theta_b))
         if abs(e_th) > tn.base_max_lag_yaw:
             excess = e_th - math.copysign(tn.base_max_lag_yaw, e_th)
-            self.slip_yaw += excess
+            if tn.base_scale_yaw > 1e-6:
+                self.slip_yaw += excess / tn.base_scale_yaw  # slip_yaw is in operator angle units
+            theta_t -= excess
             e_th -= excess
         self.p_t_last = p_t.copy()
 
@@ -599,17 +652,21 @@ class Retargeter:
             else:
                 hs.tracking = False  # the rejoin offset is re-captured on return
 
-        # --- head
-        if snap.hmd.ok and (now - snap.hmd.stamp) < HMD_TIMEOUT:
+        # --- head (hmd mode only here; gaze mode uses the measured robot pose in
+        #     _emit, so it keeps looking at the hand during hold / body loss)
+        if tn.head_mode == "hmd" and snap.hmd.ok and (now - snap.hmd.stamp) < HMD_TIMEOUT:
             yaw_h, pitch_h = self._hmd_angles(snap.hmd)
             if self.hmd_pitch0 is None:
                 self.hmd_pitch0 = pitch_h
             self.head_cmd = np.array([
                 float(np.clip(wrap(yaw_h - yaw_of(R_Up)), -HEAD_LIMIT, HEAD_LIMIT)),
                 float(np.clip(self.head1_0 + (pitch_h - self.hmd_pitch0), -HEAD_LIMIT, HEAD_LIMIT))])
-        return self._emit(base_v, base_w, info)
+        return self._emit(meas, base_v, base_w, info, dt)
 
-    def _emit(self, base_v: np.ndarray, base_w: float, info: dict) -> Targets:
+    def _emit(self, meas: Measured, base_v: np.ndarray, base_w: float, info: dict, dt: float) -> Targets:
+        if self.tn.head_mode == "gaze":
+            self._gaze(meas, dt)
+        info["gaze"] = self.gaze_side if self.tn.head_mode == "gaze" else "hmd"
         T_t5 = se3(self.torso_R, self.torso_p)
         T_hand, q_ns, closed = {}, {}, {}
         for side in SIDES:

@@ -14,8 +14,8 @@ class Rby1VRWholebodyConfig(TeleoperatorConfig):
 
     The teleoperator only *produces* actions; the follower robot must run with
     ``action_mode="wholebody"`` (and matching ``use_head`` / ``use_gripper`` /
-    ``use_mobile_base``). Tuning defaults are those of the semi-humanoid CES
-    teleoperation (``rby1_ces_elbow.py``).
+    ``use_mobile_base``). Tuning defaults are those of the semi-humanoid
+    teleoperation (``rby1_lerobot_wb.py``).
     """
 
     # ── Robot connection (read-only: state, odometry and FK for the latch) ──
@@ -47,7 +47,8 @@ class Rby1VRWholebodyConfig(TeleoperatorConfig):
 
     # ── Keyboard (terminal running lerobot-teleoperate / -record) ────
     # Enter = latch (operator pose ↔ robot pose, start / resume),
-    # Space = hold (base stops, arms / torso keep the last target).
+    # Space = hold (base stops, arms / torso keep the last target),
+    # p     = switch the hand the head looks at (head_mode="gaze").
     # Without a TTY the first latch happens automatically after
     # auto_latch_s seconds of tracked body (None = wait forever).
     auto_latch_s: float | None = None
@@ -100,6 +101,20 @@ class Rby1VRWholebodyConfig(TeleoperatorConfig):
     base_yaw_go_deg: float = 2.5
     base_max_lag: float = 0.5                # m
     base_max_lag_yaw_deg: float = 60.0
+    # Robot base displacement = base_scale × operator pelvis displacement (x and
+    # y alike); robot yaw = base_scale_yaw × operator heading change. The rest
+    # of the turn goes to the torso yaw (clamped at ±120°: past roughly ±300°
+    # of accumulated turning from the latch, press Enter to re-latch).
+    base_scale: float = 0.6
+    base_scale_yaw: float = 0.6
+
+    # ── Head ──────────────────────────────────────────────────────────
+    # "gaze": look at a robot hand tip — the left one after every latch, [p]
+    #         toggles left ↔ right. Uses the measured robot pose only, so it
+    #         keeps tracking during hold / body-tracking loss.
+    # "hmd":  follow the operator's gaze (HMD yaw vs chest, pitch delta).
+    head_mode: str = "gaze"
+    head_slew_w: float = 2.0                 # rad/s, gaze command rate limit
 
     # ── Gripper (thumb-index pinch) ───────────────────────────────────
     pinch_open_m: float = 0.08
@@ -112,6 +127,10 @@ class Rby1VRWholebodyConfig(TeleoperatorConfig):
             parent_post_init()
         if self.hand_map not in ("elbow", "palm"):
             raise ValueError(f'hand_map must be "elbow" or "palm", got "{self.hand_map}".')
+        if self.head_mode not in ("gaze", "hmd"):
+            raise ValueError(f'head_mode must be "gaze" or "hmd", got "{self.head_mode}".')
+        if self.base_scale < 0 or self.base_scale_yaw < 0 or self.head_slew_w <= 0:
+            raise ValueError("base_scale / base_scale_yaw must be >= 0 and head_slew_w > 0.")
         if self.heading not in ("pelvis", "shoulder"):
             raise ValueError(f'heading must be "pelvis" or "shoulder", got "{self.heading}".')
         if self.robot_model.strip().lower() not in ("a", "m", "auto"):

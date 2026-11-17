@@ -184,7 +184,7 @@ def test_retargeter_latch_hold_walk_pinch() -> None:
     arms, arm_idx, head_idx, meas = _measured()
     rx = StreamReceiver("unused", 0, FilterTaus())
     rx.apply(_frame(), now=10.0)
-    rt = Retargeter(Tuning(), arms, arm_idx, head_idx)
+    rt = Retargeter(Tuning(head_mode="hmd"), arms, arm_idx, head_idx)
     rt.latch(rx.snapshot, meas, now=10.0)
 
     # Standing still right after the latch: robot torso and hands stay put.
@@ -213,6 +213,49 @@ def test_retargeter_latch_hold_walk_pinch() -> None:
     # Hold: the base stops, the arms keep their target.
     tg_hold = rt.step(rx.snapshot, meas, now=now, hold=True, dt=0.02)
     assert np.allclose(tg_hold.base_v, 0.0) and tg_hold.base_w == 0.0
+
+
+def test_retargeter_base_scale() -> None:
+    """The base target is base_scale × the operator's pelvis displacement."""
+    from lerobot_teleoperator_rby1.wb_retarget import Retargeter, Tuning
+    from lerobot_teleoperator_rby1.wb_stream import FilterTaus, StreamReceiver
+
+    arms, arm_idx, head_idx, meas = _measured()
+    for scale in (0.6, 1.0):
+        rx = StreamReceiver("unused", 0, FilterTaus())
+        rx.apply(_frame(), now=10.0)
+        rt = Retargeter(Tuning(base_scale=scale), arms, arm_idx, head_idx)
+        rt.latch(rx.snapshot, meas, now=10.0)
+        t, now = 0.0, 10.0
+        for k in range(30):  # walk 0.2 m in 10 ticks, then stand so the input filter settles
+            t += 0.02
+            now += 0.02
+            rx.apply(_frame(dx=0.02 * min(k + 1, 10), t=t), now=now)
+            rt.step(rx.snapshot, meas, now=now, hold=False, dt=0.02)
+        assert rt.p_t_last[0] == pytest.approx(scale * 0.2, abs=1e-3)
+        assert abs(rt.p_t_last[1]) < 1e-6
+
+
+def test_retargeter_head_gaze_follows_hand_and_toggles() -> None:
+    from lerobot_teleoperator_rby1.wb_retarget import Retargeter, Tuning
+    from lerobot_teleoperator_rby1.wb_stream import FilterTaus, StreamReceiver
+
+    arms, arm_idx, head_idx, meas = _measured()
+    rx = StreamReceiver("unused", 0, FilterTaus())
+    rx.apply(_frame(), now=10.0)
+    rt = Retargeter(Tuning(head_mode="gaze"), arms, arm_idx, head_idx)
+    rt.latch(rx.snapshot, meas, now=10.0)
+    assert rt.gaze_side == "left"
+    for _ in range(100):  # 2 s, enough for the 2 rad/s slew
+        tg = rt.step(rx.snapshot, meas, now=10.0, hold=False, dt=0.02)
+    assert tg.info["gaze"] == "left" and tg.head[0] > 0.1  # left hand: +y → positive yaw
+    assert tg.head[1] > 0.1                                 # hands below the head: look down
+    assert rt.toggle_gaze() == "right"
+    for _ in range(100):
+        tg = rt.step(rx.snapshot, meas, now=10.0, hold=True, dt=0.02)  # keeps tracking during hold
+    assert tg.head[0] < -0.1
+    rt.latch(rx.snapshot, meas, now=10.0)
+    assert rt.gaze_side == "left"  # every latch starts on the left hand
 
 
 # ── Teleoperator → robot round trip on the fake SDK ─────────────────────────
