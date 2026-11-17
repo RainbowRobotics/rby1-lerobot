@@ -36,6 +36,30 @@ jobs:
             echo "lerobot=[$release]" >> "$GITHUB_OUTPUT"
           fi
 
+  core:
+    # The XR teleoperation core must work with NumPy / SciPy alone.
+    name: rby1-xr-teleop without LeRobot / py${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install the core package only
+        run: |
+          uv pip install pytest -e rby1-xr-teleop
+          uv pip list
+
+      - name: pytest
+        run: uv run --no-sync pytest -v rby1-xr-teleop/tests
+
   test:
     name: lerobot ${{ matrix.lerobot.name }} / py${{ matrix.python }}
     needs: matrix
