@@ -40,3 +40,13 @@ def connected_robot():
     robot.connect()
     yield robot
     robot.disconnect()
+
+
+@pytest.fixture
+def stubbed_pipeline(monkeypatch):
+    """``Rby1XR`` without the isaaccapture pipeline: the tests feed a scripted session instead."""
+    from lerobot_teleoperator_rby1.isaac_teleop import teleop_rby1_xr as mod
+
+    monkeypatch.setattr(mod, "build_pipeline", lambda *, with_body: ("pipeline", True))
+    monkeypatch.setattr(mod, "build_external_inputs", lambda anchor: {"base_T_anchor": anchor})
+    monkeypatch.setattr(mod, "print_xr_connect_help", lambda: None)

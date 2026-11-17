@@ -83,3 +83,17 @@ def test_teleop_config_is_recorded_in_the_profile(tmp_path, monkeypatch) -> None
         assert data["teleop"]["config"]["wear_mode"] == cfg.wear_mode
     finally:
         teleop.disconnect()
+
+
+def test_every_rby1_isaac_option_is_documented() -> None:
+    """Each ``--teleop.<field>`` of ``rby1_isaac`` appears in the repository README."""
+    import dataclasses
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    framework = {"id", "calibration_dir"}  # LeRobot's own teleoperator options
+    missing = [
+        f.name for f in dataclasses.fields(Rby1XRConfig)
+        if f.name not in framework and f"`{f.name}`" not in readme
+    ]
+    assert not missing, f"not in README.md: {missing}"

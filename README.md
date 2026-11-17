@@ -519,6 +519,8 @@ when teleoperation starts, the robot moves it to the target during the startup r
 | `use_torso`, `use_right_arm`, `use_left_arm`, `use_gripper`, `use_mobile_base`, `use_head` | `True` | Must mirror `Rby1Config` |
 | `auto_launch_cloudxr` | `True` | Attach to the CloudXR service, starting it when none runs (`LEROBOT_CLOUDXR_SKIP_AUTOLAUNCH=1` also disables it) |
 | `cloudxr_run_embedded` | `False` | Run the CloudXR runtime inside this process and stop it on disconnect, instead of the detached service |
+| `app_name` | `"rby1_isaac"` | Session name shown by the CloudXR runtime / OpenXR |
+| `base_T_anchor` | OpenXR → robot axes | 4×4 transform from the OpenXR anchor frame (X right, Y up, Z backward) to the robot base axes (X forward, Y left, Z up), applied to every tracked pose. Change it only for a device with other axes |
 | `cloudxr_install_dir`, `cloudxr_device_profile`, `cloudxr_env_file` | `~/.cloudxr`, `"Quest3"`, `None` | Runtime directory (holds the EULA marker), device profile and KEY=value env file (default: the packaged `default.env`). Profile and env file apply only when this process starts the runtime |
 | `xr_connect_timeout_s` | `0.0` | Opening the session waits for the headset; give up after this many seconds (0 = wait forever) |
 | `session_start` | `"connect"` | `"first_action"` opens the XR session on the first `get_action()` (Jetson Orin mitigation) |
@@ -531,6 +533,7 @@ when teleoperation starts, the robot moves it to the target during the startup r
 | `viz_frame_bridge`, `viz_layout_file`, `viz_layout_reset` | `"auto"`, `~/.cache/rby1_isaac/viz_layout.json`, `False` | Televiz ← tracking-space transform from simultaneous head poses (`identity` to skip); where moved panels are saved / restored (`""` = off); ignore the saved layout once |
 | `engage_ramp_s`, `ee_max_linear_vel`, `ee_max_angular_vel` | `2.0`, `1.0`, `3.0` | Ramp to the absolute target on engage; rate limits (m/s, rad/s) |
 | `ee_position_scale`, `ee_reach_max_ratio` | `1.0`, `0.98` | Extra multiplier on the robot/human reach ratio; clamp of the hand-to-shoulder distance |
+| `shoulder_smoothing`, `abs_hold_s` | `0.2`, `1.0` | EMA weight of the new body-tracking shoulder sample; an arm keeps following this long (s) without a shoulder position, then holds |
 | `arm_length_source`, `human_arm_length_m` | `"calibrate"`, `0.62` | Operator reach the hand-to-shoulder vector is scaled by (robot reach ÷ this). `calibrate`: shoulder → controller distance measured on Right A with the arms straight out, fixed for the session (needs `start_on_right_a`); `body`: body tracking `|S-E|+|E-W|`, updated while running; `config`: `human_arm_length_m` (e.g. a known value per operator) |
 | `arm_calibration_window_s`, `arm_calibration_min_m`, `arm_calibration_max_m`, `arm_calibration_max_asymmetry` | `0.5`, `0.45`, `0.85`, `0.10` | `calibrate`: the reach is the median of the samples of this window before the press; a value outside the range is rejected; when the arms differ by more than this fraction the longer value is used for both. The measured values are logged, shown in the status line (`reach=R0.61/L0.60 (x0.96/0.98)`) and written to the profile's `teleop.arm_calibration` |
 | `ee_orientation_latch_on_a`, `ee_position_latch_on_a`, `ee_orientation_offset_rpy_deg` | `True`, `True`, `[0,0,0]` | Controller → gripper orientation / position offsets, latched at the **first squeeze** after connect and after Right A (the controller then ↦ the start-pose gripper, so squeezing without moving the hand does not move the arm; the posture used to press A is irrelevant); `[0,0,0]` fixed orientation offset when not latched |
@@ -550,13 +553,15 @@ when teleoperation starts, the robot moves it to the target during the startup r
 | `head_gaze_frame` | `"base"` | `base`: head joints compensate the measured torso orientation so the gaze stays put in the base frame while the torso moves (also for the held head in neck mode); `torso`: joints commanded directly |
 | `head_latch_on_a` | `True` | Right A / first action / re-sync: the look direction of that moment ↦ the start (or measured) head joints, like `ee_orientation_latch_on_a`; `False` = pure absolute mapping with the fixed offsets |
 | `head_yaw_sign`, `head_pitch_sign` | `1.0`, `-1.0` | Flip if the head moves the wrong way |
+| `head_yaw_gain`, `head_pitch_gain` | `1.0`, `1.0` | Multiplier on the headset yaw / pitch before the offsets (1.0 = the robot head turns as far as yours) |
 | `head_yaw_limit_deg`, `head_pitch_min_deg`, `head_pitch_max_deg` | `80`, `-45`, `80` | Head joint clamps |
 | `head_smoothing` | `0.3` | EMA weight of the new head sample (1.0 = no filtering) |
 | `torso_source` | `"body"` | `"body"` (Isaac Capture body tracking), `"head"` or `"none"` |
 | `torso_engage` | `"both_arms"` | When the torso follows: `both_arms` (both grips squeezed), `any_arm`, or `always` |
-| `torso_body_joint` | `"SPINE3"` | Body joint driving the torso (XR_BD 24-joint names) |
+| `torso_body_joint`, `body_required_joints` | `"SPINE3"`, `[PELVIS, SPINE3, NECK]` | Body joint driving the torso (XR_BD 24-joint names); joints that must all be valid for the torso to follow |
 | `ready_return_duration_s` | `4.0` | Minimum time of the Right-A return: one `reset.cmd` action makes the follower run its joint-position ready-pose motion (as at connect; the loop blocks for the duration, base excluded) |
 | `resync_position_threshold_m`, `resync_rotation_threshold_deg` | `0.03`, `10` | Targets are re-seeded from the measured pose on the first action and whenever a component that is not clutched drifted past these (record reset, manual move) |
+| `resync_head_threshold_deg` | `5` | With such a re-seed, the head target is re-seeded as well when it is further than this from the measured head joints |
 | `status_log_period_s` | `5.0` | Log a one-line tracking / clutch status (controllers, head, body joints valid, why the torso holds); 0 = off |
 | `torso_pos_min`, `torso_pos_max` | `[-0.15,-0.20,0.80]`, `[0.45,0.20,1.20]` | Absolute box (m, base frame) for the torso target `link_torso_5` (the chest delta since engage is applied 1:1; this box is the only limit). The crouched ready pose (`--robot.ee_ready_torso_deg='[0,45,-90,45,0,0]'`) is x = y = 0, z = 1.10 |
 | `torso_rpy_min_deg`, `torso_rpy_max_deg` | `[-15,-20,-45]`, `[15,50,45]` | Absolute roll / pitch / yaw box (fixed-axis XYZ, deg; pitch + = leaning forward). Both boxes come from `scripts/torso_workspace.py` (reachable range with the chest above the knees, folded postures excluded); clipped axes show in the status log as `clamped[...]` |

@@ -233,6 +233,12 @@ class XrTeleopSettings:
 
     def validate(self) -> None:
         """Raise ``ValueError`` for an inconsistent setting."""
+        self._validate_choices()
+        self._validate_arms()
+        self._validate_body_drive()
+        self._validate_torso_and_head()
+
+    def _validate_choices(self) -> None:
         for name, value, choices in (
             ("torso_source", self.torso_source, TORSO_SOURCE_CHOICES),
             ("torso_engage", self.torso_engage, TORSO_ENGAGE_CHOICES),
@@ -245,6 +251,8 @@ class XrTeleopSettings:
         ):
             if value not in choices:
                 raise ValueError(f"{name} must be one of {choices}, got {value!r}")
+
+    def _validate_arms(self) -> None:
         if self.arm_length_source == "calibrate" and not self.start_on_right_a:
             raise ValueError(
                 'arm_length_source="calibrate" measures the reach on Right A and needs '
@@ -254,6 +262,14 @@ class XrTeleopSettings:
             raise ValueError("arm_calibration_min_m must be positive and below arm_calibration_max_m")
         if self.arm_calibration_window_s <= 0.0 or self.arm_calibration_max_asymmetry < 0.0:
             raise ValueError("arm_calibration_window_s must be > 0 and arm_calibration_max_asymmetry >= 0")
+        if self.record_posture_hint and not self.arm_posture_hint:
+            raise ValueError("record_posture_hint requires arm_posture_hint=True")
+        if len(self.ee_orientation_offset_rpy_deg) != 3:
+            raise ValueError("ee_orientation_offset_rpy_deg must have 3 values")
+        if len(self.neck_shoulder_offset) != 3:
+            raise ValueError("neck_shoulder_offset must have 3 values")
+
+    def _validate_body_drive(self) -> None:
         for name in (
             "body_drive_kp_linear", "body_drive_kp_angular", "body_drive_max_linear",
             "body_drive_max_angular", "body_drive_max_error_m", "body_drive_max_error_deg",
@@ -264,12 +280,8 @@ class XrTeleopSettings:
             raise ValueError("body_drive_deadband_m / _deg must be >= 0")
         if not 0.0 < self.body_drive_smoothing <= 1.0:
             raise ValueError("body_drive_smoothing must be in (0, 1]")
-        if self.record_posture_hint and not self.arm_posture_hint:
-            raise ValueError("record_posture_hint requires arm_posture_hint=True")
-        if len(self.ee_orientation_offset_rpy_deg) != 3:
-            raise ValueError("ee_orientation_offset_rpy_deg must have 3 values")
-        if len(self.neck_shoulder_offset) != 3:
-            raise ValueError("neck_shoulder_offset must have 3 values")
+
+    def _validate_torso_and_head(self) -> None:
         for lo_name, hi_name in (("torso_pos_min", "torso_pos_max"), ("torso_rpy_min_deg", "torso_rpy_max_deg")):
             lo, hi = getattr(self, lo_name), getattr(self, hi_name)
             if len(lo) != 3 or len(hi) != 3:
