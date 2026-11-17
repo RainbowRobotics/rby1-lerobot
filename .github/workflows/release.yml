@@ -54,10 +54,10 @@ jobs:
 
           | Package | LeRobot requirement |
           |---|---|
-          | lerobot-robot-rby1, lerobot-teleoperator-rby1 | \`${SPEC}\` |
+          | rby1-xr-teleop, lerobot-robot-rby1, lerobot-teleoperator-rby1 | \`${SPEC}\` |
 
           Install: \`pip install 'lerobot[core_scripts]==${TESTED}'\`, then
-          \`pip install -e lerobot-robot-rby1 -e lerobot-teleoperator-rby1\` from a checkout of \`${TAG}\`.
+          \`pip install -e rby1-xr-teleop -e lerobot-robot-rby1 -e lerobot-teleoperator-rby1\` from a checkout of \`${TAG}\`.
           See the README "Compatibility" table for other versions.
           NOTES
           gh release create "$TAG" --title "$TAG — LeRobot $TESTED" \

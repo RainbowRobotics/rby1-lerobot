@@ -29,6 +29,7 @@ dependencies = [
   "scipy",
   "lerobot>=0.7.0,<0.8",
   "lerobot_robot_rby1>=0.3.1",
+  "rby1_xr_teleop>=0.3.1",
 ]
 
 [project.optional-dependencies]

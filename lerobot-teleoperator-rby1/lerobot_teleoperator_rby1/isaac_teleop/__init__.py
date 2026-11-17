@@ -17,7 +17,7 @@ a device fails fast with install instructions.
 """
 
 from .base import IsaacTeleopTeleoperator
-from .clutch import Clutch
+from rby1_xr_teleop.clutch import Clutch
 from .config_isaac_teleop import IsaacTeleopConfig, Rby1XRConfig
 from .teleop_rby1_xr import Rby1XR, Rby1XRTeleop
 

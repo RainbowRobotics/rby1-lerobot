@@ -119,7 +119,7 @@ class Rby1StateReader:
         straight); nothing is commanded. The next :meth:`read` overwrites the
         scratch state.
         """
-        from .arm_retargeter import robot_shoulder_position
+        from rby1_xr_teleop.arm_retargeter import robot_shoulder_position
 
         if self._robot is None:
             raise RuntimeError("Rby1StateReader is not connected.")

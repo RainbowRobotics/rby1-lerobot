@@ -81,7 +81,9 @@ git clone https://github.com/rainbowrobotics/rby1-lerobot.git
 cd rby1-lerobot
 
 # 4. Install the RB-Y1 robot, teleoperator plugins and dependencies
+#    (rby1-xr-teleop is the XR teleoperation core the teleoperator plugin uses)
 pip install -e lerobot-robot-rby1
+pip install -e rby1-xr-teleop
 pip install -e lerobot-teleoperator-rby1
 
 # 5. (only for Intel RealSense cameras) Install pyrealsense2
@@ -804,6 +806,7 @@ LeRobot commands that do not apply to RB-Y1:
 |------|-------------|
 | [`lerobot-robot-rby1/`](lerobot-robot-rby1) | RB-Y1 follower robot plugin (`--robot.type=rby1`) |
 | [`lerobot-teleoperator-rby1/`](lerobot-teleoperator-rby1) | RB-Y1 teleoperator plugins (`--teleop.type=rby1_leader_arm`, `--teleop.type=rby1_vr`, `--teleop.type=rby1_isaac`) |
+| [`rby1-xr-teleop/`](rby1-xr-teleop) | XR teleoperation core behind `rby1_isaac`, independent of LeRobot (NumPy / SciPy only) |
 | [`tests/`](tests) | Hardware-free tests using a fake `rby1_sdk` |
 
 ## Resources

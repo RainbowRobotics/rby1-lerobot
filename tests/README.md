@@ -7,7 +7,7 @@ the 0.10.0 API the plugins use; `fakes/lerobot-camera-fakecam` adds a synthetic
 
 ```bash
 pip install 'lerobot[core_scripts,training,remote]==0.7.0' pytest
-pip install -e lerobot-robot-rby1 -e lerobot-teleoperator-rby1 \
+pip install -e rby1-xr-teleop -e lerobot-robot-rby1 -e lerobot-teleoperator-rby1 \
   -e tests/fakes/lerobot-camera-fakecam
 
 pytest tests                 # unit tests (plugin discovery, config parsing, feature layout, send_action)
