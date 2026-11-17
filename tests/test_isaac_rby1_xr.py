@@ -54,6 +54,7 @@ def make_teleop(session, reader_holder, **cfg_overrides):
     # … and the first-Right-A start gate (covered by its own test).
     cfg_overrides.setdefault("start_on_right_a", False)
     cfg_overrides.setdefault("arm_length_source", "body")
+    cfg_overrides.setdefault("head_base_require_grip", False)
     cfg = Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **cfg_overrides)
 
     def reader_factory(address, model):
@@ -521,6 +522,51 @@ def test_body_drive_needs_odometry_mobile_base_and_a_started_session(stubbed_pip
         Rby1XRConfig(body_drive_kp_linear=0.0)
     with pytest.raises(ValueError, match="body_drive_smoothing"):
         Rby1XRConfig(body_drive_smoothing=0.0)
+
+
+def test_head_and_base_hold_while_no_grip_is_squeezed(stubbed_pipeline, monkeypatch):
+    t, reader, step = _drive_teleop(monkeypatch, head_base_require_grip=True, head_latch_on_a=True,
+                                    torso_source="none", use_torso=False)
+    session = t._session
+
+    def stick(thumb=(0.0, 1.0), **operator):
+        """Like step(), with the right thumbstick pushed."""
+        frame = _operator(**operator)
+        hand = frame[OUT_CONTROLLER_RIGHT]
+        frame[OUT_CONTROLLER_RIGHT] = fakes.controller(
+            tuple(np.asarray(hand[fakes.ControllerInputIndex.GRIP_POSITION]).tolist()),
+            squeeze=operator.get("squeeze", 0.0), thumb=thumb)
+        session.push(frame)
+        return t.get_action()
+
+    a0 = step()
+    head0 = (a0["head_0.pos"], a0["head_1.pos"])
+    # No grip squeezed: the thumbstick, Left X body drive and a turned head change nothing.
+    a = stick(neck_deg=30.0)
+    assert (a["x.vel"], a["y.vel"], a["theta.vel"]) == (0.0, 0.0, 0.0)
+    assert (a["head_0.pos"], a["head_1.pos"]) == pytest.approx(head0)
+    step(left_x=True, neck_deg=30.0)
+    a = step(xy=(0.2, 0.0), left_x=True, neck_deg=30.0)
+    assert a["x.vel"] == 0.0 and t._body_drive is None
+    step(xy=(0.2, 0.0), neck_deg=30.0)
+
+    # Squeezing: the head does not jump to the 30 deg it is turned by — it starts from here.
+    a = step(xy=(0.2, 0.0), neck_deg=30.0, squeeze=0.9)
+    assert (a["head_0.pos"], a["head_1.pos"]) == pytest.approx(head0, abs=1e-6)
+    a = step(xy=(0.2, 0.0), neck_deg=40.0, squeeze=0.9)
+    assert a["head_0.pos"] == pytest.approx(head0[0] + math.radians(10.0), abs=1e-6)
+    # … and the base is live: thumbstick, then body drive.
+    assert stick(xy=(0.2, 0.0), neck_deg=40.0, squeeze=0.9)["x.vel"] > 0.0
+    step(xy=(0.2, 0.0), neck_deg=40.0, squeeze=0.9, left_x=True)
+    assert step(xy=(0.3, 0.0), neck_deg=40.0, squeeze=0.9, left_x=True)["x.vel"] == pytest.approx(0.1)
+
+    # Releasing the grip stops the base at once (body drive ends) and holds the head.
+    a = step(xy=(0.3, 0.0), neck_deg=40.0, left_x=True)
+    held = (a["head_0.pos"], a["head_1.pos"])
+    assert a["x.vel"] == 0.0 and t._body_drive is None
+    reader.head_q = np.array(held)  # the (fake) robot followed the head command
+    a = stick(xy=(0.3, 0.0), neck_deg=0.0)
+    assert a["x.vel"] == 0.0 and (a["head_0.pos"], a["head_1.pos"]) == pytest.approx(held)
 
 
 def test_body_drive_on_a_differential_base_has_no_lateral_velocity(stubbed_pipeline, monkeypatch):
@@ -1105,7 +1151,7 @@ def test_viz_enabled_uses_televiz_owned_session(stubbed_pipeline):
         return readers[-1]
 
     t = mod.Rby1XR(
-        Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, "arm_length_source": "body", **cfg}),
+        Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, "arm_length_source": "body", "head_base_require_grip": False, **cfg}),
         session_factory=lambda pipeline: session,
         state_reader_factory=reader_factory,
         viz_module=FakeTeleviz,
@@ -1272,7 +1318,7 @@ def test_camera_panel_grab_holds_gripper_and_blocks_clutch(stubbed_pipeline, mon
         readers.append(fakes.FakeStateReader(address, model))
         return readers[-1]
 
-    t = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, "arm_length_source": "body", **cfg}),
+    t = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, "arm_length_source": "body", "head_base_require_grip": False, **cfg}),
                    session_factory=lambda pipeline: session, state_reader_factory=reader_factory,
                    viz_module=FakeTeleviz, viz_uploader=lambda f: f)
     t.connect()
@@ -1313,7 +1359,7 @@ def test_camera_panel_grab_holds_gripper_and_blocks_clutch(stubbed_pipeline, mon
     # A new teleop restores the saved layout.
     session2 = fakes.FakeSession()
     session2.push(_frame(right=fakes.controller()))
-    t2 = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, "arm_length_source": "body", **cfg}),
+    t2 = mod.Rby1XR(Rby1XRConfig(auto_launch_cloudxr=False, head_smoothing=1.0, **{"start_on_right_a": False, "arm_length_source": "body", "head_base_require_grip": False, **cfg}),
                     session_factory=lambda pipeline: session2, state_reader_factory=reader_factory,
                     viz_module=FakeTeleviz, viz_uploader=lambda f: f)
     t2.connect()

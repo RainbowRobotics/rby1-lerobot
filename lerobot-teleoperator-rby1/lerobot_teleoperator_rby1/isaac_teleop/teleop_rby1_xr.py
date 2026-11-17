@@ -182,6 +182,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._abs_last_body_t: dict[str, float | None] = {"right": None, "left": None}
         self._posture: dict[str, ArmPostureRetargeter] = {}
         self._hints: dict[str, np.ndarray | None] = {"right": None, "left": None}
+        # head_base_require_grip: a grip is squeezed (dead-man of head and base).
+        self._grip_held = False
         # Body drive (Left X held): entry state, or None. _body_drive_blocked
         # holds it off after an abort until Left X is released.
         self._body_drive: _BodyDrive | None = None
@@ -533,6 +535,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._started = not cfg.start_on_right_a
         self._body_drive = None
         self._body_drive_blocked = False
+        self._grip_held = False
         # The follower connects (and moves to its ready pose) after this, so
         # the targets are re-seeded again on the first get_action().
         self._needs_initial_resync = True
@@ -599,6 +602,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 start = self._start_snapshot
                 self._head_latch_target = (start.head_q.copy(), start.torso.copy())
 
+        self._update_grip_held(frame, snap)
         if self._update_body_drive(raw, snap) and raw is not None:
             # The operator frame turned with the body this tick.
             frame = _mask_grabbing_hands(rotate_frame_about_z(raw, self._yaw_correction), grabbing)
@@ -639,6 +643,31 @@ class Rby1XR(IsaacTeleopTeleoperator):
     # Body drive: Left X held -> the base follows the operator 1:1
     # ------------------------------------------------------------------
 
+    def _update_grip_held(self, frame: XRFrame, snap: RobotSnapshot) -> None:
+        """Dead-man of the head and the base: at least one grip squeezed (``head_base_require_grip``)."""
+        cfg = self.config
+        held = any(
+            c is not None and c.squeeze > cfg.clutch_threshold for c in (frame.right, frame.left)
+        )
+        pressed = held and not self._grip_held
+        self._grip_held = held
+        if pressed and cfg.head_base_require_grip and self._started and not self._idle and not self._returning:
+            # The head held while the grips were released: start from where it is.
+            self._relatch_head(snap)
+
+    @property
+    def _head_base_live(self) -> bool:
+        return self._grip_held or not self.config.head_base_require_grip
+
+    def _relatch_head(self, snap: RobotSnapshot) -> None:
+        """Map the look direction of the next tracked head frame onto the measured head joints."""
+        cfg = self.config
+        if not cfg.use_head or cfg.wear_mode == "neck" or not cfg.head_latch_on_a:
+            return
+        self._head = self._make_head_retargeter()
+        self._head.hold(snap.head_q, snap.torso)
+        self._head_latch_target = (snap.head_q.copy(), snap.torso.copy())
+
     def _end_body_drive(self, reason: str, *, block: bool = False) -> None:
         if self._body_drive is None:
             return
@@ -667,10 +696,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
             return False
         allowed = (
             cfg.body_drive_enabled and cfg.use_mobile_base and self._started and not self._stopped
-            and not self._returning
+            and not self._returning and self._head_base_live
         )
         if not allowed:
-            self._end_body_drive("stopped")
+            self._end_body_drive("stopped, or no grip squeezed")
             return False
         body_yaw = self._shoulder_line_yaw(raw)
         odometry = getattr(snap, "odometry", None)
@@ -1309,7 +1338,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         )
 
     def _update_head(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot]) -> None:
-        if not self.config.use_head or self._idle or self._returning:
+        if not self.config.use_head or self._idle or self._returning or not self._head_base_live:
             return
         if self.config.wear_mode == "neck":
             return  # the held (start / ready) gaze stays; torso compensation happens in _build_action
@@ -1340,7 +1369,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
 
     def _update_base(self, frame: XRFrame) -> None:
         cfg = self.config
-        if not cfg.use_mobile_base or self._idle or self._returning:
+        if not cfg.use_mobile_base or self._idle or self._returning or not self._head_base_live:
             self._base_vel = (0.0, 0.0, 0.0)
             return
         if self._body_drive is not None:
@@ -1407,6 +1436,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             hint("left"),
             self._reach_status()
             + self._body_drive_status()
+            + ("" if self._head_base_live or not self._started else " | head/base hold (no grip)")
             + ("" if self._started else " | NOT STARTED (press Right A)")
             + (" | STOPPED" if self._stopped else "")
             + (f" | wear={self.config.wear_mode}" if self.config.wear_mode != "head" else "")

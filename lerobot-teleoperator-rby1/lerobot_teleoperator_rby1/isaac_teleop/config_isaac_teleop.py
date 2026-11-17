@@ -225,6 +225,12 @@ class Rby1XRConfig(IsaacTeleopConfig):
     # ── Dead-man switch / session ─────────────────────────────────────
     # Squeeze value above which an arm follows its controller.
     clutch_threshold: float = 0.5
+    # True: the head and the mobile base (thumbsticks and body drive) only move
+    # while at least one grip is squeezed past clutch_threshold; with both
+    # released they hold, like the arms. Squeezing again maps the look
+    # direction of that moment onto the head joints as they are (with
+    # head_latch_on_a), so the head does not jump.
+    head_base_require_grip: bool = True
     # True: nothing follows the headset (arms, torso, head, grippers, base)
     # until Right A is pressed for the first time. That first press only starts
     # teleoperation (and references the operator frame); it does not run the
