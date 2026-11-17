@@ -144,6 +144,50 @@ class Clutch:
         self._engaged = False
 
 
+class PoseHold:
+    """A commanded pose and whether it is being driven — what the absolute arm mapping needs.
+
+    The arm targets are computed absolutely (shoulder-relative mapping), so
+    unlike :class:`Clutch` nothing is latched from the controller: engaging
+    only starts from where the arm is, and the pose is held while released.
+    """
+
+    def __init__(self, base_T_ee: np.ndarray):  # noqa: N803
+        self._pose = np.eye(4)
+        self._engaged = False
+        self.hold_at(base_T_ee)
+
+    @property
+    def engaged(self) -> bool:
+        return self._engaged
+
+    @property
+    def last_commanded(self) -> np.ndarray:
+        """4x4 pose last set (held while released)."""
+        return self._pose.copy()
+
+    def engage(self, measured_base_T_ee: np.ndarray) -> None:  # noqa: N803
+        """Start driving from where the arm physically is (no jump to a stale target)."""
+        self._set(measured_base_T_ee)
+        self._engaged = True
+
+    def set_commanded(self, base_T_ee: np.ndarray) -> None:  # noqa: N803
+        self._set(base_T_ee)
+
+    def disengage(self) -> None:
+        """Stop driving; the last pose is held until the next engage."""
+        self._engaged = False
+
+    def hold_at(self, base_T_ee: np.ndarray) -> None:  # noqa: N803
+        """Hold ``base_T_ee`` (the robot moved on its own, or returned to the start pose)."""
+        self._set(base_T_ee)
+        self._engaged = False
+
+    def _set(self, base_T_ee: np.ndarray) -> None:  # noqa: N803
+        T = np.asarray(base_T_ee, dtype=float)
+        self._pose = _se3(T[:3, 3].copy(), renormalize(T[:3, :3]))
+
+
 def _se3(pos: np.ndarray, rot: np.ndarray) -> np.ndarray:
     T = np.eye(4)
     T[:3, :3] = rot

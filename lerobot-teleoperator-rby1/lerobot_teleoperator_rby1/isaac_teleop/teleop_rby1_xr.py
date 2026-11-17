@@ -69,15 +69,15 @@ from ..constants import (
 from .absolute_ee import AbsoluteEeMapper, rpy_deg_to_matrix
 from .arm_retargeter import ArmPostureRetargeter, robot_reach
 from .base import IsaacTeleopTeleoperator
-from .clutch import Clutch
+from .clutch import Clutch, PoseHold
 from .config_isaac_teleop import Rby1XRConfig
 from .gating import Gates, Mode, compute_gates
+from .operator_frame import OperatorFrame, shoulder_line_yaw
 from .retargeters import (
     HeadRetargeter,
     body_drive_velocity,
     chest_pose_from_body,
     clamp_pose_box,
-    head_yaw_pitch,
     interpolate_pose,
     se2_relative,
     se3_to_ee_action,
@@ -96,7 +96,6 @@ from .xr_frame import (
     build_external_inputs,
     build_pipeline,
     frame_from_outputs,
-    rotate_frame_about_z,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,7 +148,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._body_transform: np.ndarray | None = None
         self._edges = ButtonEdge()
 
-        self._clutch: dict[str, Clutch | None] = {"right": None, "left": None, "torso": None}
+        # Arm targets (absolute mapping) and the torso's engage-relative clutch.
+        self._clutch: dict[str, Clutch | PoseHold | None] = {"right": None, "left": None, "torso": None}
         self._torso_target: np.ndarray | None = None
         self._head = self._make_head_retargeter()
         self._gripper = {"right": 1.0, "left": 1.0}  # dataset convention: 1 = open
@@ -165,12 +165,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         # Start pose (first action) and the interpolated return motion (Right A).
         self._start_snapshot: RobotSnapshot | None = None
         self._return_motion: _ReturnMotion | None = None
-        # Operator-frame yaw correction (rad about robot z) applied to every
-        # incoming pose; taken from the raw head yaw at reference time.
-        self._yaw_correction = 0.0
-        self._needs_reference = True
-        self._last_raw_frame: XRFrame | None = None
-        self._warned_waiting_shoulders = False
+        # Which way the operator faces: yaw correction applied to every incoming pose.
+        self._frame = OperatorFrame(reference_source=config.reference_source, wear_mode=config.wear_mode)
 
         self._torso_joint = int(BodyJointIndex[config.torso_body_joint])
         self._torso_required = [int(BodyJointIndex[n]) for n in config.body_required_joints]
@@ -413,7 +409,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
     # Frame acquisition
     # ------------------------------------------------------------------
 
-    def _read_frame(self) -> XRFrame:
+    def _read_raw_frame(self) -> XRFrame:
+        """Step the session; the frame is in the XR anchor frame (operator frame not applied yet)."""
         outputs = self._step(
             execution_events=self._running_events(), external_inputs=self._external_inputs
         )
@@ -422,74 +419,21 @@ class Rby1XR(IsaacTeleopTeleoperator):
             want_body=self.config.needs_body,
             body_transform=self._body_transform,
         )
-        self._last_raw_frame = raw
         self._tracking = raw.any_controller
-        return rotate_frame_about_z(raw, self._yaw_correction)
+        return raw
 
-    def _set_reference_from_head(self, raw: XRFrame, on_button: bool = False) -> bool:
-        """Make the operator's current facing direction robot +X. Returns True if taken.
+    def _on_operator_frame_changed(self, turned_by: float | None = None) -> None:
+        """Keep what is derived from the operator frame consistent with it.
 
-        The facing direction is taken from the body-tracking shoulder line
-        when both shoulders are valid (robust to where the operator looks),
-        otherwise from the head gaze.
+        ``turned_by`` (rad): the frame followed the body's turn (body drive) —
+        the smoothed shoulders turn with it and everything else stays valid.
+        ``None``: the frame was re-referenced — everything derived from it
+        starts over.
         """
-        yaw: float | None = None
-        source = ""
-        src = self.config.reference_source
-        if src != "gaze":
-            yaw = self._shoulder_line_yaw(raw)
-            if yaw is not None:
-                source = "shoulder line"
-        if yaw is None and src == "shoulders" and self.config.wear_mode != "neck":
-            if not on_button:
-                # First reference: wait for the shoulders (the arms hold meanwhile).
-                if not self._warned_waiting_shoulders:
-                    logger.info("Waiting for body tracking (both shoulders) to reference the operator frame …")
-                    self._warned_waiting_shoulders = True
-                return False
-            logger.warning("Right A without valid shoulders: operator frame referenced from the head gaze instead.")
-        if yaw is None and self.config.wear_mode == "neck" and raw.head is not None:
-            # Both controllers are needed: a single hand sits ~0.2 m off-centre
-            # and would bias the facing direction by tens of degrees.
-            if raw.right is not None and raw.left is not None:
-                mid = 0.5 * (raw.right.position + raw.left.position)
-                fwd = mid - raw.head.position
-                if np.linalg.norm(fwd[:2]) > 0.05:
-                    yaw = math.atan2(fwd[1], fwd[0])
-                    source = "headset→controllers direction"
-        if yaw is None:
-            if raw.head is None:
-                return False
-            yaw, _ = head_yaw_pitch(raw.head.pose)
-            source = "head gaze"
-        old = self._yaw_correction
-        self._yaw_correction = -yaw
-        self._needs_reference = False
-        logger.info(
-            "Operator frame re-referenced from the %s: yaw %.1f deg in the XR anchor frame is now robot +X.",
-            source,
-            math.degrees(yaw),
-        )
-        if abs(_wrap_angle(self._yaw_correction - old)) > 1e-6 or on_button:
-            self._on_reference_changed()
-        return True
-
-    @staticmethod
-    def _shoulder_line_yaw(raw: XRFrame) -> float | None:
-        """Yaw (rad) the operator's body faces, from the body-tracking shoulder line; None when invalid."""
-        if raw.body is None:
-            return None
-        ls, rs = int(BodyJointIndex.LEFT_SHOULDER), int(BodyJointIndex.RIGHT_SHOULDER)
-        if not (bool(raw.body.valid[ls]) and bool(raw.body.valid[rs])):
-            return None
-        across = raw.body.positions[ls] - raw.body.positions[rs]  # right -> left
-        fwd = np.cross(across, np.array([0.0, 0.0, 1.0]))
-        if np.linalg.norm(fwd[:2]) <= 1e-3:
-            return None
-        return math.atan2(fwd[1], fwd[0])
-
-    def _on_reference_changed(self) -> None:
-        """Everything derived from the operator frame must start over."""
+        if turned_by is not None:
+            for mapper in self._abs.values():
+                mapper.rotate_shoulder(turned_by)
+            return
         for mapper in self._abs.values():
             mapper.reset_shoulder()
         for retargeter in self._posture.values():
@@ -505,7 +449,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         last_reminder = t0
         timeout = self.config.tracking_wait_timeout_s
         while True:
-            frame = self._read_frame()
+            frame = self._read_raw_frame()
             if frame.any_controller:
                 logger.info("Headset connected — controllers are streaming.")
                 return
@@ -525,8 +469,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         """Seed every target from the measured robot pose so nothing moves yet."""
         snap: RobotSnapshot = self._reader.read()
         cfg = self.config
-        self._clutch["right"] = Clutch(snap.right_ee) if cfg.use_right_arm else None
-        self._clutch["left"] = Clutch(snap.left_ee) if cfg.use_left_arm else None
+        self._clutch["right"] = PoseHold(snap.right_ee) if cfg.use_right_arm else None
+        self._clutch["left"] = PoseHold(snap.left_ee) if cfg.use_left_arm else None
         self._clutch["torso"] = Clutch(snap.torso) if cfg.use_torso else None
         self._torso_target = snap.torso.copy()
         self._head.hold(snap.head_q, snap.torso)
@@ -540,7 +484,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         # The follower connects (and moves to its ready pose) after this, so
         # the targets are re-seeded again on the first get_action().
         self._needs_initial_resync = True
-        self._needs_reference = True
+        self._frame.needs_reference = True
         logger.info(
             "rby1_isaac: targets latched to the current robot pose (%s).",
             ("hold both arms straight out in front and press Right A to start, then squeeze to follow"
@@ -559,28 +503,24 @@ class Rby1XR(IsaacTeleopTeleoperator):
         if self._session is None:  # session_start == "first_action"
             self._open_session()
 
-        frame = self._read_frame()
-        events = self._edges.update(frame)
-        raw = self._last_raw_frame
+        raw = self._read_raw_frame()
+        events = self._edges.update(raw)
 
         # Operator frame: reference on the first tracked head frame and on Right A.
-        if raw is not None and (events["right_a"] or self._needs_reference):
-            if self._set_reference_from_head(raw, on_button=bool(events["right_a"])):
-                frame = rotate_frame_about_z(raw, self._yaw_correction)
+        if events["right_a"] or self._frame.needs_reference:
+            if self._frame.reference(raw, on_button=bool(events["right_a"])):
+                self._on_operator_frame_changed()
 
         # One robot read per tick: engage edges latch from it and disengaged
         # components are re-synchronised to it when the robot moved on its own.
         snap = self._reader.read()
         self._last_snapshot = snap
 
-        def get_snap() -> RobotSnapshot:
-            return snap
-
         self._resync_disengaged(snap)
         # Camera-panel grab: feed the aim rays; a grabbing hand neither clutches
         # nor drives its gripper / thumbstick while it holds a panel.
         grabbing = self._feed_panel_hands(raw)
-        frame = _mask_grabbing_hands(frame, grabbing)
+        raw = _mask_grabbing_hands(raw, grabbing)
 
         if any(events.values()):
             logger.info("xr button edge: %s", [k for k, v in events.items() if v])
@@ -603,10 +543,10 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 start = self._start_snapshot
                 self._head_latch_target = (start.head_q.copy(), start.torso.copy())
 
-        self._update_grip_held(frame, snap)
-        if self._update_body_drive(raw, snap) and raw is not None:
-            # The operator frame turned with the body this tick.
-            frame = _mask_grabbing_hands(rotate_frame_about_z(raw, self._yaw_correction), grabbing)
+        self._update_grip_held(raw, snap)
+        self._update_body_drive(raw, snap)  # may turn the operator frame with the body
+        # Every pose in the operator frame, once, now that the frame is final for this tick.
+        frame = self._frame.apply(raw)
 
         now = time.monotonic()
         dt = 1.0 / 60.0 if self._last_tick_t is None else float(np.clip(now - self._last_tick_t, 1e-3, 0.1))
@@ -622,8 +562,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._update_arm_absolute("right", frame, snap, now, dt, gates)
         self._update_arm_absolute("left", frame, snap, now, dt, gates)
         self._update_posture_hints(frame, snap, now, dt, gates)
-        self._update_torso(frame, get_snap, gates)
-        self._update_head(frame, get_snap, gates)
+        self._update_torso(frame, snap, gates)
+        self._update_head(frame, snap, gates)
         self._update_grippers(frame, gates)
         self._update_base(frame, gates)
         self._log_status(frame)
@@ -674,13 +614,23 @@ class Rby1XR(IsaacTeleopTeleoperator):
             self._relatch_head(snap)
 
     def _relatch_head(self, snap: RobotSnapshot) -> None:
-        """Map the look direction of the next tracked head frame onto the measured head joints."""
+        """Grip squeezed again: the head starts from where it is (``head_latch_on_a`` only)."""
         cfg = self.config
         if not cfg.use_head or cfg.wear_mode == "neck" or not cfg.head_latch_on_a:
             return
+        self._hold_head_at(snap.head_q, snap.torso)
+
+    def _hold_head_at(self, head_q: np.ndarray, torso: np.ndarray, *, relatch: bool = True) -> None:
+        """Hold the head at ``head_q`` (measured under the base->torso_5 pose ``torso``) with a fresh origin.
+
+        With ``relatch`` and ``head_latch_on_a``, the look direction of the next
+        tracked head frame is mapped onto these joints, so the head continues
+        from here instead of jumping to the absolute headset direction.
+        """
         self._head = self._make_head_retargeter()
-        self._head.hold(snap.head_q, snap.torso)
-        self._head_latch_target = (snap.head_q.copy(), snap.torso.copy())
+        self._head.hold(head_q, torso)
+        if relatch and self.config.head_latch_on_a:
+            self._head_latch_target = (head_q.copy(), torso.copy())
 
     def _end_body_drive(self, reason: str, *, block: bool = False) -> None:
         if self._body_drive is None:
@@ -692,8 +642,8 @@ class Rby1XR(IsaacTeleopTeleoperator):
             "Base drive ended (%s)%s.", reason, " — release Left X and press it again to resume" if block else ""
         )
 
-    def _update_body_drive(self, raw: XRFrame | None, snap: RobotSnapshot) -> bool:
-        """Run the body-drive mode for this tick; True when the operator frame was turned.
+    def _update_body_drive(self, raw: XRFrame, snap: RobotSnapshot) -> None:
+        """Run the body-drive mode for this tick (it may turn the operator frame).
 
         While Left X is held the base follows the operator's displacement
         (headset, horizontal) and turn (shoulder line) since the press, measured
@@ -701,27 +651,27 @@ class Rby1XR(IsaacTeleopTeleoperator):
         turn, so head and arm commands stay relative to the body.
         """
         cfg = self.config
-        pressed = raw is not None and raw.left is not None and raw.left.primary
+        pressed = raw.left is not None and raw.left.primary
         if not pressed:
             self._end_body_drive("Left X released")
             self._body_drive_blocked = False
-            return False
+            return
         if self._body_drive_blocked:
-            return False
+            return
         if not self._gates().body_drive:
             self._end_body_drive("stopped, or no grip squeezed")
-            return False
-        body_yaw = self._shoulder_line_yaw(raw)
+            return
+        body_yaw = shoulder_line_yaw(raw)
         odometry = getattr(snap, "odometry", None)
         tracked = raw.head is not None and body_yaw is not None and odometry is not None
         drive = self._body_drive
         if drive is None:
             if not tracked:
-                return False  # entered on the first tick with headset, shoulders and odometry
+                return  # entered on the first tick with headset, shoulders and odometry
             drive = self._body_drive = _BodyDrive(
                 origin_xy=raw.head.position[:2].copy(),
                 body_yaw=body_yaw,
-                yaw_correction0=self._yaw_correction,
+                yaw_correction0=self._frame.yaw,
                 odometry0=np.asarray(odometry, dtype=float).copy(),
             )
             torso = self._clutch.get("torso")
@@ -730,7 +680,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             logger.info("Base drive (Left X held): the torso holds, the base follows your steps and turns.")
         if not tracked:
             self._end_body_drive("headset, shoulders or odometry lost", block=True)
-            return False
+            return
 
         # Operator pose since the press, in the base frame of that moment (yaw unwrapped, lightly filtered).
         a = cfg.body_drive_smoothing
@@ -762,18 +712,15 @@ class Rby1XR(IsaacTeleopTeleoperator):
                 f"the base is too far behind: {error[0]:+.2f}, {error[1]:+.2f} m, {math.degrees(error[2]):+.0f} deg",
                 block=True,
             )
-            return False
+            return
         self._base_vel = velocity
 
         # The operator frame turns with the body: head = neck angle, arms relative to the body.
         correction = drive.yaw_correction0 - drive.turn
-        delta = correction - self._yaw_correction
-        if abs(delta) < 1e-9:
-            return False
-        self._yaw_correction = correction
-        for mapper in self._abs.values():
-            mapper.rotate_shoulder(delta)
-        return True
+        delta = correction - self._frame.yaw
+        if abs(delta) >= 1e-9:
+            self._frame.yaw = correction
+            self._on_operator_frame_changed(turned_by=delta)
 
     def _calibrate_arms(self) -> bool:
         """Fix the operator reach from the arms held straight out (``arm_length_source="calibrate"``).
@@ -879,10 +826,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         self._started = True
         self._stopped = False
         if self.config.use_head:
-            self._head = self._make_head_retargeter()
-            self._head.hold(snap.head_q, snap.torso)
-            if self.config.head_latch_on_a:
-                self._head_latch_target = (snap.head_q.copy(), snap.torso.copy())
+            self._hold_head_at(snap.head_q, snap.torso)
 
     def _resync_disengaged(self, snap: RobotSnapshot) -> None:
         """Re-seed held targets from the measured pose when the robot moved on its own.
@@ -949,11 +893,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             ):
                 # Hold the measured head joints; the look-direction origin is
                 # re-latched on the next tracked head frame.
-                self._head = self._make_head_retargeter()
-                self._head.hold(snap.head_q, snap.torso)
-                if cfg.head_latch_on_a:
-                    # Current look direction ↦ the measured head joints.
-                    self._head_latch_target = (snap.head_q.copy(), snap.torso.copy())
+                self._hold_head_at(snap.head_q, snap.torso)
                 synced.append("head")
 
         if synced:
@@ -1016,8 +956,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         motion.t_done = time.monotonic()
         if self.config.use_head and not self.config.head_latch_on_a:
             # Fresh head origin at the start pose: the current view becomes centre.
-            self._head = self._make_head_retargeter()
-            self._head.hold(goal.head_q, goal.torso)
+            self._hold_head_at(goal.head_q, goal.torso, relatch=False)
         logger.info("Start pose reached — squeeze to follow again.")
 
     def _make_head_retargeter(self) -> HeadRetargeter:
@@ -1188,7 +1127,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         if ctrl is None:
             release("hold")
             return
-        if self._needs_reference and cfg.reference_source == "shoulders":
+        if self._frame.needs_reference and cfg.reference_source == "shoulders":
             release("hold (waiting for shoulders)")
             return
         if ctrl.squeeze <= cfg.clutch_threshold:
@@ -1205,7 +1144,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             return
 
         if not clutch.engaged:
-            clutch.engage(ctrl.position, ctrl.orientation, measured, latch_orientation="measured")
+            clutch.engage(measured)
             self._abs_ramp[side] = (t, clutch.last_commanded.copy(), max(cfg.engage_ramp_s, 0.05))
             mapper.reset_rate_limit(None)
             logger.debug("%s arm dead-man engaged — ramping to the absolute target.", side)
@@ -1293,7 +1232,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
             return frame.head.pose if frame.head is not None else None
         return None
 
-    def _update_torso(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot], gates: Gates) -> None:
+    def _update_torso(self, frame: XRFrame, snap: RobotSnapshot, gates: Gates) -> None:
         clutch = self._clutch["torso"]
         if clutch is None:
             return
@@ -1327,7 +1266,7 @@ class Rby1XR(IsaacTeleopTeleoperator):
         pos = driver[:3, 3]
         quat = Rotation.from_matrix(driver[:3, :3]).as_quat()
         if not clutch.engaged:
-            clutch.engage(pos, quat, get_snap().torso, latch_orientation="measured")
+            clutch.engage(pos, quat, snap.torso, latch_orientation="measured")
         else:
             clutch.rebase(pos, quat)
         # Chest delta since engage applied 1:1, then the absolute workspace box.
@@ -1345,14 +1284,13 @@ class Rby1XR(IsaacTeleopTeleoperator):
             np.radians(cfg.torso_rpy_max_deg),
         )
 
-    def _update_head(self, frame: XRFrame, get_snap: Callable[[], RobotSnapshot], gates: Gates) -> None:
+    def _update_head(self, frame: XRFrame, snap: RobotSnapshot, gates: Gates) -> None:
         if not self.config.use_head or not gates.head:
             return
         if self.config.wear_mode == "neck":
             return  # the held (start / ready) gaze stays; torso compensation happens in _build_action
         if frame.head is None:
             return
-        snap = get_snap()
         if not self._head.latched:
             self._head.latch(frame.head.pose, snap.head_q, snap.torso)
             logger.info("Head origin latched.")
@@ -1566,10 +1504,6 @@ class _ReturnMotion:
         return self.finished and self.t_done is not None and (
             time.monotonic() - self.t_done > self.SETTLE_S
         )
-
-
-def _wrap_angle(a: float) -> float:
-    return float((a + math.pi) % (2.0 * math.pi) - math.pi)
 
 
 def _pose_drift(

@@ -458,7 +458,7 @@ def test_body_drive_follows_steps_and_turns(stubbed_pipeline, monkeypatch):
     a = step(xy=(0.2, 0.1), body_deg=30.0)
     assert t._body_drive is None and (a["x.vel"], a["y.vel"], a["theta.vel"]) == (0.0, 0.0, 0.0)
     assert (a["head_0.pos"], a["head_1.pos"]) == pytest.approx(head, abs=1e-6)
-    assert t._yaw_correction == pytest.approx(math.radians(-30.0))  # the operator frame stays with the body
+    assert t._frame.yaw == pytest.approx(math.radians(-30.0))  # the operator frame stays with the body
 
 
 def test_body_drive_keeps_a_clutched_arm_where_it_is(stubbed_pipeline, monkeypatch):
@@ -829,7 +829,7 @@ def test_right_a_rereferences_operator_yaw(stubbed_pipeline, monkeypatch):
     # Nothing in the body frame is used for the reference here (no shoulders) -> head gaze.
     session.push(_frame(right=fakes.controller(_abs_hand(), primary=True), head=fakes.head(quat=_head_quat(90))))
     t.get_action()
-    assert t._yaw_correction == pytest.approx(-math.pi / 2)
+    assert t._frame.yaw == pytest.approx(-math.pi / 2)
     clock[0] += 1.0  # return motion done
     t.get_action()
     # Squeeze with the hand 0.3 m "forward" for the operator = raw robot +Y of the shoulder.
@@ -1031,11 +1031,11 @@ def test_reference_prefers_shoulder_line_over_head(stubbed_pipeline):
     t = make_teleop(session, readers, torso_source="none", use_torso=False, use_head=False, arm_posture_hint=True)
     t.connect()
     t.get_action()
-    assert t._yaw_correction == pytest.approx(0.0, abs=1e-6)
+    assert t._frame.yaw == pytest.approx(0.0, abs=1e-6)
     # Operator turns 90 deg left (shoulders now along -x .. +x): facing +Y.
     session.push(_frame(right=fakes.controller(primary=True), body=_shoulders_body((0.2, 0), (-0.2, 0))))
     t.get_action()
-    assert t._yaw_correction == pytest.approx(-math.pi / 2, abs=1e-6)
+    assert t._frame.yaw == pytest.approx(-math.pi / 2, abs=1e-6)
 
 
 def test_right_a_latches_orientation_against_start_pose(stubbed_pipeline, monkeypatch):
@@ -1107,7 +1107,7 @@ def test_neck_mode_reference_from_controllers_when_no_body(stubbed_pipeline):
     t = make_teleop(session, readers, wear_mode="neck", torso_source="none", use_torso=False)
     t.connect()
     t.get_action()
-    assert t._yaw_correction == pytest.approx(-math.pi / 2, abs=1e-6)  # facing +Y -> rotated to +X
+    assert t._frame.yaw == pytest.approx(-math.pi / 2, abs=1e-6)  # facing +Y -> rotated to +X
 
 
 def test_neck_mode_absolute_ee_uses_headset_shoulder_estimate(stubbed_pipeline, monkeypatch):
@@ -1430,18 +1430,18 @@ def test_reference_shoulders_waits_for_body_then_uses_shoulder_line(stubbed_pipe
                     reference_source="shoulders", **ABS_KW)
     t.connect()
     a = t.get_action()
-    assert t._needs_reference and t._yaw_correction == 0.0
+    assert t._frame.needs_reference and t._frame.yaw == 0.0
     assert a["right_ee.x"] == pytest.approx(readers[0].right_ee[0, 3])
     assert t._abs_state["right"] == "hold (waiting for shoulders)"
     # Shoulders appear (facing +X while the head still looks 60 deg left): shoulder line wins.
     body = _shoulders_body((0, -0.2), (0, 0.2))
     session.push(_frame(right=fakes.controller(_abs_hand(), squeeze=0.9), head=fakes.head(quat=_head_quat(60)), body=body))
     t.get_action()
-    assert not t._needs_reference and t._yaw_correction == pytest.approx(0.0)
+    assert not t._frame.needs_reference and t._frame.yaw == pytest.approx(0.0)
     # Right A without shoulders falls back to the gaze (with a warning) instead of waiting.
     session.push(_frame(right=fakes.controller(_abs_hand(), primary=True), head=fakes.head(quat=_head_quat(60))))
     t.get_action()
-    assert t._yaw_correction == pytest.approx(-math.radians(60))
+    assert t._frame.yaw == pytest.approx(-math.radians(60))
 
 
 def test_ee_offsets_latched_at_first_engage_not_at_button(stubbed_pipeline, monkeypatch):
