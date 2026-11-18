@@ -234,8 +234,8 @@ def read_pid_gains(sdk_robot: Any) -> dict[str, Any]:
     for group, getter in getters.items():
         try:
             gains[group] = [[g.p_gain, g.i_gain, g.d_gain] for g in getter()]
-        except Exception as exc:  # noqa: BLE001  (drivers may be unpowered)
-            gains[group] = f"<unavailable: {exc.__class__.__name__}>"
+        except Exception as exc:  # noqa: BLE001  (drivers unpowered, or a simulator without drivers)
+            gains[group] = f"<unavailable: {exc.__class__.__name__}: {str(exc)[:120]}>"
     return gains
 
 

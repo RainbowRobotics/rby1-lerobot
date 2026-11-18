@@ -269,6 +269,7 @@ class _CommandStream:
             raise RuntimeError("Command stream expired (fake)")
         self._robot.n_stream_commands += 1
         self._robot.last_stream_command = cmd
+        self._robot._active_stream = self
         self._robot._apply(cmd)
         hold = _mobility_hold_time(cmd)
         self._mobility_deadline = None if hold is None else now + hold
@@ -279,6 +280,10 @@ class _CommandStream:
 
     def cancel(self):
         self._done = True
+        if self._robot._active_stream is self:
+            # As the real core: the cancelled command ends a moment later, not at once.
+            self._robot._active_stream = None
+            self._robot._cancel_pending_polls = 2
 
 
 # Core parameters of Model A (core/robots/rby1a/parameters.h): name -> (type, default).
@@ -350,6 +355,10 @@ class FakeRobot:
             else ControlManagerState.State.Idle
         )
         self._ctrl = ControlManagerState.ControlState.Idle
+        # A command sent on a stream stays an active control until the stream is
+        # cancelled, and then for the next few state requests.
+        self._active_stream = None
+        self._cancel_pending_polls = 0
         self.n_commands = 0
         self.n_pid_gain_reads = 0
         self.n_stream_commands = 0
@@ -412,8 +421,14 @@ class FakeRobot:
         self._servo = True
         return True
 
+    def _control_active(self):
+        return self._active_stream is not None or self._cancel_pending_polls > 0
+
     def get_control_manager_state(self):
-        return ControlManagerState(self._cm, self._ctrl)
+        ctrl = ControlManagerState.ControlState.Executing if self._control_active() else self._ctrl
+        if self._cancel_pending_polls > 0:
+            self._cancel_pending_polls -= 1
+        return ControlManagerState(self._cm, ctrl)
 
     def reset_fault_control_manager(self):
         self._cm = ControlManagerState.State.Idle
@@ -426,6 +441,10 @@ class FakeRobot:
 
     def disable_control_manager(self):
         _rec("disable_control_manager")
+        if self._cm == ControlManagerState.State.Enabled and self._control_active():
+            return False  # as the real core: "there are still active controls"
+        if self._cm not in (ControlManagerState.State.Enabled, ControlManagerState.State.Idle):
+            return False
         self._cm = ControlManagerState.State.Idle
         return True
 

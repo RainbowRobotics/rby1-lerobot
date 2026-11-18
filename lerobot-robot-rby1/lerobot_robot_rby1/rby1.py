@@ -540,7 +540,7 @@ class Rby1(Robot):
             # that the next session then has to clear.
             if self._stream is not None:
                 attempt("cancel command stream", self._stream.cancel)
-            attempt("disable control manager", self._robot.disable_control_manager)
+            attempt("disable control manager", self._disable_control_manager)
             if self._config.use_gripper:
                 for side in ("right", "left"):
                     attempt(
@@ -565,6 +565,36 @@ class Rby1(Robot):
         self._fk_state = None
         self._resolved_model = None
         self._resolved_version = None
+
+    def _disable_control_manager(self) -> None:
+        """Disable the control manager once no command is active any more.
+
+        The core refuses to disable while a command is active, and a cancelled
+        stream ends a moment after the cancel. Asked straight away it answers
+        False (and logs an error on the robot), and the control manager stays
+        enabled after the disconnect.
+        """
+        import rby1_sdk as rby
+
+        cm = rby.ControlManagerState
+        state = self._robot.get_control_manager_state()
+        for _ in range(100):  # up to 2 s
+            if state.state != cm.State.Enabled or state.control_state == cm.ControlState.Idle:
+                break
+            time.sleep(0.02)
+            state = self._robot.get_control_manager_state()
+        if state.state == cm.State.Idle:
+            return
+        if state.state != cm.State.Enabled:
+            # A fault: it cannot be disabled; the next connect() clears it.
+            logger.warning(f"RB-Y1 disconnect: control manager left in {state.state}.")
+            return
+        if not self._robot.disable_control_manager():
+            state = self._robot.get_control_manager_state()
+            logger.warning(
+                "RB-Y1 disconnect: the control manager refused to disable and stays enabled "
+                f"(state={state.state}, control_state={state.control_state})."
+            )
 
     def move_to_ready_pose(
         self,

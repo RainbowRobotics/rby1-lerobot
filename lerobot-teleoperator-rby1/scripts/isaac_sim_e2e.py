@@ -12,6 +12,8 @@ What it answers without a robot:
   hold    is there a jolt right after the ready pose, when the first
           end-effector command arrives?
   arms    Right A start with the reach calibration, squeeze, the arm follows.
+  loss    body tracking drops out while the arms are squeezed: they hold where
+          they are (no shift) and follow again when it returns. Needs ``arms``.
   drive   Left X body drive: do the SIGNS match (a step forward drives forward,
           a left turn turns left) and does the base settle on the target?
   stop    Right B stops the base.
@@ -43,7 +45,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tests"))  # isaac_operator / isaac_fakes (not the fake rby1_sdk in tests/fakes)
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
-SCENARIOS = ("hold", "arms", "drive", "stop", "return")
+SCENARIOS = ("hold", "arms", "loss", "drive", "stop", "return")
 logger = logging.getLogger("isaac_sim_e2e")
 
 
@@ -202,6 +204,46 @@ def scenario_arms(run: Run, results: list) -> None:
           f"moved {moved * 100:.1f} cm forward, {math.dist(target, measured) * 100:.1f} cm from the target")
 
 
+def scenario_loss(run: Run, results: list) -> None:
+    """Body tracking drops out while both arms are squeezed, then comes back."""
+    op, teleop = run.op, run.teleop
+    core = teleop._core
+
+    def shift(a: dict[str, Any], b: dict[str, Any], kind: str) -> float:
+        sep = "." if kind == "cmd" else "_"
+        return max(
+            math.dist([a[f"{kind}_{side}_ee{sep}{x}"] for x in "xyz"], [b[f"{kind}_{side}_ee{sep}{x}"] for x in "xyz"])
+            for side in ("right", "left")
+        )
+
+    op.right_squeeze = op.left_squeeze = 0.9
+    run.hold(1.0, "loss-settle")
+    before = run.last()
+    op.body_tracked = False
+    run.hold(teleop.config.abs_hold_s + 1.5, "no-body")
+    lost = run.last()
+    holding = not core._clutch["right"].engaged and not core._clutch["left"].engaged
+    check(
+        results,
+        # The targets are relative to the measured torso, which settles by a millimetre or two
+        # when it stops following; a change of shoulder source would be several centimetres.
+        "loss: body tracking lost — the arms hold where they were (targets within 5 mm, measured hands within 1 cm)",
+        holding and shift(before, lost, "cmd") < 5e-3 and shift(before, lost, "meas") < 0.01,
+        f"holding={holding} ({core._abs_state['right']}), target moved {shift(before, lost, 'cmd') * 1000:.2f} mm, "
+        f"hand moved {shift(before, lost, 'meas') * 100:.2f} cm",
+    )
+    op.body_tracked = True
+    run.hold(teleop.config.engage_ramp_s + 1.0, "body-back")
+    back = run.last()
+    following = core._clutch["right"].engaged and core._clutch["left"].engaged
+    check(
+        results,
+        "loss: the arms follow again when body tracking returns (measured hands within 2 cm of before)",
+        following and shift(before, back, "meas") < 0.02,
+        f"following={following}, hand moved {shift(before, back, 'meas') * 100:.2f} cm",
+    )
+
+
 def _odometry(run: Run) -> tuple[float, float, float]:
     r = run.last()
     return r["odom_x"], r["odom_y"], r["odom_yaw"]
@@ -327,6 +369,8 @@ def main() -> int:
     unknown = sorted(set(scenarios) - set(SCENARIOS))
     if unknown:
         parser.error(f"unknown scenarios {unknown}")
+    if "loss" in scenarios and "arms" not in scenarios:
+        parser.error("the loss scenario needs arms (it starts from the squeezed arms)")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -376,6 +420,8 @@ def main() -> int:
             run.hold(0.5, "warm-up")
         if "arms" in scenarios:
             scenario_arms(run, results)
+        if "loss" in scenarios:
+            scenario_loss(run, results)
         if "drive" in scenarios:
             scenario_drive(run, results, holonomic=model.lower() != "a")
         if "stop" in scenarios:

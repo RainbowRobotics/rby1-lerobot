@@ -58,6 +58,31 @@ def test_disconnect_cancels_stream_before_disabling(monkeypatch) -> None:
     assert order == ["cancel", "disable"]
 
 
+def test_disconnect_waits_for_the_cancelled_command_before_disabling(caplog) -> None:
+    """The core refuses to disable while a command is active; a cancelled stream ends a moment later."""
+    robot = _robot(move_to_ready_on_connect=False, use_gripper=False)
+    robot.connect()
+    fake = robot._robot
+    robot.send_action(dict(robot.get_observation()))  # a streamed command: an active control
+    assert fake.get_control_manager_state().control_state == rby.ControlManagerState.ControlState.Executing
+    assert fake.disable_control_manager() is False  # what asking straight away gets
+    n = len(rby.CALL_LOG)
+    robot.disconnect()
+    assert fake.get_control_manager_state().state == rby.ControlManagerState.State.Idle
+    assert _calls_since(n).count("disable_control_manager") == 1  # asked once, when it could succeed
+    assert "refused to disable" not in caplog.text
+
+
+def test_disconnect_reports_a_control_manager_that_stays_enabled(monkeypatch, caplog) -> None:
+    robot = _robot(move_to_ready_on_connect=False, use_gripper=False)
+    robot.connect()
+    fake = robot._robot
+    monkeypatch.setattr(fake, "disable_control_manager", lambda: False)
+    robot.disconnect()
+    assert "refused to disable" in caplog.text
+    assert fake.get_control_manager_state().state == rby.ControlManagerState.State.Enabled
+
+
 def test_ready_pose_failure_fails_connect(monkeypatch) -> None:
     monkeypatch.setattr(rby.FakeRobot, "wait_for_control_ready", lambda self, timeout_ms: False)
     robot = _robot(use_gripper=False)

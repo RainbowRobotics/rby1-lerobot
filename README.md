@@ -219,9 +219,9 @@ python lerobot-teleoperator-rby1/scripts/isaac_preflight_upc.py \
 `lerobot-teleoperator-rby1/scripts/isaac_sim_e2e.py` runs the real follower plugin and the
 real teleoperator against a **simulated** RB-Y1 core (the vendor `rby1-sim-isaac` image in
 SDK mode runs the same core software as the robot), with a scripted operator instead of a
-headset. It checks the start on Right A, the arm following, the body drive (signs and
-convergence), Right B and the return to start, and reports how much the joints move right
-after the first end-effector command:
+headset. It checks the start on Right A, the arm following, a body-tracking dropout while
+squeezed (the arms hold), the body drive (signs and convergence), Right B and the return to
+start, and reports how much the joints move right after the first end-effector command:
 
 ```bash
 # in the rby1-sim-isaac checkout: HEADLESS=1 ./docker/run_sdk.sh --image 0.11.0-m_v1.3-isaac6.2.0
@@ -819,8 +819,13 @@ Breaking changes in 0.3.1 (compared with the withdrawn 0.3.0):
 - Robot profiles written by 0.3.0 are still read: field names are converted on load, and
   `profile_mode=apply` restores the fixed EE period they were recorded with.
 - The profile now holds the joint drivers' PID gains. The core serves them only while its
-  control manager is idle, so they are read before the control manager is enabled; earlier
-  profiles hold `<unavailable: ...>` there, which is not compared.
+  control manager is idle, so they are read before the control manager is enabled (and not
+  requested when it is already enabled at connect); earlier profiles hold
+  `<unavailable: ...>` there, which is not compared.
+- **Disconnect leaves the control manager idle.** The plugin asked the core to disable it
+  right after cancelling the command stream; the core refuses while the cancelled command is
+  still ending, so in EE mode the control manager stayed enabled after a disconnect. The
+  plugin now waits for the command to end (up to 2 s) and warns if the core still refuses.
 
 LeRobot commands that do not apply to RB-Y1:
 
