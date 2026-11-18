@@ -116,6 +116,8 @@ RECORDED_ONLY_FIELDS = frozenset(
         "address",
         "connect_timeout_sec",
         "move_to_ready_on_connect",
+        "ready_on_record_reset",
+        "record_reset_gripper_wait",
         "model",
         "version",
         "profile_out",
@@ -581,6 +583,9 @@ _ADDED_FIELDS = (
     "wb_hold_time",
     "mobile_base_linear_acceleration_limit",
     "mobile_base_angular_acceleration_limit",
+    "gripper_max_open",
+    "ready_on_record_reset",
+    "record_reset_gripper_wait",
 )
 
 

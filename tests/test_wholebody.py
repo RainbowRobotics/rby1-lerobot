@@ -43,10 +43,21 @@ def test_wholebody_features() -> None:
     robot = Rby1(_wb_config())
     action = list(robot.action_features)
     assert action[:18] == [f"{g}_ee.{s}" for g in ("torso", "right", "left") for s in ("x", "y", "z", "wx", "wy", "wz")]
-    assert action[18:32] == [f"{side}_arm_{i}.null" for side in ("right", "left") for i in range(7)]
-    assert action[32:] == ["head_0.pos", "head_1.pos", "x.vel", "y.vel", "theta.vel"]
-    obs = list(robot.observation_features)
-    assert "head_0.pos" in obs and "torso_ee.wz" in obs and "right_arm_6.pos" in obs
+    assert action[18:24] == [f"{side}_arm_{i}.null" for side in ("right", "left") for i in range(3)]
+    assert action[24:] == ["head_0.pos", "head_1.pos", "x.vel", "y.vel", "theta.vel"]
+    obs = [k for k, v in robot.observation_features.items() if v is float]
+    # Joint positions only: 20 body + 2 head (EE poses are not part of the state).
+    assert len(obs) == 22 and all(k.endswith(".pos") for k in obs)
+    assert "head_0.pos" in obs and "right_arm_6.pos" in obs
+
+
+def test_wholebody_dims_within_32() -> None:
+    """Head + grippers + base: action 31-D, state 24-D (PI0.5 pads both to 32)."""
+    from lerobot_robot_rby1 import Rby1
+
+    robot = Rby1(_wb_config(use_gripper=True))
+    assert len(robot.action_features) == 31
+    assert sum(v is float for v in robot.observation_features.values()) == 24
     assert robot.supports_position_hold is False
 
 
@@ -68,9 +79,10 @@ def _cmd(robot):
 
 def _action_from_obs(robot) -> dict[str, float]:
     obs = robot.get_observation()
+    obs.update(robot._ee_poses(robot._robot.get_state()))  # not part of the observation
     action = {k: float(obs[k]) for k in robot.action_features if k in obs}
     for side in ("right", "left"):
-        for i in range(7):
+        for i in range(3):
             action[f"{side}_arm_{i}.null"] = float(obs[f"{side}_arm_{i}.pos"]) + 0.01 * i
     action.update({"x.vel": 0.1, "y.vel": 0.0, "theta.vel": 0.2})
     return action
@@ -89,8 +101,10 @@ def test_wholebody_send_action(wb_robot) -> None:
     links = [args[1] for name, args in body._calls if name == "add_target"]
     assert links == ["link_torso_5", "link_right_arm_6", "link_left_arm_6"]
     target, weight, kp, kd = body.get("set_nullspace_joint_target")
-    assert list(weight[:6]) == [0.0] * 6 and list(weight[6:13]) == [2.0, 2.0, 2.0, 2.0, 0.5, 0.5, 0.5]
-    assert np.allclose(target[6:13], [action[f"right_arm_{i}.null"] for i in range(7)])
+    assert list(weight[:6]) == [0.0] * 6
+    assert list(weight[6:13]) == list(weight[13:20]) == [2.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0]
+    assert np.allclose(target[6:9], [action[f"right_arm_{i}.null"] for i in range(3)])
+    assert np.allclose(target[13:16], [action[f"left_arm_{i}.null"] for i in range(3)])
     assert (kp, kd) == (0.2, 0.2)
     assert body.get("set_reset_reference") == (True,)  # first command re-references
 
@@ -105,9 +119,12 @@ def test_wholebody_send_action(wb_robot) -> None:
 
 
 def test_wholebody_hold_before_first_action(wb_robot) -> None:
-    wb_robot.hold()  # obs has no .null keys: they come from the measured arm joints
+    # obs has neither EE poses nor .null keys: FK and the measured shoulder joints.
+    obs = wb_robot.get_observation()
+    wb_robot.hold()
     body = _cmd(wb_robot).get("set_body_command")[0]
-    assert body.get("set_nullspace_joint_target") is not None
+    target = body.get("set_nullspace_joint_target")[0]
+    assert np.allclose(target[13:16], [obs[f"left_arm_{i}.pos"] for i in range(3)])
 
 
 def test_ready_pose_override() -> None:
@@ -284,3 +301,78 @@ def test_teleop_action_drives_wholebody_robot(monkeypatch) -> None:
     finally:
         robot.disconnect()
         teleop.disconnect()
+
+
+# ── lerobot-record: park at the ready pose between episodes ─────────────────
+def test_teleop_holds_in_reset_and_latches_when_recording_starts(monkeypatch) -> None:
+    """record_loop(dataset=...) → record_loop(dataset=None) → record_loop(dataset=...)."""
+    import time
+
+    from lerobot_teleoperator_rby1 import Rby1VRWholebody, Rby1VRWholebodyConfig
+    from lerobot_teleoperator_rby1 import rby1_vr_wholebody as mod
+
+    monkeypatch.setattr(mod.StreamReceiver, "start", lambda self: None)
+    teleop = Rby1VRWholebody(Rby1VRWholebodyConfig(
+        robot_address=ADDRESS, robot_model="m", ignore_model_check=True,
+        use_mobile_base=False, use_gripper=False, status_log_period_s=0.0,
+    ))
+
+    def record_loop(dataset):  # same name and local as lerobot's loop
+        return teleop.get_action()
+
+    teleop.connect()
+    try:
+        teleop._rx.apply(_frame(), now=time.monotonic())
+        teleop._try_latch(teleop._rx.snapshot, teleop._measure(), time.monotonic())
+        teleop.get_action()                      # lerobot-teleoperate: no phase, nothing changes
+        assert teleop._state == "RUN"
+        record_loop(dataset=object())            # episode
+        assert teleop._state == "RUN"
+        record_loop(dataset=None)                # reset phase: hold
+        assert teleop._state == "HOLD"
+        latch_time = teleop._rt.latch_time
+        teleop._rx.apply(_frame(t=1.0), now=time.monotonic())
+        action = record_loop(dataset=object())   # next episode: latched on its first tick
+        assert teleop._state == "RUN" and teleop._rt.latch_time > latch_time
+        assert list(action) == list(teleop.action_features)
+    finally:
+        teleop.disconnect()
+
+
+def test_robot_parks_at_ready_during_the_record_reset_phase() -> None:
+    from lerobot_robot_rby1 import Rby1
+
+    robot = Rby1(_wb_config(use_gripper=True, use_mobile_base=False, cameras={},
+                            ready_on_record_reset=True, record_reset_gripper_wait=0.0))
+
+    def record_loop(dataset, action):  # same name and local as lerobot's loop
+        return robot.send_action(action)
+
+    robot.connect()
+    try:
+        ready = robot.get_observation()
+        action = {k: float(ready[k]) for k in robot.action_features if k in ready}
+        action.update(robot._ee_poses(robot._robot.get_state()))
+        for side in ("right", "left"):
+            for i in range(3):
+                action[f"{side}_arm_{i}.null"] = ready[f"{side}_arm_{i}.pos"]
+            action[f"{side}_gripper_0.pos"] = 0.0  # closed
+        record_loop(object(), action)
+        assert robot.get_observation()["right_gripper_0.pos"] == 0.0
+        robot._robot.last_stream_command = None
+
+        record_loop(None, action)                # reset phase starts: park
+        assert robot._parked
+        obs = robot.get_observation()
+        assert obs["right_gripper_0.pos"] == 1.0 and obs["left_gripper_0.pos"] == 1.0  # opened
+        assert math.isclose(obs["right_arm_3.pos"], robot._ready_body[9], abs_tol=1e-6)  # at the ready pose
+        assert not math.isclose(ready["right_arm_3.pos"], robot._ready_body[9], abs_tol=1e-6)
+        record_loop(None, action)
+        assert robot._robot.last_stream_command is None  # no command streamed while parked
+
+        record_loop(object(), action)            # next episode: control resumes
+        assert not robot._parked
+        body = _cmd(robot).get("set_body_command")[0]
+        assert body.get("set_reset_reference") == (True,)  # re-referenced from the ready pose
+    finally:
+        robot.disconnect()

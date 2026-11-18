@@ -357,7 +357,6 @@ class Retargeter:
         self.head_pivot = j["head_base"].xyz + j["head_0"].xyz
         self.gaze_side = "left"
         self.gaze_point = np.full(3, np.nan)  # looked-at point (measured, torso_5)
-
     def toggle_gaze(self) -> str:
         """Switch the hand the head looks at (gaze mode); returns the new side."""
         self.gaze_side = "right" if self.gaze_side == "left" else "left"

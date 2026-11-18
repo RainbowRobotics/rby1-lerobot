@@ -43,6 +43,7 @@ from .constants import (  # noqa: F401  (ready poses are re-exported for callers
     TOTAL_BODY_DOF,
     WB_ARM_TARGET_GAINS,
     WB_JOINT_LIMITS,
+    WB_NULL_DOF,
     WB_NULLSPACE_WEIGHT,
     WB_STIFFNESS,
     WB_TORQUE_LIMIT,
@@ -107,6 +108,17 @@ class Rby1Config(RobotConfig):
     # when the robot is already in a safe position).
     move_to_ready_on_connect: bool = True
 
+    # lerobot-record: when an episode ends and the reset phase starts, open the
+    # grippers, move to the ready pose once (the same blocking joint-position
+    # motion as on connect, 5 s) and leave the robot idle — control manager
+    # enabled, no command streamed, actions ignored — until the next episode
+    # starts recording. The mobile base stops and does not drive back. The
+    # motion is a straight line in joint space: retract the arms before ending
+    # an episode. record_reset_gripper_wait (s) is the pause between opening
+    # the grippers and moving.
+    ready_on_record_reset: bool = False
+    record_reset_gripper_wait: float = 0.5
+
     # Override the version's ready pose (degrees): 20 body joints [torso 6 |
     # right arm 7 | left arm 7] and 2 head joints. None keeps the default.
     # The whole-body VR teleoperator is tuned for its own ready pose, e.g.
@@ -125,12 +137,14 @@ class Rby1Config(RobotConfig):
     #          a rotation vector in radians), executed via the onboard
     #          Cartesian impedance solver. Produced e.g. by the rby1_vr
     #          teleoperator.
-    # "wholebody": the three EE poses plus per-tick arm nullspace joint
-    #          targets (<arm>_<i>.null, radians) and, with use_head, the head
-    #          joints (head_0/1.pos), executed by ONE Cartesian impedance
-    #          solver over torso + both arms. Requires use_torso,
-    #          use_right_arm and use_left_arm. Produced by the
-    #          rby1_vr_wholebody teleoperator.
+    # "wholebody": the three EE poses plus per-tick nullspace joint targets
+    #          for the shoulder joints (<arm>_0..2.null, radians) and, with
+    #          use_head, the head joints (head_0/1.pos), executed by ONE
+    #          Cartesian impedance solver over torso + both arms. Requires
+    #          use_torso, use_right_arm and use_left_arm. Produced by the
+    #          rby1_vr_wholebody teleoperator. The observation is joint
+    #          positions only (no EE poses), so with head, grippers and base
+    #          the action is 31-D and the state 24-D.
     action_mode: str = "joint"
 
     # Whole-body mode only: include the head joints (head_0.pos, head_1.pos)
@@ -147,6 +161,13 @@ class Rby1Config(RobotConfig):
 
     # Enable physical Dynamixel gripper (set False for simulation / gripper-less setups)
     use_gripper: bool = True
+
+    # How far the grippers open, as a fraction of the mechanical range found by
+    # homing (1.0 = fully open, 0.5 = half). A gripper value of 1.0 (open) in
+    # the observation / action then means this limited opening, so keep it the
+    # same between recording and inference. The homing sweep on connect still
+    # opens the grippers fully once to measure the range.
+    gripper_max_open: float = 1.0
 
     # Enable the omnidirectional mobile base. When True, send_action consumes
     # the base velocity action keys (x.vel, y.vel, theta.vel) and forwards them
@@ -316,8 +337,9 @@ class Rby1Config(RobotConfig):
     wb_joint_limits: JointLimits = field(default_factory=lambda: dict(WB_JOINT_LIMITS))
     wb_torso_target_gains: Tuple[float, float, float, float] = WB_TORSO_TARGET_GAINS
     wb_arm_target_gains: Tuple[float, float, float, float] = WB_ARM_TARGET_GAINS
-    # Weight of the per-arm nullspace joint targets from the action (the torso
-    # gets weight 0). Stiffness / damping are the SDK's k_p / k_d.
+    # Weight of the arm_0..2 nullspace joint targets from the action, per arm
+    # (the torso and arm_3..6 get weight 0). Stiffness / damping are the SDK's
+    # k_p / k_d.
     wb_nullspace_weight: List[float] = field(default_factory=lambda: list(WB_NULLSPACE_WEIGHT))
     wb_nullspace_stiffness: float = 0.2
     wb_nullspace_damping: float = 0.2
@@ -376,6 +398,14 @@ class Rby1Config(RobotConfig):
                 'Rby1Config.action_mode="wholebody" commands torso and both arms together: '
                 "set use_torso=True, use_right_arm=True and use_left_arm=True."
             )
+        if self.record_reset_gripper_wait < 0:
+            raise ValueError(
+                f"Rby1Config.record_reset_gripper_wait must be >= 0, got {self.record_reset_gripper_wait}."
+            )
+        if not 0.0 < self.gripper_max_open <= 1.0:
+            raise ValueError(
+                f"Rby1Config.gripper_max_open must be in (0, 1], got {self.gripper_max_open}."
+            )
         if self.use_head and self.action_mode != "wholebody":
             raise ValueError('Rby1Config.use_head is only supported with action_mode="wholebody".')
         for name in ("mobile_base_linear_acceleration_limit", "mobile_base_angular_acceleration_limit",
@@ -426,7 +456,7 @@ class Rby1Config(RobotConfig):
             ("ee_nullspace_weight", ARM_DOF),
             ("wb_stiffness", TOTAL_BODY_DOF),
             ("wb_torque_limit", TOTAL_BODY_DOF),
-            ("wb_nullspace_weight", ARM_DOF),
+            ("wb_nullspace_weight", WB_NULL_DOF),
         ):
             if len(getattr(self, name)) != expected:
                 raise ValueError(

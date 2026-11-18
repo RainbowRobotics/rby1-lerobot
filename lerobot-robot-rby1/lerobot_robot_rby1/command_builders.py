@@ -19,11 +19,13 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from .constants import (
+    ARM_DOF,
     EE_SUFFIXES,
     LEFT_ARM_NAMES,
     POS_SUFFIX,
     RIGHT_ARM_NAMES,
     TORSO_NAMES,
+    WB_NULL_DOF,
 )
 
 # Joint commands keep holding for this long (seconds) if the stream stalls.
@@ -193,8 +195,9 @@ def build_wholebody_command(
     The torso (``link_torso_5``) and both ``link_<side>_arm_6`` poses are
     targets of the same solver, so the torso and the arms are resolved
     together. ``null_body`` is the 20-DOF nullspace joint target
-    [torso | right arm | left arm]; the torso part gets weight 0 and the arm
-    parts ``cfg.wb_nullspace_weight``.
+    [torso | right arm | left arm]; only the first ``WB_NULL_DOF`` joints of
+    each arm are weighted (``cfg.wb_nullspace_weight``), the torso and the
+    remaining arm joints get weight 0 (their values in ``null_body`` are unused).
     """
     dt = cfg.ee_action_period if action_period is None else action_period
     builder = (
@@ -214,7 +217,8 @@ def build_wholebody_command(
     builder.add_target("base", "link_torso_5", targets.torso, *cfg.wb_torso_target_gains)
     builder.add_target("base", "link_right_arm_6", targets.right_arm, *cfg.wb_arm_target_gains)
     builder.add_target("base", "link_left_arm_6", targets.left_arm, *cfg.wb_arm_target_gains)
-    arm_w = np.asarray(cfg.wb_nullspace_weight, dtype=np.float64)
+    arm_w = np.zeros(ARM_DOF)
+    arm_w[:WB_NULL_DOF] = cfg.wb_nullspace_weight
     weight = np.concatenate([np.zeros(len(TORSO_NAMES)), arm_w, arm_w])
     builder.set_nullspace_joint_target(
         np.asarray(null_body, dtype=np.float64),

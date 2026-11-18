@@ -75,3 +75,24 @@ def test_gripper_read_failure_keeps_last_position(monkeypatch) -> None:
         np.testing.assert_array_equal(robot._gripper.get_positions(), good)
     finally:
         robot.disconnect()
+
+
+def test_gripper_max_open_limits_the_open_position() -> None:
+    """max_open=0.5: "open" is half the homed range (the fake homes to 0.0 .. 1.2 rad)."""
+    robot = _robot(move_to_ready_on_connect=False, gripper_max_open=0.5, cameras={})
+    robot.connect()
+    try:
+        bus = robot._gripper._bus
+        assert np.allclose(robot._gripper._open_rad, 0.6) and np.allclose(robot._gripper._close_rad, 1.2)
+        assert np.allclose(list(bus._enc.values()), 0.6)  # moved off the mechanical limit after homing
+        obs = robot.get_observation()
+        assert obs["right_gripper_0.pos"] == 1.0  # dataset convention: 1.0 = open
+        action = {k: float(v) for k, v in obs.items() if k in robot.action_features}
+        action["left_gripper_0.pos"] = 0.0
+        robot.send_action(action)
+        assert np.isclose(bus._enc[1], 1.2) and np.isclose(bus._enc[0], 0.6)
+    finally:
+        robot.disconnect()
+
+    with pytest.raises(ValueError):
+        _robot(gripper_max_open=0.0)

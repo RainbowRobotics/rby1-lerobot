@@ -29,10 +29,10 @@ vector in radians — the LeRobot EE convention) executed via the onboard
 Cartesian impedance solver.  This is the mode produced by the
 ``rby1_vr`` teleoperator.
 
-``action_mode="wholebody"``: the three EE poses plus per-tick arm nullspace
-joint targets (``<arm>_<i>.null``) and, with ``use_head``, the head joints
-(``head_0/1.pos``), executed by a single Cartesian impedance solver over the
-torso and both arms. This is the mode produced by the ``rby1_vr_wholebody``
+``action_mode="wholebody"``: the three EE poses plus per-tick nullspace joint
+targets for the shoulder joints (``<arm>_0..2.null``) and, with ``use_head``,
+the head joints (``head_0/1.pos``), executed by a single Cartesian impedance
+solver over the torso and both arms. The observation is joint positions only. This is the mode produced by the ``rby1_vr_wholebody``
 teleoperator (Meta Quest body + hand tracking).
 """
 
@@ -62,11 +62,13 @@ from .config_rby1 import (
     ready_pose_for_version,
 )
 from .constants import (
+    ALL_JOINT_NAMES,
     BASE_VEL_NAMES,
     HEAD_NAMES,
     LEFT_ARM_NAMES,
     LEFT_EE_NAMES,
     LEFT_NULL_NAMES,
+    NULL_SUFFIX,
     POS_SUFFIX,
     RIGHT_ARM_NAMES,
     RIGHT_EE_NAMES,
@@ -78,6 +80,7 @@ from .constants import (
 # Action modes driven by the Cartesian impedance solver (EE observations, FK).
 _CARTESIAN_MODES = ("ee", "wholebody")
 from .gripper import Rby1Gripper
+from .record_phase import RECORD, RESET, record_phase
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +159,11 @@ class Rby1(Robot):
         self._clock = time.monotonic
         # The action send_action() last applied (as returned), for hold().
         self._last_sent: dict[str, float] | None = None
+        # lerobot-record phase seen by the last send_action(), and whether the
+        # robot is parked at the ready pose for the reset phase
+        # (ready_on_record_reset).
+        self._record_phase: str | None = None
+        self._parked: bool = False
         self._null_right: np.ndarray = np.deg2rad(config.ee_null_right_arm_deg)
         self._null_left: np.ndarray = np.deg2rad(config.ee_null_left_arm_deg)
         # Profile: reference loaded from profile_in, and functions that undo
@@ -266,7 +274,10 @@ class Rby1(Robot):
     def _ee_obs_ft(self) -> dict[str, type]:
         # In EE mode the observation additionally exposes the end-effector
         # pose of each enabled group (computed via forward kinematics).
-        if self._config.action_mode not in _CARTESIAN_MODES:
+        # Whole-body mode keeps the state to the joint positions: the EE poses
+        # are their forward kinematics (redundant), and without them the state
+        # stays within 32 dimensions (20 body + 2 head + 2 grippers = 24).
+        if self._config.action_mode != "ee":
             return {}
         names: list[str] = []
         if self._config.use_torso:
@@ -372,13 +383,33 @@ class Rby1(Robot):
                     f"Failed to connect to RB-Y1 at {self._config.address}."
                 )
 
-            # 2. Power and servo on.
-            if not self._robot.is_power_on(".*"):
-                if not self._robot.power_on(".*"):
-                    raise RuntimeError("Failed to power on RB-Y1 actuators.")
+            # 2. Power and servo on — skipped when already on.
+            #    Only the rails that are off are powered on: power_on(".*")
+            #    re-commands every rail, and a power-state change while the
+            #    control manager is Enabled (e.g. left enabled by a previous
+            #    session) raises a MajorFault that cuts the 48 V / 24 V rails.
+            power_names = [p.name for p in self._robot.get_robot_info().power_infos]
+            off_rails = [n for n in power_names if not self._robot.is_power_on(f"^{n}$")]
+            if off_rails:
+                cm_state = self._robot.get_control_manager_state()
+                if cm_state.state == rby.ControlManagerState.State.Enabled:
+                    logger.warning(
+                        f"Control manager is Enabled while {off_rails} are off; "
+                        "disabling it before power on."
+                    )
+                    if not self._robot.disable_control_manager():
+                        raise RuntimeError("Failed to disable the RB-Y1 control manager before power on.")
+                logger.info(f"Powering on RB-Y1 rails {off_rails} ...")
+                if not self._robot.power_on("|".join(f"^{n}$" for n in off_rails)):
+                    raise RuntimeError(f"Failed to power on RB-Y1 rails {off_rails}.")
+            else:
+                logger.info("RB-Y1 power already on; skipping power_on.")
             if not self._robot.is_servo_on(".*"):
+                logger.info("Servo on RB-Y1 joints ...")
                 if not self._robot.servo_on(".*"):
                     raise RuntimeError("Failed to servo on RB-Y1 motors.")
+            else:
+                logger.info("RB-Y1 servos already on; skipping servo_on.")
 
             # 3. Clear faults and enable the control manager.
             cm_state = self._robot.get_control_manager_state()
@@ -441,7 +472,7 @@ class Rby1(Robot):
                 self._robot.set_tool_flange_output_voltage("right", 12)
                 self._robot.set_tool_flange_output_voltage("left", 12)
                 time.sleep(0.5)  # allow the capacitors to stabilise
-                self._gripper = Rby1Gripper()
+                self._gripper = Rby1Gripper(max_open=self._config.gripper_max_open)
                 self._gripper.connect()
             else:
                 logger.info(
@@ -472,6 +503,8 @@ class Rby1(Robot):
         logger.info(f"{self} disconnected.")
 
     def _teardown(self) -> None:
+        self._record_phase = None
+        self._parked = False
         """Release everything connect() set up; each step is best-effort so one
         failure does not leave the control manager enabled or the flanges on."""
 
@@ -559,6 +592,7 @@ class Rby1(Robot):
         try:
             ctrl_state = self._robot.get_control_manager_state().control_state
             if ctrl_state != rby.ControlManagerState.ControlState.Idle:
+                logger.info(f"Ready pose: control state is {ctrl_state}; cancelling the running control.")
                 self._robot.cancel_control()
                 time.sleep(1.0)
 
@@ -577,6 +611,7 @@ class Rby1(Robot):
             cbc = cb.build_ready_pose_command(
                 rby, target_body, target_head, minimum_time, hold_time
             )
+            logger.info(f"Ready pose: sending the joint-position command ({minimum_time:.1f} s).")
             self._robot.send_command(rby.RobotCommandBuilder().set_command(cbc)).get()
             logger.info("Ready pose reached.")
 
@@ -708,7 +743,8 @@ class Rby1(Robot):
             self._read_group(obs, state.torque, model, ".torque")
 
         # End-effector poses (EE mode): forward kinematics of the enabled groups.
-        self._read_ee_observation(obs, state)
+        if self._ee_obs_ft:
+            obs.update(self._ee_poses(state))
 
         # Grippers. Dataset convention is 1.0 = open, 0.0 = closed; Rby1Gripper
         # reports 0 = open, 1 = closed, so both sides are flipped here.
@@ -746,15 +782,17 @@ class Rby1(Robot):
             for i, name in enumerate(LEFT_ARM_NAMES):
                 obs[f"{name}{suffix}"] = float(left[i])
 
-    def _read_ee_observation(self, obs: dict[str, Any], state: Any) -> None:
-        """Add the end-effector pose of each enabled group to ``obs``.
+    def _ee_poses(self, state: Any) -> dict[str, float]:
+        """End-effector pose of each enabled group, keyed like the EE action.
 
-        EE mode only: runs forward kinematics on the measured joint positions
-        and encodes each pose as ``<group>_ee.{x,y,z,wx,wy,wz}`` (the same
-        rotvec convention as the EE action).
+        Cartesian modes only: runs forward kinematics on the measured joint
+        positions and encodes each pose as ``<group>_ee.{x,y,z,wx,wy,wz}`` (the
+        same rotvec convention as the EE action). EE mode exposes these in the
+        observation; whole-body mode only uses them to hold the measured pose.
         """
+        obs: dict[str, float] = {}
         if self._config.action_mode not in _CARTESIAN_MODES or self._fk_state is None:
-            return
+            return obs
         self._fk_state.set_q(np.asarray(state.position, dtype=np.float64).copy())
         self._dyn_robot.compute_forward_kinematics(self._fk_state)
         if self._config.use_torso:
@@ -772,6 +810,7 @@ class Rby1(Robot):
                 self._fk_state, _IDX_BASE, _IDX_LEFT_ARM_6
             )
             obs.update(cb.action_from_pose(left_T, "left_ee"))
+        return obs
 
     # ------------------------------------------------------------------ #
     #  Action                                                              #
@@ -785,6 +824,21 @@ class Rby1(Robot):
             import rby1_sdk as rby
         except ImportError as e:
             raise ImportError("rby1_sdk is required.") from e
+
+        if self._config.ready_on_record_reset:
+            phase = record_phase()
+            if phase != self._record_phase:
+                logger.info(f"lerobot-record phase: {self._record_phase} -> {phase}.")
+            if phase == RESET and self._record_phase == RECORD:
+                self._park_for_record_reset()
+            elif phase != RESET and self._parked:
+                logger.info("Recording started: resuming control from the ready pose.")
+                self._parked = False
+            self._record_phase = phase
+            if self._parked:
+                # Parked: the control manager stays enabled and idle; actions
+                # are dropped until the next episode starts recording.
+                return {key: float(action[key]) for key in self.action_features if key in action}
 
         try:
             sent = self._dispatch_action(rby, action)
@@ -806,6 +860,28 @@ class Rby1(Robot):
         self._last_sent = dict(sent)
         return sent
 
+    def _park_for_record_reset(self) -> None:
+        """An episode just ended (lerobot-record): open the grippers, move to
+        the ready pose once and leave the robot idle.
+
+        Same sequence and end state as after :meth:`connect`: the motion is one
+        blocking joint-position command; afterwards no command is streamed, so
+        the control manager is enabled and idle until the next episode. A
+        failure is logged, not raised — raising here would discard the episode
+        that was just recorded (it is saved after the reset phase).
+        """
+        logger.info("Episode ended: opening the grippers and moving to the ready pose.")
+        self._parked = True
+        try:
+            if self._config.use_gripper and self._gripper is not None:
+                self._gripper.set_positions(np.zeros(2))  # hardware convention: 0 = open
+                time.sleep(self._config.record_reset_gripper_wait)
+            self.move_to_ready_pose()
+            logger.info("Parked at the ready pose until the next episode starts recording.")
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Return to the ready pose failed: {exc}. The robot stays where it is "
+                         "until the next episode starts recording.")
+
     def hold(self) -> None:
         """Keep the last commanded pose and stop the base (lerobot command hold).
 
@@ -822,12 +898,14 @@ class Rby1(Robot):
             # the joint .pos keys and, in EE mode, the FK end-effector poses
             # under the same keys as the actions.
             obs = self.get_observation()
+            if self._config.action_mode == "wholebody":
+                # The whole-body observation has no EE poses: compute them here.
+                obs.update(self._ee_poses(self._robot.get_state()))
             target = {k: float(obs[k]) for k in self.action_features if k in obs}
             if self._config.action_mode == "wholebody":
-                # Nullspace targets = the measured arm joints (hold the elbow).
-                for null_key, joint in zip(
-                    RIGHT_NULL_NAMES + LEFT_NULL_NAMES, RIGHT_ARM_NAMES + LEFT_ARM_NAMES
-                ):
+                # Nullspace targets = the measured shoulder joints (hold the elbow).
+                for null_key in RIGHT_NULL_NAMES + LEFT_NULL_NAMES:
+                    joint = null_key.removesuffix(NULL_SUFFIX)
                     target[null_key] = float(obs[f"{joint}{POS_SUFFIX}"])
         else:
             target = dict(self._last_sent)
@@ -947,8 +1025,8 @@ class Rby1(Robot):
         """Execute a whole-body action (``action_mode="wholebody"``).
 
         Torso and both arm poses go to ONE Cartesian impedance solver, with the
-        action's arm joint targets as its nullspace target (the teleoperator's
-        IK solution, which places the elbow). The head joints, when enabled,
+        action's shoulder joint targets (arm_0..2) as its nullspace target (from
+        the teleoperator's IK solution; they place the elbow). The head joints, when enabled,
         get a joint-position command clipped to the joint limits. Returns the
         commanded values keyed like ``action_features`` (head after clipping).
         """
@@ -958,11 +1036,11 @@ class Rby1(Robot):
             right_arm=cb.pose_from_action(action, "right_ee"),
             left_arm=cb.pose_from_action(action, "left_ee"),
         )
-        null_body = np.concatenate([
-            self._ready_body[: len(TORSO_NAMES)],  # weight 0 — value unused
-            [float(action[k]) for k in RIGHT_NULL_NAMES],
-            [float(action[k]) for k in LEFT_NULL_NAMES],
-        ])
+        # 20-DOF nullspace target; only the joints named in the action are
+        # weighted, the rest (torso, arm_3..6) have weight 0 — value unused.
+        null_body = np.array(self._ready_body, dtype=np.float64)
+        for key in RIGHT_NULL_NAMES + LEFT_NULL_NAMES:
+            null_body[ALL_JOINT_NAMES.index(key.removesuffix(NULL_SUFFIX))] = float(action[key])
         if self._last_ee_targets is None:
             self._ee_period.reset()
         period = self._ee_period.update(self._clock())

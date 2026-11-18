@@ -52,6 +52,15 @@ class Rby1VRWholebodyConfig(TeleoperatorConfig):
     # Without a TTY the first latch happens automatically after
     # auto_latch_s seconds of tracked body (None = wait forever).
     auto_latch_s: float | None = None
+    # lerobot-record: hold during the reset phase between episodes (base stops,
+    # arms / torso keep their target; Enter still latches) and latch
+    # automatically on the first tick of the next episode, so control starts
+    # together with the recording. Stand in the robot's posture when the
+    # episode starts: the hands are mapped absolutely, and a difference is
+    # closed within bleed_time. If the body is not tracked at that moment the
+    # loop waits (nothing is recorded) until it is. Pair with the follower's
+    # ready_on_record_reset, which parks the robot at the ready pose meanwhile.
+    record_auto_latch: bool = True
     # Period (s) of the status log line; 0 disables it.
     status_log_period_s: float = 2.0
 

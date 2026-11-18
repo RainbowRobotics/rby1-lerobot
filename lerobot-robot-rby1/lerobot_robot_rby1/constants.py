@@ -61,9 +61,15 @@ ALL_JOINT_NAMES: list[str] = TORSO_NAMES + RIGHT_ARM_NAMES + LEFT_ARM_NAMES
 # Whole-body action keys (``action_mode="wholebody"``), on top of the three
 # EE poses: per-tick arm nullspace joint targets (radians) — the teleoperator's
 # IK solution, which sets the elbow (swivel) — and the head joint positions.
+# Only the three shoulder joints (arm_0..2) carry a nullspace target: with the
+# hand pose fixed, the arm has one free DOF (the elbow swivel) and the shoulder
+# joints pin it; arm_3 follows from the hand pose and the wrist from both. This
+# keeps the whole-body action within 32 dimensions (18 EE + 6 null + 2 head +
+# 2 grippers + 3 base = 31).
 NULL_SUFFIX = ".null"
-RIGHT_NULL_NAMES: list[str] = [f"{n}{NULL_SUFFIX}" for n in RIGHT_ARM_NAMES]
-LEFT_NULL_NAMES: list[str] = [f"{n}{NULL_SUFFIX}" for n in LEFT_ARM_NAMES]
+WB_NULL_DOF = 3
+RIGHT_NULL_NAMES: list[str] = [f"{n}{NULL_SUFFIX}" for n in RIGHT_ARM_NAMES[:WB_NULL_DOF]]
+LEFT_NULL_NAMES: list[str] = [f"{n}{NULL_SUFFIX}" for n in LEFT_ARM_NAMES[:WB_NULL_DOF]]
 HEAD_DOF = 2
 HEAD_NAMES: list[str] = [f"head_{i}" for i in range(HEAD_DOF)]
 
@@ -107,7 +113,8 @@ WB_JOINT_LIMITS: JointLimits = {
     "torso_2": (math.radians(-150.0), -0.2),
 }
 # Arm nullspace weight: shoulder (swivel) and elbow strong, wrist weak.
-WB_NULLSPACE_WEIGHT = [2.0, 2.0, 2.0, 2.0, 0.5, 0.5, 0.5]
+# Weight of the arm_0..2 nullspace targets (the other arm joints get 0).
+WB_NULLSPACE_WEIGHT = [2.0] * WB_NULL_DOF
 
 # ---------------------------------------------------------------------------
 # Dynamixel gripper bus (two motors on /dev/rby1_gripper).

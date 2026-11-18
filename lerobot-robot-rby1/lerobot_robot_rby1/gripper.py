@@ -4,6 +4,8 @@
 (ID 0 = right hand, ID 1 = left hand).  Positions are normalised so that
 ``0.0`` is fully open and ``1.0`` is fully closed; the physical encoder range
 is discovered automatically by the homing sweep in :meth:`Rby1Gripper.connect`.
+``max_open`` (0..1] narrows the open end: ``0.0`` then means that fraction of
+the mechanical opening, measured from the closed limit.
 """
 
 from __future__ import annotations
@@ -30,9 +32,17 @@ class Rby1Gripper:
 
     Motor ID 0 drives the right-hand gripper and ID 1 the left-hand gripper.
     Positions are normalised: ``0.0`` = fully open, ``1.0`` = fully closed.
+
+    ``max_open`` limits how far the grippers open, as a fraction of the
+    mechanical range found by homing (1.0 = the full range, 0.5 = half). The
+    homing sweep itself still travels the full range once — that is how the
+    range is measured — and then the grippers move to the limited open position.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_open: float = 1.0) -> None:
+        if not 0.0 < max_open <= 1.0:
+            raise ValueError(f"Rby1Gripper max_open must be in (0, 1], got {max_open}.")
+        self._max_open = float(max_open)
         self._bus = None
         # Encoder values (radians) discovered during homing.
         self._open_rad: np.ndarray = np.zeros(2)
@@ -158,9 +168,13 @@ class Rby1Gripper:
         # Both motors read low encoder = OPEN, high encoder = CLOSED (verified
         # on hardware; encoder direction is per-robot — cf. GRIPPER_DIRECTION
         # in SDK example 35), so no per-side mirroring is applied.
-        self._open_rad = min_q.copy()
+        # max_open < 1 moves the open end towards the closed limit.
         self._close_rad = max_q.copy()
+        self._open_rad = max_q - self._max_open * (max_q - min_q)
         self._homed = True
+        if self._max_open < 1.0:
+            # The sweep ends at the mechanical open limit: go to the limited one.
+            self.set_positions(np.zeros(2))
 
         # Sanity check: warn if a side did not travel a meaningful distance.
         for i, side in enumerate(("right", "left")):
@@ -176,6 +190,8 @@ class Rby1Gripper:
                     f"open_rad={self._open_rad[i]:.4f}, "
                     f"close_rad={self._close_rad[i]:.4f}, "
                     f"span={span:.4f} rad"
+                    + (f" (limited to {self._max_open:.0%} of the mechanical range)"
+                       if self._max_open < 1.0 else "")
                 )
 
     # ------------------------------------------------------------------ #

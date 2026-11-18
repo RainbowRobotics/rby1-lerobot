@@ -159,18 +159,33 @@ lerobot-record \
 
 ## Record Data without uploading
 
+Whole-body VR teleoperation, local dataset only. Between episodes the robot opens its
+grippers, returns to the ready pose and waits (`ready_on_record_reset`); control starts
+again together with the next episode.
+
 ```bash
 lerobot-record \
   --robot.type=rby1 \
   --robot.address=192.168.30.1:50051 \
-  --teleop.type=rby1_leader_arm \
-  --dataset.repo_id=test_dataset \
-  --dataset.root=./datasets \
+  --robot.action_mode=wholebody \
+  --robot.use_torso=true --robot.use_head=true --robot.use_mobile_base=true \
+  --robot.mobile_base_max_linear_velocity=0.8 --robot.mobile_base_max_angular_velocity=1.5 \
+  --robot.mobile_base_linear_acceleration_limit=2.0 --robot.mobile_base_angular_acceleration_limit=4.0 \
+  --robot.ready_body_deg='[0,45,-80,45,0,0, 0,-15,0,-120,0,30,0, 0,15,0,-120,0,30,0]' \
+  --robot.ready_head_deg='[0,30]' \
+  --robot.gripper_max_open=0.5 \
+  --robot.ready_on_record_reset=true \
+  --teleop.type=rby1_vr_wholebody \
+  --teleop.robot_address=192.168.30.1:50051 \
+  --teleop.headset_ip=192.168.0.111 \
+  --dataset.repo_id=local/wb_test \
+  --dataset.root=/home/nvidia/datasets/wb_1118_test \
   --dataset.push_to_hub=false \
-  --dataset.single_task="<task description>" \
+  --dataset.single_task="pick up the bobin and put in the rag" \
   --dataset.num_episodes=50 \
+  --dataset.episode_time_s=3000 \
+  --dataset.reset_time_s=3000 \
   --dataset.fps=30
-
 ```
 
 ## Whole-body VR Teleoperation (Meta Quest body + hand tracking)
@@ -185,12 +200,16 @@ the teleoperator's analytic IK (that is what places the elbow).
 | Operator | Robot |
 |----------|-------|
 | Palm position / hand orientation | `link_<side>_arm_6` pose (elbow flexion mapped 1:1 to the robot elbow, `hand_map="elbow"`) |
-| Elbow direction | Arm nullspace joint targets (`<side>_arm_<i>.null`) |
+| Elbow direction | Nullspace targets for the three shoulder joints (`<side>_arm_0..2.null`); they pin the elbow swivel |
 | Upper-body tilt / twist | `link_torso_5` orientation (clamped) |
 | Walking / turning (pelvis) | Base velocity, closed loop on the base odometry. The base moves `base_scale` (0.6) × your displacement and turns `base_scale_yaw` (0.6) × your turn; the rest of the turn goes to the torso yaw |
 | — (`head_mode="gaze"`, default) | `head_0` / `head_1` look at a robot hand tip: the left one after each latch, **p** switches hands |
 | Gaze (HMD) (`head_mode="hmd"`) | `head_0` / `head_1` |
 | Thumb–index pinch | Gripper close |
+
+With head, grippers and base enabled the action is **31-D** (18 EE pose + 6 nullspace
++ 2 head + 2 gripper + 3 base velocity) and the state **24-D** (20 body joints + 2 head
++ 2 gripper; no EE poses), so both fit policies limited to 32 dimensions (PI0.5).
 
 The bundled arm model is RB-Y1 **M v1.3**; `connect()` compares it with the robot's
 FK and fails on a mismatch (`--teleop.ignore_model_check=true` to override).
@@ -217,6 +236,18 @@ lerobot-teleoperate \
    their target); **Enter** re-latches and resumes; **p** switches the hand the head
    looks at. The torso yaw clamps at ±120°, so after turning more than about ±300°
    since the latch (with `base_scale_yaw=0.6`), press **Enter** to re-latch.
+
+With `lerobot-record` and `--robot.ready_on_record_reset=true`, the end of an episode
+(the start of the reset phase) opens the grippers, moves the robot to the ready pose
+once — the same blocking joint-position motion as on connect, about 5 s — and leaves it
+idle (control manager enabled, no command streamed, teleoperation ignored) until the
+next episode. The base stops and does not drive back. The motion is a straight line in
+joint space, so retract the arms before ending an episode. When the next episode starts
+recording, the teleoperator latches by itself on the first frame
+(`--teleop.record_auto_latch`, default `true`): stand in the robot's posture **before**
+pressing → / `n`, because the hands are mapped absolutely and any difference is closed
+within 0.5 s. If the body is not tracked at that moment, the loop waits (nothing is
+recorded) until it is.
 
 `use_head`, `use_gripper` and `use_mobile_base` must match between `--robot.*` and
 `--teleop.*` (the teleoperator defaults all three to `true`). The same flags work
@@ -254,6 +285,8 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `use_left_arm` | `True` | Include the left arm in observation / action |
 | `use_torso` | `False` | Include the torso in observation / action (commanded in both action modes) |
 | `use_gripper` | `True` | Enable RB-Y1 grippers |
+| `ready_on_record_reset` / `record_reset_gripper_wait` | `False` / `0.5` | `lerobot-record`: at the end of each episode open the grippers, wait this long (s), move to the ready pose once and stay idle until the next episode starts recording |
+| `gripper_max_open` | `1.0` | How far the grippers open, as a fraction of the mechanical range (`0.5` = half). Gripper value 1.0 then means this limited opening; homing still opens fully once |
 | `use_mobile_base` | `False` | Enable base control (Model M/A) |
 | `use_velocity` | `False` | Add `.vel` channels to observations |
 | `use_torque` | `False` | Add `.torque` channels to observations |
@@ -302,7 +335,7 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `wb_damping_ratio` | `None` | Joint damping ratio; `None` keeps the controller default |
 | `wb_torso_target_gains` / `wb_arm_target_gains` | `(1.0, π/2, 10, 20π)` / `(2.0, 2π, 20, 80π)` | Target limits: linear / angular velocity, linear / angular acceleration |
 | `wb_joint_limits` | `torso_1` `[-30°, 90°]`, `torso_2` `[-150°, -0.2 rad]` | Extra joint limits (rad) given to the solver |
-| `wb_nullspace_weight` / `wb_nullspace_stiffness` / `wb_nullspace_damping` | `[2,2,2,2,0.5,0.5,0.5]` / `0.2` / `0.2` | Weight of the per-arm nullspace targets from the action (torso weight 0) |
+| `wb_nullspace_weight` / `wb_nullspace_stiffness` / `wb_nullspace_damping` | `[2,2,2]` / `0.2` / `0.2` | Weight of the `arm_0..2` nullspace targets from the action, per arm (torso and `arm_3..6` weight 0) |
 | `wb_hold_time` | `0.5` | Body and head commands keep holding this long (s) if the stream stalls |
 
 **Mobile base** (`use_mobile_base=True`) — SE2Velocity commands
@@ -360,8 +393,8 @@ Keys follow the LeRobot naming convention:
 | Mobile base velocity | `x.vel`, `y.vel`, `theta.vel` | action only |
 | Joint velocity (`use_velocity`) | `<joint>.vel` | `right_arm_0.vel` |
 | Joint torque (`use_torque`) | `<joint>.torque` | `right_arm_0.torque` |
-| End-effector pose (`action_mode="ee"` / `"wholebody"`) | `<group>_ee.{x,y,z,wx,wy,wz}` | `right_ee.x` |
-| Arm nullspace target (`"wholebody"`) | `<arm joint>.null` | `right_arm_3.null` (action only) |
+| End-effector pose (`action_mode="ee"` / `"wholebody"`) | `<group>_ee.{x,y,z,wx,wy,wz}` | `right_ee.x` (`"wholebody"`: action only) |
+| Arm nullspace target (`"wholebody"`) | `<side>_arm_0..2.null` | `right_arm_2.null` (action only) |
 | Head position (`use_head`) | `head_<i>.pos` | `head_1.pos` |
 
 > [!WARNING]

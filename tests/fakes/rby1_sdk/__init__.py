@@ -15,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -239,6 +240,7 @@ class _RobotInfo:
         self.sdk_version = __version__
         self.version = "0.0.0+fake-core"
         self.robot_version = version
+        self.power_infos = [SimpleNamespace(name=n) for n in ("5v", "12v", "24v", "48v")]
 
 
 class _RobotState:

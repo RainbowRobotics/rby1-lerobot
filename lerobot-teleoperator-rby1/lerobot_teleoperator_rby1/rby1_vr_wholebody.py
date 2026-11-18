@@ -26,6 +26,11 @@ Keys: **Enter** latch / re-latch and resume (the head starts on the left
 hand), **Space** hold (base stops, arms and torso keep their last target),
 **p** switch the hand the head looks at.
 
+With ``lerobot-record`` (``record_auto_latch``) the teleoperator holds during
+the reset phase between episodes and latches by itself on the first tick of the
+next episode, so control starts together with the recording. The follower's
+``ready_on_record_reset`` parks the robot at the ready pose in between.
+
 Following the LeRobot convention this class never commands the robot: the
 follower ``lerobot_robot_rby1.Rby1`` with ``action_mode="wholebody"``
 executes the actions. Ported from the semi-humanoid teleoperation
@@ -36,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import select
 import sys
 import threading
@@ -48,6 +54,8 @@ import numpy as np
 from lerobot.teleoperators.teleoperator import Teleoperator
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
+from lerobot_robot_rby1.record_phase import RECORD, RESET, record_phase
+
 from .config_rby1_vr_wholebody import Rby1VRWholebodyConfig
 from .constants import BASE_VEL_NAMES, LEFT_EE_NAMES, POS_SUFFIX, RIGHT_EE_NAMES, TORSO_EE_NAMES
 from .frame_transforms import se3_to_pose_action
@@ -57,44 +65,105 @@ from .wb_stream import SIDES, FilterTaus, Snapshot, StreamReceiver
 
 logger = logging.getLogger(__name__)
 
-ARM_DOF = 7
-RIGHT_NULL_NAMES = [f"right_arm_{i}.null" for i in range(ARM_DOF)]
-LEFT_NULL_NAMES = [f"left_arm_{i}.null" for i in range(ARM_DOF)]
+# Nullspace targets: the three shoulder joints of the IK solution (they pin the
+# elbow swivel). Must match lerobot_robot_rby1.constants.WB_NULL_DOF.
+WB_NULL_DOF = 3
+RIGHT_NULL_NAMES = [f"right_arm_{i}.null" for i in range(WB_NULL_DOF)]
+LEFT_NULL_NAMES = [f"left_arm_{i}.null" for i in range(WB_NULL_DOF)]
 HEAD_POS_NAMES = [f"head_{i}{POS_SUFFIX}" for i in range(2)]
 
 # FK links, in index order for compute_transformation.
 _LINKS = ["base", "link_torso_3", "link_torso_5", "link_right_arm_6", "link_left_arm_6"]
 
 
+# lerobot-record on a display-less (SSH / Wayland) terminal starts its own
+# TerminalKeyListener on the same TTY. Two threads reading one TTY split the
+# bytes between them, so most of our keys ([p], [Enter], [Space]) were lost to
+# the recorder, which ignores them. Instead, the listener's decoded keys are
+# teed to the active _Keyboard, which stops reading the TTY itself.
+_LISTENER_KEY_TO_CHAR = {"enter": "\n", "space": " "}
+_active_keyboard: "_Keyboard | None" = None
+_listener_patched = False
+
+
+def _patch_lerobot_terminal_listener() -> None:
+    global _listener_patched
+    if _listener_patched:
+        return
+    try:
+        from lerobot.utils import keyboard_input as ki
+    except ImportError:
+        return
+    cls = getattr(ki, "TerminalKeyListener", None)
+    if cls is None:
+        return
+    orig_init, orig_start = cls.__init__, cls.start
+
+    def __init__(self, on_key, *args, **kwargs):
+        def tee(name: str) -> None:
+            kb = _active_keyboard
+            if kb is not None:
+                kb.feed(_LISTENER_KEY_TO_CHAR.get(name, name))
+            on_key(name)
+
+        orig_init(self, tee, *args, **kwargs)
+
+    def start(self, *args, **kwargs):
+        kb = _active_keyboard
+        if kb is not None:
+            kb.yield_tty()  # the listener reads the TTY from now on
+        return orig_start(self, *args, **kwargs)
+
+    cls.__init__, cls.start = __init__, start
+    _listener_patched = True
+
+
 class _Keyboard:
-    """Reads single keys from the controlling terminal (cbreak mode) in a thread."""
+    """Reads single keys from the controlling terminal (cbreak mode) in a thread.
+
+    When lerobot's TerminalKeyListener takes over the TTY (lerobot-record
+    without a display), keys arrive through :meth:`feed` instead.
+    """
 
     def __init__(self) -> None:
         self.keys: deque[str] = deque()
         self.enabled = sys.stdin.isatty()
         self._old: Any = None
         self._stop = threading.Event()
+        self._yielded = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
+        global _active_keyboard
         if not self.enabled:
             return
         import termios
         import tty
 
+        _patch_lerobot_terminal_listener()
+        _active_keyboard = self
         fd = sys.stdin.fileno()
         self._old = termios.tcgetattr(fd)
         tty.setcbreak(fd)
         self._thread = threading.Thread(target=self._run, name="rby1-wb-keys", daemon=True)
         self._thread.start()
 
+    def feed(self, ch: str) -> None:
+        self.keys.append(ch)
+
+    def yield_tty(self) -> None:
+        if not self._yielded.is_set():
+            logger.info("Terminal keys are shared with lerobot's key listener.")
+        self._yielded.set()
+
     def _run(self) -> None:
-        while not self._stop.is_set():
+        fd = sys.stdin.fileno()
+        while not self._stop.is_set() and not self._yielded.is_set():
             try:
-                if select.select([sys.stdin], [], [], 0.2)[0]:
-                    ch = sys.stdin.read(1)
-                    if ch:
-                        self.keys.append(ch)
+                if select.select([fd], [], [], 0.05)[0] and not self._yielded.is_set():
+                    data = os.read(fd, 1)
+                    if data:
+                        self.keys.append(data.decode(errors="ignore"))
             except (OSError, ValueError):
                 return
 
@@ -105,6 +174,9 @@ class _Keyboard:
         return out
 
     def stop(self) -> None:
+        global _active_keyboard
+        if _active_keyboard is self:
+            _active_keyboard = None
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
@@ -137,6 +209,7 @@ class Rby1VRWholebody(Teleoperator):
         self._rx: StreamReceiver | None = None
         self._kb: _Keyboard | None = None
         self._state = "IDLE"          # IDLE (not latched) | RUN | HOLD
+        self._last_phase: str | None = None
         self._last_tick: float | None = None
         self._last_status = 0.0
         self._last_targets: Targets | None = None
@@ -203,6 +276,7 @@ class Rby1VRWholebody(Teleoperator):
             raise
 
         self._state = "IDLE"
+        self._last_phase = None
         self._last_tick = None
         self._is_connected = True
         if cfg.profile_out:
@@ -335,11 +409,27 @@ class Rby1VRWholebody(Teleoperator):
         now = time.monotonic()
         snap = self._rx.snapshot
         meas = self._measure()
+        if self._config.record_auto_latch:
+            phase = record_phase()
+            if phase == RESET and self._last_phase == RECORD and self._state == "RUN":
+                self._state = "HOLD"
+                logger.info("Episode ended — HOLD until the next episode starts recording.")
+            elif phase == RECORD and self._last_phase == RESET:
+                # Recording starts now: latch on the robot's current pose so
+                # control starts with the first recorded frame.
+                self._try_latch(snap, meas, now)
+                if self._state != "RUN":
+                    self._state = "IDLE"
+                    self._wait_for_latch(auto=True)  # nothing is recorded meanwhile
+                    now = time.monotonic()
+                    snap = self._rx.snapshot
+                    meas = self._measure()
+            self._last_phase = phase
         for key in self._kb.drain():
             if key == " " and self._state == "RUN":
                 self._state = "HOLD"
                 logger.info("HOLD — base stopped, arms/torso frozen; [Enter] to re-latch.")
-            elif key == "p":
+            elif key in ("p", "P"):
                 if self._config.head_mode == "gaze":
                     logger.info(f"Head gaze -> {self._rt.toggle_gaze()} hand.")
                 else:
@@ -357,10 +447,14 @@ class Rby1VRWholebody(Teleoperator):
         self._log_status(now, snap, tg)
         return self._build_action(tg)
 
-    def _wait_for_latch(self) -> None:
-        """Block until the operator latches (Enter, or auto_latch_s without a TTY)."""
+    def _wait_for_latch(self, auto: bool = False) -> None:
+        """Block until the operator latches (Enter, or auto_latch_s without a TTY).
+
+        ``auto=True`` latches as soon as the body is tracked, without a key.
+        """
         cfg = self._config
         last_print = 0.0
+        last_auto = -math.inf
         tracked_since: float | None = None
         while self._state == "IDLE":
             now = time.monotonic()
@@ -368,16 +462,18 @@ class Rby1VRWholebody(Teleoperator):
             body_ok = snap is not None and snap.body.ok and now - snap.body.stamp < BODY_TIMEOUT
             tracked_since = (tracked_since or now) if body_ok else None
             keys = self._kb.drain()
-            auto = (not self._kb.enabled and cfg.auto_latch_s is not None
-                    and tracked_since is not None and now - tracked_since >= cfg.auto_latch_s)
-            if auto or any(k in ("\n", "\r") for k in keys):
+            timed = (not self._kb.enabled and cfg.auto_latch_s is not None
+                     and tracked_since is not None and now - tracked_since >= cfg.auto_latch_s)
+            auto_due = auto and body_ok and now - last_auto >= 1.0  # retry (e.g. no odometry) once a second
+            if auto_due or timed or any(k in ("\n", "\r") for k in keys):
+                last_auto = now
                 self._try_latch(snap, self._measure(), now)
                 if self._state != "IDLE":
                     return
             if now - last_print >= 2.0:
                 last_print = now
                 stream = "connected" if self._rx.connected else f"connecting to {cfg.headset_ip}:{cfg.headset_port}"
-                logger.info(f"Waiting for [Enter] to latch — headset {stream}, "
+                logger.info(f"Waiting {'for body tracking' if auto else 'for [Enter]'} to latch — headset {stream}, "
                             f"body {'tracked' if body_ok else 'NOT tracked'}.")
             time.sleep(0.05)
 
