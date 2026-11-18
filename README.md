@@ -467,7 +467,7 @@ comments are in [`config_rby1.py`](lerobot-robot-rby1/lerobot_robot_rby1/config_
 | `ee_arm_stiffness` / `ee_arm_torque_limit` / `ee_arm_damping_ratio` | `[80,80,80,60,60,60,60]` / `[40,40,40,30,30,30,30]` / `0.7` | Arm solver joint gains, used for both arms: soft arms for teleoperation in Cartesian space (joint mode has its own, stiffer gains) |
 | `ee_arm_target_gains` | `(3.0, 2π, 150, 80π)` | Arm target limits: linear / angular velocity, linear / angular acceleration |
 | `ee_right_arm_joint_limits` / `ee_left_arm_joint_limits` | elbow `(-2.6, -0.5)` | Extra joint limits (rad) given to the arm solvers |
-| `ee_null_right_arm_deg` / `ee_null_left_arm_deg` | — | Nullspace joint target of each arm (deg) |
+| `ee_null_right_arm_deg` / `ee_null_left_arm_deg` | `[40,-30,-5,-135,-10,20,40]` / `[40,30,5,-135,10,20,-40]` | Nullspace joint target of each arm (deg, `arm_0..6`); the left one is the right one mirrored |
 | `ee_nullspace_weight` / `ee_nullspace_stiffness` / `ee_nullspace_damping_ratio` | `[2,2,2,2,2,2,1]` / `0.2` / `0.7` | Nullspace gains |
 | `ee_posture_hint_weight` | `4.0` | Nullspace weight of arm joints that carry a posture hint in the action |
 | arm ready pose (not a parameter) | `arm_1` = −10° / +10° | In EE mode the ready pose keeps the upper arms close to the body (right / left `arm_1`); joint mode uses −65° / +65°. The other arm joints are the same in both modes |
@@ -812,8 +812,15 @@ Breaking changes in 0.3.1 (compared with the withdrawn 0.3.0):
   behaviour, e.g. for a policy trained on data recorded with it.
   The joint impedance torso torque limits are now the URDF effort limits
   `[270, 270, 270, 120, 120, 120]` (was `[500]*6`).
+- **Left arm nullspace target mirrored**: `left_arm_2` in `ee_null_left_arm_deg` is now `+5`
+  (was `-5`, the right arm's sign), so both arms are pulled towards mirrored postures. Pass
+  `--robot.ee_null_left_arm_deg='[40,30,-5,-135,10,20,-40]'` for the old target; a dataset
+  recorded with it shows up as a profile warning.
 - Robot profiles written by 0.3.0 are still read: field names are converted on load, and
   `profile_mode=apply` restores the fixed EE period they were recorded with.
+- The profile now holds the joint drivers' PID gains. The core serves them only while its
+  control manager is idle, so they are read before the control manager is enabled; earlier
+  profiles hold `<unavailable: ...>` there, which is not compared.
 
 LeRobot commands that do not apply to RB-Y1:
 

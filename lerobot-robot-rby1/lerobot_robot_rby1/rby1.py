@@ -166,6 +166,7 @@ class Rby1(Robot):
         # Profile: reference loaded from profile_in, and functions that undo
         # session-only core parameter changes on disconnect.
         self._reference_profile: dict[str, Any] | None = None
+        self._pid_gains: dict[str, Any] | None = None
         self._restore_fns: list[Any] = []
         # EE mode: dynamics model + FK state for end-effector observations.
         self._dyn_robot: Any = None
@@ -419,6 +420,9 @@ class Rby1(Robot):
                 )
                 if not self._robot.reset_fault_control_manager():
                     logger.warning("reset_fault_control_manager() returned False.")
+            # The joint drivers' PID gains belong in the profile, and the core
+            # serves them only while the control manager is Idle: read them now.
+            self._pid_gains = rprofile.read_pid_gains(self._robot)
             # EE mode runs the Cartesian impedance solver at teleop speeds and
             # needs the unlimited mode (as the VR teleoperator previously used).
             self._robot.enable_control_manager(
@@ -704,7 +708,9 @@ class Rby1(Robot):
             live_params = rprofile.read_core_parameters(self._robot)
         current = rprofile.build_profile(
             cfg,
-            robot=rprofile.read_robot_section(self._robot, self._resolved_model, self._resolved_version),
+            robot=rprofile.read_robot_section(
+                self._robot, self._resolved_model, self._resolved_version, pid_gains=self._pid_gains
+            ),
             core_parameters=live_params,
             version=self._resolved_version,
         )

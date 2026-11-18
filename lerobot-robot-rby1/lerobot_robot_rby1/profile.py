@@ -201,12 +201,37 @@ def read_core_parameters(sdk_robot: Any) -> dict[str, dict[str, Any]]:
     return params
 
 
-def _pid_gains(sdk_robot: Any) -> dict[str, Any]:
+PID_GAIN_GROUPS = ("torso", "right_arm", "left_arm", "head")
+
+
+def _unavailable(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith("<unavailable")
+
+
+def read_pid_gains(sdk_robot: Any) -> dict[str, Any]:
+    """Position PID gains of the joint drivers as ``{group: [[p, i, d], ...]}``.
+
+    The core answers this request only while the control manager is Idle; in
+    any other state it fails and writes an error to the robot log. So the
+    request is sent only when the control manager is Idle, and a group that was
+    not read holds an ``"<unavailable: ...>"`` string instead.
+    """
+    import rby1_sdk as rby
+
+    getters = {
+        group: getter
+        for group in PID_GAIN_GROUPS
+        if (getter := getattr(sdk_robot, f"get_{group}_position_pid_gains", None)) is not None
+    }
+    try:
+        state = sdk_robot.get_control_manager_state().state
+    except Exception as exc:  # noqa: BLE001
+        return {group: f"<unavailable: {exc.__class__.__name__}>" for group in getters}
+    if state != rby.ControlManagerState.State.Idle:
+        reason = f"<unavailable: control manager is {getattr(state, 'name', state)}>"
+        return {group: reason for group in getters}
     gains: dict[str, Any] = {}
-    for group in ("torso", "right_arm", "left_arm", "head"):
-        getter = getattr(sdk_robot, f"get_{group}_position_pid_gains", None)
-        if getter is None:
-            continue
+    for group, getter in getters.items():
         try:
             gains[group] = [[g.p_gain, g.i_gain, g.d_gain] for g in getter()]
         except Exception as exc:  # noqa: BLE001  (drivers may be unpowered)
@@ -224,8 +249,14 @@ def default_semantics(model: str, version: str) -> str:
     return f"rby1-{model}-v{version.replace('.', '')}-radians-gripper01-v1"
 
 
-def read_robot_section(sdk_robot: Any, model: str, version: str) -> dict[str, Any]:
-    """Identity and model data of the connected robot (read-only calls)."""
+def read_robot_section(
+    sdk_robot: Any, model: str, version: str, *, pid_gains: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Identity and model data of the connected robot (read-only calls).
+
+    ``pid_gains`` is the result of an earlier :func:`read_pid_gains` (taken
+    while the control manager was still Idle); without it they are read now.
+    """
     import rby1_sdk as rby
 
     section: dict[str, Any] = {
@@ -258,7 +289,7 @@ def read_robot_section(sdk_robot: Any, model: str, version: str) -> dict[str, An
         }
     except Exception as exc:  # noqa: BLE001
         section["joint_limits"] = f"<unavailable: {exc.__class__.__name__}>"
-    section["pid_gains"] = _pid_gains(sdk_robot)
+    section["pid_gains"] = read_pid_gains(sdk_robot) if pid_gains is None else pid_gains
     return section
 
 
@@ -392,6 +423,8 @@ def diff_profiles(reference: dict[str, Any], current: dict[str, Any]) -> list[Di
             if section == "robot_config" and key.startswith("robot_config.cameras.") and key.count(".") < 3:
                 continue
             ref_v, cur_v = ref_flat.get(key, "<missing>"), cur_flat.get(key, "<missing>")
+            if key.startswith("robot.pid_gains.") and (_unavailable(ref_v) or _unavailable(cur_v)):
+                continue  # not read on one side: nothing to compare
             if not _equal(ref_v, cur_v):
                 diffs.append(Diff(key, ref_v, cur_v, severity))
     # Values a format-1 profile held that the current fields cannot express.

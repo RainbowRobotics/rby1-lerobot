@@ -216,6 +216,13 @@ def test_ee_mode_ready_arms_stay_close_to_the_body() -> None:
         robot.disconnect()
 
 
+def test_ee_nullspace_targets_mirror_each_other() -> None:
+    """Left = right mirrored: the roll / yaw joints (arm_1, arm_2, arm_4, arm_6) change sign."""
+    cfg = Rby1Config(address="stub.invalid:1")
+    mirror = np.array([1.0, -1.0, -1.0, 1.0, -1.0, 1.0, -1.0])
+    assert cfg.ee_null_left_arm_deg == pytest.approx(mirror * np.asarray(cfg.ee_null_right_arm_deg))
+
+
 def test_ee_ready_torso_deg_length_is_checked() -> None:
     with pytest.raises(ValueError, match="ee_ready_torso_deg"):
         Rby1Config(address="stub.invalid:1", ee_ready_torso_deg=[0.0, 45.0])

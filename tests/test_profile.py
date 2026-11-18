@@ -152,6 +152,57 @@ def test_cli_export_is_read_only(tmp_path) -> None:
     assert data["core_parameters"]["joint_position_command.cutoff_frequency"]["value"] == 15.0
 
 
+# ── Joint driver PID gains ──────────────────────────────────────────────────
+PID_GROUP_SIZES = {"torso": 6, "right_arm": 7, "left_arm": 7, "head": 2}
+
+
+def test_pid_gains_are_read_while_the_control_manager_is_idle(tmp_path) -> None:
+    """The core serves PID gains only while Idle (the fake refuses otherwise, as the core does)."""
+    path = tmp_path / "p.json"
+    robot = _connect(profile_out=str(path))
+    fake = robot._robot
+    try:
+        gains = json.loads(path.read_text())["robot"]["pid_gains"]
+        assert {group: len(values) for group, values in gains.items()} == PID_GROUP_SIZES
+        assert gains["right_arm"][0] == [100.0, 0.0, 10.0]
+        # One request per group, all of them before enable_control_manager().
+        assert fake.n_pid_gain_reads == len(PID_GROUP_SIZES)
+        assert fake.get_control_manager_state().state == rby.ControlManagerState.State.Enabled
+        # While enabled nothing is requested: the core would log an error for each.
+        unread = rprofile.read_pid_gains(fake)
+        assert set(unread) == set(PID_GROUP_SIZES)
+        assert set(unread.values()) == {"<unavailable: control manager is Enabled>"}
+        assert fake.n_pid_gain_reads == len(PID_GROUP_SIZES)
+    finally:
+        robot.disconnect()
+
+
+def test_pid_gains_are_not_requested_from_an_enabled_control_manager(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("RBY1_FAKE_CM_ENABLED", "1")
+    path = tmp_path / "p.json"
+    robot = _connect(profile_out=str(path))
+    try:
+        assert robot._robot.n_pid_gain_reads == 0
+        gains = json.loads(path.read_text())["robot"]["pid_gains"]
+        assert set(gains) == set(PID_GROUP_SIZES)
+        assert set(gains.values()) == {"<unavailable: control manager is Enabled>"}
+    finally:
+        robot.disconnect()
+
+
+def test_unread_pid_gains_are_not_a_difference() -> None:
+    def profile(gains):
+        return {"robot": {"model": "a", "version": "1.2", "pid_gains": gains}}
+
+    read = {"torso": [[100.0, 0.0, 10.0]] * 6}
+    unread = {"torso": "<unavailable: RuntimeError>"}  # what profiles held before the gains were read while idle
+    assert rprofile.diff_profiles(profile(unread), profile(read)) == []
+    assert rprofile.diff_profiles(profile(read), profile(unread)) == []
+    changed = {"torso": [[120.0, 0.0, 10.0]] * 6}
+    diffs = rprofile.diff_profiles(profile(read), profile(changed))
+    assert [(d.key, d.severity) for d in diffs] == [("robot.pid_gains.torso", rprofile.WARN)]
+
+
 # ── Format 1 (plugin 0.3.0) profiles ────────────────────────────────────────
 V1_PROFILE = Path(__file__).parent / "data" / "profile_v1.json"  # written by the v0.3.0 code
 
@@ -180,11 +231,13 @@ def test_v1_profile_compares_and_applies(tmp_path, caplog) -> None:
     diffs = [d for d in rprofile.diff_profiles(ref, cur) if d.severity != rprofile.INFO]
     # Same settings: only the left-arm values that no longer exist, the fixed
     # EE period of 0.3.0, the joint impedance defaults changed in 0.3.1, the
-    # EE-mode damping ratios (1.0 -> 0.7) and the EE-mode arm ready pose
-    # (arm_1 -/+65 -> -/+10 deg) are reported.
+    # EE-mode damping ratios (1.0 -> 0.7), the left arm's nullspace target
+    # (arm_2 -5 -> +5 deg) and the EE-mode arm ready pose (arm_1 -/+65 -> -/+10
+    # deg) are reported.
     assert sorted(d.key for d in diffs) == [
         "plugin_constants.ready_pose.body",
         "robot_config.ee_arm_damping_ratio", "robot_config.ee_auto_action_period",
+        "robot_config.ee_null_left_arm_deg",
         "robot_config.ee_nullspace_damping_ratio", "robot_config.ee_torso_damping_ratio",
         "robot_config.joint_impedance_arm_stiffness",
         "robot_config.joint_impedance_arm_torque_limit",

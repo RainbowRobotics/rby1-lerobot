@@ -79,7 +79,7 @@ ALL_JOINT_NAMES: list[str] = TORSO_NAMES + RIGHT_ARM_NAMES + LEFT_ARM_NAMES
 
 # Nullspace arm targets (degrees) used by the EE arm solvers.
 DEFAULT_NULL_RIGHT_DEG = [40.0, -30.0, -5.0, -135.0, -10.0, 20.0,  40.0]
-DEFAULT_NULL_LEFT_DEG  = [40.0,  30.0, -5.0, -135.0,  10.0, 20.0, -40.0]
+DEFAULT_NULL_LEFT_DEG  = [40.0,  30.0,  5.0, -135.0,  10.0, 20.0, -40.0]
 
 # Joint limits enforced by the Cartesian impedance solvers (radians).
 DEFAULT_TORSO_JOINT_LIMITS: JointLimits = {

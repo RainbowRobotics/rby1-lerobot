@@ -343,9 +343,15 @@ class FakeRobot:
         self._connected = False
         self._power = os.environ.get("RBY1_FAKE_POWER", "0") == "1"
         self._servo = False
-        self._cm = ControlManagerState.State.Idle
+        # RBY1_FAKE_CM_ENABLED=1: another client left the control manager enabled.
+        self._cm = (
+            ControlManagerState.State.Enabled
+            if os.environ.get("RBY1_FAKE_CM_ENABLED") == "1"
+            else ControlManagerState.State.Idle
+        )
         self._ctrl = ControlManagerState.ControlState.Idle
         self.n_commands = 0
+        self.n_pid_gain_reads = 0
         self.n_stream_commands = 0
         self.last_stream_command = None  # the last builder sent on a command stream
         _ROBOTS.append(self)
@@ -458,6 +464,10 @@ class FakeRobot:
         return f"<robot name='fake_{self._model_name}'/>"
 
     def _pid(self, n):
+        # As the real core: served only while the control manager is Idle.
+        self.n_pid_gain_reads += 1
+        if self._cm != ControlManagerState.State.Idle:
+            raise RuntimeError("Control Manager is enabled. PID gain retrieval unavailable.")
         return [_PIDGain(100.0, 0.0, 10.0) for _ in range(n)]
 
     def get_torso_position_pid_gains(self):
