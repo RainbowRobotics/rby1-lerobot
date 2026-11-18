@@ -66,9 +66,9 @@ def compute_gates(
         posture_hints=active,
         torso=torso_hold is None,
         head=head_base,
-        # The grippers only wait for the start: they keep following the
-        # triggers while stopped (Right B) and during a return.
-        grippers=mode.started,
+        # The grippers hold with everything else while stopped (Right B);
+        # during a return they keep following the triggers.
+        grippers=mode.started and not mode.stopped,
         base=base,
         base_sticks=base and not mode.body_drive,
         body_drive=body_drive_enabled and base,

@@ -58,6 +58,11 @@ _CALIBRATION_MIN_SAMPLES = 5
 _CALIBRATION_KEEP_RATIO = 0.95
 
 
+# shoulder_source → the inputs an arm's operator shoulder may come from, in order of preference.
+_SHOULDER_SOURCES = {"auto": ("body", "headset"), "body": ("body",), "headset": ("headset",)}
+_SHOULDER_SOURCE_NAMES = {"body": "body tracking", "headset": "the headset estimate"}
+
+
 class XrTeleopCore:
     """XR input + measured robot state -> robot targets, one :meth:`step` per tick."""
 
@@ -102,6 +107,13 @@ class XrTeleopCore:
         self._abs_ramp: dict[str, tuple[float, np.ndarray, float] | None] = {"right": None, "left": None}
         self._abs_state: dict[str, str] = {"right": "hold", "left": "hold"}
         self._abs_last_body_t: dict[str, float | None] = {"right": None, "left": None}
+        # Where each arm's operator shoulder comes from ("body" / "headset").
+        # _shoulder_fed: the source that last updated it. _shoulder_locked: the
+        # source the arm engaged with; from then on only that one is used, until
+        # the operator frame is re-referenced (Right A). Switching sources moves
+        # the shoulder, and with it the hand target, by several centimetres.
+        self._shoulder_fed: dict[str, str | None] = {"right": None, "left": None}
+        self._shoulder_locked: dict[str, str | None] = {"right": None, "left": None}
         self._posture: dict[str, ArmPostureRetargeter] = {}
         self._hints: dict[str, np.ndarray | None] = {"right": None, "left": None}
         # head_base_require_grip: a grip is squeezed (dead-man of head and base).
@@ -207,6 +219,7 @@ class XrTeleopCore:
         self._body_drive = None
         self._body_drive_blocked = False
         self._grip_held = False
+        self._shoulder_locked = {side: None for side in self._shoulder_locked}
         # The follower connects (and moves to its ready pose) after this, so
         # the targets are re-seeded again on the first get_action().
         self._needs_initial_resync = True
@@ -426,6 +439,8 @@ class XrTeleopCore:
             return
         for mapper in self._abs.values():
             mapper.reset_shoulder()
+        self._shoulder_fed = {side: None for side in self._shoulder_fed}
+        self._shoulder_locked = {side: None for side in self._shoulder_locked}
         for retargeter in self._posture.values():
             retargeter.reset()
         # Hints derived from the old frame must not be emitted any more.
@@ -903,17 +918,22 @@ class XrTeleopCore:
         cfg = self.settings
 
         S, E, W = self._body_points(frame, side)
-        src = cfg.shoulder_source
-        use_body = src in ("auto", "body") and S is not None
-        if use_body:
+        # Before the arm's first engage "auto" takes the body shoulder when it
+        # is valid and the headset estimate otherwise; after it, only the
+        # source it engaged with (see _shoulder_locked).
+        locked = self._shoulder_locked[side]
+        sources = (locked,) if locked is not None else _SHOULDER_SOURCES[cfg.shoulder_source]
+        if "body" in sources and S is not None:
             mapper.observe_body(S, E, W)
+            self._shoulder_fed[side] = "body"
             self._abs_last_body_t[side] = t
-        elif src in ("auto", "headset") and frame.head is not None:
+        elif "headset" in sources and frame.head is not None:
             # Estimate the shoulder from the headset position (operator frame
             # is yaw-referenced: +x forward, +y left).
             ox, oy, oz = cfg.neck_shoulder_offset
             est = frame.head.position + np.array([ox, oy if side == "left" else -oy, oz])
             mapper.set_shoulder(est)
+            self._shoulder_fed[side] = "headset"
             self._abs_last_body_t[side] = t
         body_ok = self._abs_last_body_t[side] is not None and t - self._abs_last_body_t[side] <= cfg.abs_hold_s
         if cfg.arm_length_source == "calibrate":
@@ -945,7 +965,14 @@ class XrTeleopCore:
             release("hold")
             return
         if not body_ok:
-            release("hold (no body)")
+            lost = "hold (no headset)" if locked == "headset" else "hold (no body)"
+            if locked is not None and self._abs_state[side] != lost:
+                logger.warning(
+                    "%s arm holds: its shoulder comes from %s, which has been lost for more than %.1f s. "
+                    "It follows again when that tracking returns; Right A starts over.",
+                    side, _SHOULDER_SOURCE_NAMES[locked], cfg.abs_hold_s,
+                )
+            release(lost)
             return
         if not clutch.engaged and self._needs_offset_latch[side]:
             self._latch_ee_offsets(side, ctrl, snap)
@@ -955,6 +982,12 @@ class XrTeleopCore:
             return
 
         if not clutch.engaged:
+            if locked is None and self._shoulder_fed[side] is not None:
+                self._shoulder_locked[side] = self._shoulder_fed[side]
+                logger.info(
+                    "%s arm: operator shoulder from %s until the next Right A.",
+                    side, _SHOULDER_SOURCE_NAMES[self._shoulder_fed[side]],
+                )
             clutch.engage(measured)
             self._abs_ramp[side] = (t, clutch.last_commanded.copy(), max(cfg.engage_ramp_s, 0.05))
             mapper.reset_rate_limit(None)
@@ -1117,7 +1150,7 @@ class XrTeleopCore:
         # hand pointing at / holding a camera-panel handle keeps its last gripper
         # value: its trigger is a UI click, not a gripper command.
         if not gates.grippers:
-            return  # keep the grippers where they are until the first Right A
+            return  # keep the grippers where they are before the first Right A and while stopped
         ui = self._ui_active
         for side, ctrl in (("right", frame.right), ("left", frame.left)):
             if ctrl is None:

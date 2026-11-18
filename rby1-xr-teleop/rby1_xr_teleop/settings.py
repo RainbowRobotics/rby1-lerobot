@@ -47,7 +47,12 @@ class XrTeleopSettings:
     wear_mode: str = "head"
     neck_torso_smoothing: float = 0.3     # EMA on the headset pose driving the torso
     neck_shoulder_offset: list[float] = field(default_factory=lambda: [-0.05, 0.20, -0.15])  # from the headset, left side (y mirrored for right)
-    shoulder_source: str = "auto"         # absolute mode: "body" | "headset" | "auto" (body when valid)
+    # Where the operator's shoulder comes from: "body" (tracked shoulder joint),
+    # "headset" (headset position + neck_shoulder_offset) or "auto": the body
+    # when it is tracked as an arm first engages, else the headset. The arm
+    # then keeps that source until the next Right A; if it is lost for longer
+    # than abs_hold_s the arm holds instead of switching to the other one.
+    shoulder_source: str = "auto"
 
     # ── Arm mapping (absolute) ────────────────────────────────────────
     # The hand position RELATIVE TO THE OPERATOR'S SHOULDER (IOBT body
@@ -96,7 +101,7 @@ class XrTeleopSettings:
     # head_*_offset_deg (the head jumps to the gaze after Right A).
     head_latch_on_a: bool = True
     ee_orientation_offset_rpy_deg: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
-    abs_hold_s: float = 1.0                 # keep following this long without body joints
+    abs_hold_s: float = 1.0                 # keep following this long without the shoulder's source, then hold
 
     # ── IOBT arm posture → nullspace hint ─────────────────────────────
     # Shoulder / elbow / hand positions are retargeted to arm_0..arm_3 and sent

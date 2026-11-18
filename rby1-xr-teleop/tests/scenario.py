@@ -226,8 +226,11 @@ def run_default_scenario(s: ScenarioSession) -> ScenarioSession:
     a = s.tick("right-b")
     op.right_b = False
     assert core.stopped and [a[k] for k in BASE_KEYS] == [0.0, 0.0, 0.0]
-    s.hold(5, "stopped")
-    set_op(left_x=False, **no_grips)
+    # The grippers hold too: a trigger pulled while stopped does nothing.
+    op.right_trigger = 1.0
+    b = s.hold(5, "stopped")
+    assert b["right_gripper_0.pos"] == pytest.approx(a["right_gripper_0.pos"]) == pytest.approx(0.5)
+    set_op(left_x=False, right_trigger=0.5, **no_grips)
     s.tick("stopped")
 
     # 9. Right A resumes and returns to the start pose (the follower's ready-pose motion).
@@ -247,22 +250,31 @@ def run_default_scenario(s: ScenarioSession) -> ScenarioSession:
     assert _pose(b, "right_ee") == pytest.approx(_pose(a, "right_ee"), abs=1e-9)
     s.hold(65, "ramp")
 
-    # 11. Body tracking lost while clutched: the torso holds. The arms keep following
-    #     with the shoulder estimated from the headset (shoulder_source="auto").
+    # 11. Body tracking lost while clutched: the torso holds. The arms follow for
+    #     abs_hold_s more with the shoulder where it was, then hold. The shoulder does
+    #     not change over to the headset estimate, which would shift the hand targets.
+    before = s.rows[-1][1]
+    assert core._shoulder_locked == {"right": "body", "left": "body"}
     op.body_tracked = False
     a = s.hold(40, "no-body")
-    assert not core._clutch["torso"].engaged and core._clutch["right"].engaged
-    # Headset lost as well, for longer than abs_hold_s: now the arms hold too.
-    op.head_tracked = False
-    s.hold(34, "no-body-no-head")
-    a = s.hold(6, "no-body-no-head")
+    assert not core._clutch["torso"].engaged
     assert not core._clutch["right"].engaged and not core._clutch["left"].engaged
+    assert core._abs_state["right"] == core._abs_state["left"] == "hold (no body)"
+    for prefix in ("right_ee", "left_ee"):
+        assert _pose(a, prefix)[:3] == pytest.approx(_pose(before, prefix)[:3], abs=1e-4)
+    # While they hold, a moving hand or a lost headset changes nothing.
+    op.head_tracked = False
+    s.move(10, "no-body-no-head", right_hand=(0.45, -0.05, -0.15))
+    b = s.hold(14, "no-body-no-head")
+    assert _pose(b, "right_ee") == pytest.approx(_pose(a, "right_ee"), abs=1e-12)
+    s.move(10, "no-body-no-head", right_hand=(0.35, -0.05, -0.25))
+    a = s.hold(6, "no-body-no-head")
     # Tracking is back: the arms ramp in again from where they held.
     set_op(body_tracked=True, head_tracked=True)
     b = s.tick("tracking-back")
     assert _pose(b, "right_ee") == pytest.approx(_pose(a, "right_ee"), abs=1e-9)
     s.hold(69, "tracking-back")
-    assert core._clutch["right"].engaged
+    assert core._clutch["right"].engaged and core._shoulder_locked["right"] == "body"
 
     # 12. The headset is lost during a body drive: the base stops until Left X is pressed again.
     op.left_x = True

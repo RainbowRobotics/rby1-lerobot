@@ -29,10 +29,10 @@ def test_gates(mode: Mode, require_grip: bool) -> None:
     assert g.head == gripped and g.base == gripped
     assert g.base_sticks == (gripped and not mode.body_drive)
     assert g.body_drive == gripped
-    # The grippers only wait for the start.
-    assert g.grippers == mode.started
+    # The grippers wait for the start and hold while stopped; a return does not hold them.
+    assert g.grippers == (mode.started and not mode.stopped)
 
-    # Nothing but the grippers may move unless teleoperation is live.
+    # Nothing but the grippers (during a return) may move unless teleoperation is live.
     if not live:
         assert not (g.arms or g.posture_hints or g.torso or g.head or g.base or g.base_sticks or g.body_drive)
 
